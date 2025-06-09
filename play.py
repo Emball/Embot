@@ -208,10 +208,10 @@ def setup_play(bot):
         # Check voice channel
         voice_channel = interaction.user.voice.channel if interaction.user.voice else None
         if not voice_channel:
-            default_channel = discord.utils.get(interaction.guild.voice_channels, name="Voice 1")
+            default_channel = discord.utils.get(interaction.guild.voice_channels, name="voice 1")
             if not default_channel:
                 await interaction.response.send_message(
-                    "❌ You're not in a voice channel and no default 'Voice 1' channel exists!"
+                    "❌ You're not in a voice channel!"
                 )
                 return
             voice_channel = default_channel

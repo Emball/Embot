@@ -60,7 +60,7 @@ async def setup_google_sheets(bot):
                 for col_idx, value in enumerate(row):
                     header = headers[col_idx] if col_idx < len(headers) else f"Extra_{col_idx+1}"
                     entry[header] = str(value).strip()
-                unique_id = f"{entry.get('Track Name', '')}-{entry.get('Version', '')}".strip('-') or f"row-{idx+2}"
+                unique_id = f"{entry.get('Name', '')}-{entry.get('Version', '')}".strip('-') or f"row-{idx+2}"
                 bot.cached_values[unique_id] = entry
         
         print("Google Sheets connected successfully")
@@ -76,7 +76,7 @@ def get_sheet_diffs(bot, current_data, current_headers):
     
     if not bot.cached_values:
         for entry in current_data:
-            unique_id = f"{entry.get('Track Name', '')}-{entry.get('Version', '')}".strip('-') or f"row-{len(new_cache)+2}"
+            unique_id = f"{entry.get('Name', '')}-{entry.get('Version', '')}".strip('-') or f"row-{len(new_cache)+2}"
             new_cache[unique_id] = entry
             diffs.append({'type': 'add', 'id': unique_id, 'data': entry})
         return diffs, new_cache
@@ -88,7 +88,7 @@ def get_sheet_diffs(bot, current_data, current_headers):
     }
     
     for idx, entry in enumerate(current_data):
-        unique_id = f"{entry.get('Track Name', '')}-{entry.get('Version', '')}".strip('-') or f"row-{idx+2}"
+        unique_id = f"{entry.get('Name', '')}-{entry.get('Version', '')}".strip('-') or f"row-{idx+2}"
         new_cache[unique_id] = entry
         
         if unique_id in bot.cached_values:
@@ -106,7 +106,7 @@ def get_sheet_diffs(bot, current_data, current_headers):
                         'header': header,
                         'old': old_val,
                         'new': new_val,
-                        'track_name': entry.get('Track Name', 'Unknown Track'),
+                        'name': entry.get('Name', 'Unknown Track'),
                         'era': entry.get('Era', 'Unknown Era')
                     })
         else:
@@ -114,7 +114,7 @@ def get_sheet_diffs(bot, current_data, current_headers):
                 'type': 'add', 
                 'id': unique_id, 
                 'data': entry,
-                'track_name': entry.get('Track Name', 'New Track'),
+                'name': entry.get('Name', 'New Track'),
                 'era': entry.get('Era', 'Unknown Era')
             })
     
@@ -125,7 +125,7 @@ def get_sheet_diffs(bot, current_data, current_headers):
                 'type': 'remove', 
                 'id': old_id, 
                 'data': old_entry,
-                'track_name': old_entry.get('Track Name', 'Removed Track'),
+                'name': old_entry.get('Name', 'Removed Track'),
                 'era': old_entry.get('Era', 'Unknown Era')
             })
     
@@ -188,7 +188,7 @@ async def tracker_update_loop(bot):
                     
                 # Create update embed
                 embed = discord.Embed(
-                    title=f"Updated {change['header']}: {change['track_name']}",
+                    title=f"Updated {change['header']}: {change['name']}",
                     color=discord.Color.from_str("#a56b5d"),  # Brown color from example
                     timestamp=datetime.datetime.utcnow()
                 )
@@ -215,7 +215,7 @@ async def tracker_update_loop(bot):
             elif change['type'] == 'add':
                 # Create add embed
                 embed = discord.Embed(
-                    title=f"Added: {change['track_name']}",
+                    title=f"Added: {change['name']}",
                     color=discord.Color.green(),
                     timestamp=datetime.datetime.utcnow()
                 )
@@ -240,7 +240,7 @@ async def tracker_update_loop(bot):
             elif change['type'] == 'remove':
                 # Create remove embed
                 embed = discord.Embed(
-                    title=f"Removed: {change['track_name']}",
+                    title=f"Removed: {change['name']}",
                     color=discord.Color.red(),
                     timestamp=datetime.datetime.utcnow()
                 )

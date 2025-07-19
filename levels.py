@@ -2,57 +2,78 @@
 import discord
 import json
 import math
+import logging
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
-from config import *
+from config import (
+    REACTION_WEIGHTS,
+    XP_REWARDS,
+    LOG_FORMAT,
+    LOG_DATE_FORMAT
+)
 
-# Configuration remains the same
+logger = logging.getLogger('levels')
+
 LEVELS_FILE = "levels.json"
 BASE_XP = 100
 XP_MULTIPLIER = 1.5
-REACTION_WEIGHTS = {
-    "🔥": 5,
-    "😐": 0,
-    "🗑️": -5
-}
-MESSAGE_XP = 5
-VOICE_XP_PER_MINUTE = 1
-MAX_PROGRESS_BAR_LENGTH = 10  # Reduced from 15 to make it more mobile-friendly
+MAX_PROGRESS_BAR_LENGTH = 10
 
 class LevelSystem:
     def __init__(self, bot):
         self.bot = bot
         self.data = self._load_data()
         self.reaction_tracker = set()
-        
+        logger.info("Level system initialized")
+
     def _load_data(self):
+        """Load level data with proper defaultdict conversion"""
         try:
             if Path(LEVELS_FILE).exists():
                 with open(LEVELS_FILE, 'r') as f:
-                    return json.load(f)
+                    data = json.load(f)
+                
+                # Convert reactions_received to defaultdict
+                for user_data in data.values():
+                    if "reactions_received" in user_data:
+                        if isinstance(user_data["reactions_received"], dict):
+                            user_data["reactions_received"] = defaultdict(
+                                int, 
+                                {k: v for k, v in user_data["reactions_received"].items() 
+                                if k in REACTION_WEIGHTS}
+                            )
+                        else:
+                            user_data["reactions_received"] = defaultdict(int)
+                logger.info("Loaded level data from file")
+                return data
         except Exception as e:
-            print(f"Error loading levels data: {e}")
+            logger.error(f"Error loading levels data: {e}")
         return {}
-    
+
     def _save_data(self):
+        """Save level data with error handling"""
         try:
             with open(LEVELS_FILE, 'w') as f:
                 json.dump(self.data, f, indent=2)
+            logger.debug("Level data saved successfully")
         except Exception as e:
-            print(f"Error saving levels data: {e}")
-    
+            logger.error(f"Error saving levels data: {e}")
+
     def _calculate_level(self, xp):
+        """Calculate level from XP"""
         if xp < BASE_XP:
             return 0
         return int(math.log(xp / BASE_XP, XP_MULTIPLIER)) + 1
-    
+
     def _calculate_xp_needed(self, level):
+        """Calculate XP needed for a level"""
         if level == 0:
             return BASE_XP
         return int(BASE_XP * (XP_MULTIPLIER ** (level - 1)))
-    
+
     def _get_progress(self, xp, level):
+        """Calculate progress to next level"""
         if level == 0:
             return min(1.0, xp / BASE_XP)
         
@@ -64,118 +85,113 @@ class LevelSystem:
         
         progress = (xp - current_level_xp) / (next_level_xp - current_level_xp)
         return min(progress, 1.0)
-    
+
     async def add_xp(self, user_id, xp, message=None):
+        """Add XP to a user with logging"""
         user_id = str(user_id)
+        logger.debug(f"Adding {xp} XP to user {user_id}")
         
         if user_id not in self.data:
             self.data[user_id] = {
                 "xp": 0,
-                "last_message": None,  # Global cooldown
+                "last_message": None,
                 "voice_time": 0,
                 "reactions_received": defaultdict(int)
             }
         
-        # Add XP globally
-        self.data[user_id]["xp"] += xp
-        if self.data[user_id]["xp"] < 0:
-            self.data[user_id]["xp"] = 0
+        self.data[user_id]["xp"] = max(0, self.data[user_id]["xp"] + xp)
         
-        # Check for level up
         old_level = self._calculate_level(self.data[user_id]["xp"] - xp)
         new_level = self._calculate_level(self.data[user_id]["xp"])
         
         if new_level > old_level and message:
+            logger.info(f"User {user_id} leveled up from {old_level} to {new_level}")
             await self._send_level_up_message(user_id, old_level, new_level, message)
         
         self._save_data()
-    
+
     async def _send_level_up_message(self, user_id, old_level, new_level, message):
-        user = await self.bot.fetch_user(int(user_id))
-        xp = self.data[user_id]["xp"]
-        reactions = self.data[user_id]["reactions_received"]
-        
-        if old_level > 0:
-            level_start_xp = self._calculate_xp_needed(old_level)
-            level_end_xp = self._calculate_xp_needed(old_level + 1)
-            progress = min(1.0, (xp - level_start_xp) / (level_end_xp - level_start_xp))
-        else:
-            progress = min(1.0, xp / BASE_XP)
-        
-        fire_count = reactions.get("🔥", 0)
-        trash_count = reactions.get("🗑️", 0)
-        neutral_count = reactions.get("😐", 0)
-        
-        reaction_tally = f"🔥 {fire_count} | 🗑️ {trash_count} | 😐 {neutral_count}"
-        
-        embed = discord.Embed(
-            title="🎉 Level Up!",
-            description=f"**{user.display_name}** has reached level **{new_level}**!",
-            color=discord.Color.gold()
-        )
-        
-        progress_bar = self._create_progress_bar(progress)
-        embed.add_field(
-            name=f"Level {old_level} Completion", 
-            value=f"{progress_bar}\n{progress*100:.1f}% completed",
-            inline=False
-        )
-        
-        embed.add_field(
-            name="Reactions Received",
-            value=reaction_tally,
-            inline=False
-        )
-        
-        embed.add_field(name="Total XP", value=f"{xp:,}", inline=True)
-        embed.add_field(name="Next Level Goal", value=f"{self._calculate_xp_needed(new_level + 1):,} XP", inline=True)
-        
+        """Send level up announcement"""
         try:
-            if user.banner:
-                embed.set_image(url=user.banner.url)
-        except:
-            pass
-        
-        try:
-            if not embed.image and user.avatar:
+            user = await self.bot.fetch_user(int(user_id))
+            xp = self.data[user_id]["xp"]
+            reactions = self.data[user_id]["reactions_received"]
+            
+            if old_level > 0:
+                level_start_xp = self._calculate_xp_needed(old_level)
+                level_end_xp = self._calculate_xp_needed(old_level + 1)
+                progress = min(1.0, (xp - level_start_xp) / (level_end_xp - level_start_xp))
+            else:
+                progress = min(1.0, xp / BASE_XP)
+            
+            # Build reaction tally string
+            reaction_tally = []
+            for emoji in REACTION_WEIGHTS:
+                if emoji in reactions:
+                    reaction_tally.append(f"{emoji} {reactions[emoji]}")
+            
+            embed = discord.Embed(
+                title="🎉 Level Up!",
+                description=f"**{user.display_name}** has reached level **{new_level}**!",
+                color=discord.Color.gold()
+            )
+            
+            progress_bar = self._create_progress_bar(progress)
+            embed.add_field(
+                name=f"Level {old_level} Completion", 
+                value=f"{progress_bar}\n{progress*100:.1f}% completed",
+                inline=False
+            )
+            
+            if reaction_tally:
+                embed.add_field(
+                    name="Reactions Received",
+                    value=" | ".join(reaction_tally),
+                    inline=False
+                )
+            
+            embed.add_field(name="Total XP", value=f"{xp:,}", inline=True)
+            embed.add_field(name="Next Level Goal", value=f"{self._calculate_xp_needed(new_level + 1):,} XP", inline=True)
+            
+            if user.avatar:
                 embed.set_thumbnail(url=user.avatar.url)
-        except:
-            pass
-        
-        # Always send to general channel regardless of where level up occurred
-        general_channel = discord.utils.get(message.guild.text_channels, name="general")
-        if general_channel is None:
-            general_channel = message.guild.system_channel or message.guild.text_channels[0]
-        
-        try:
-            await general_channel.send(embed=embed)
+            
+            general_channel = discord.utils.get(
+                message.guild.text_channels, 
+                name="general"
+            ) or message.guild.system_channel
+            
+            if general_channel:
+                await general_channel.send(embed=embed)
         except Exception as e:
-            print(f"Error sending level up message: {e}")
-    
+            logger.error(f"Error sending level up message: {e}")
+
     def _create_progress_bar(self, progress):
+        """Create visual progress bar"""
         filled = round(progress * MAX_PROGRESS_BAR_LENGTH)
         empty = MAX_PROGRESS_BAR_LENGTH - filled
-        return ":green_square:" * filled + ":black_large_square:" * empty
-    
+        return "🟩" * filled + "⬛" * empty
+
     def get_user_stats(self, user_id):
+        """Get formatted user stats"""
         user_id = str(user_id)
         if user_id not in self.data:
             return None
         
         xp = self.data[user_id]["xp"]
         level = self._calculate_level(xp)
-        progress = self._get_progress(xp, level)
         
         return {
             "level": level,
             "xp": xp,
             "next_level_xp": self._calculate_xp_needed(level + 1),
             "current_level_xp": self._calculate_xp_needed(level),
-            "progress": progress,
+            "progress": self._get_progress(xp, level),
             "reactions_received": dict(self.data[user_id]["reactions_received"])
         }
-    
+
     async def handle_message_xp(self, message):
+        """Handle message XP with cooldown"""
         if message.author.bot:
             return
             
@@ -189,16 +205,16 @@ class LevelSystem:
                 "reactions_received": defaultdict(int)
             }
         
-        # Global cooldown (1 minute)
         last_msg = self.data[user_id].get("last_message")
         now = datetime.utcnow().timestamp()
         
         if last_msg is None or (now - last_msg) > 60:
-            await self.add_xp(message.author.id, MESSAGE_XP, message)
+            await self.add_xp(message.author.id, XP_REWARDS["message"], message)
             self.data[user_id]["last_message"] = now
             self._save_data()
-    
+
     async def handle_voice_xp(self, member, before, after):
+        """Handle voice XP tracking"""
         if member.bot:
             return
             
@@ -220,7 +236,7 @@ class LevelSystem:
             join_time = self.data[user_id].get("voice_join_time")
             if join_time:
                 minutes = (datetime.utcnow().timestamp() - join_time) / 60
-                xp = int(minutes * VOICE_XP_PER_MINUTE)
+                xp = int(minutes * XP_REWARDS["voice_minute"])
                 if xp > 0:
                     await self.add_xp(member.id, xp)
                 self.data[user_id]["voice_time"] += minutes
@@ -228,8 +244,9 @@ class LevelSystem:
                     del self.data[user_id]["voice_join_time"]
                 self._save_data()
 
-def setup_level_commands(bot, level_system):
-    print("Setting up level commands...")
+def setup(bot):  # Changed from setup_level_commands
+    """Setup level-related slash commands"""
+    logger.info("Setting up level commands...")
     
     @bot.tree.command(name="level", description="Check your current level and XP")
     async def level(interaction: discord.Interaction, user: discord.User = None):
@@ -259,23 +276,19 @@ def setup_level_commands(bot, level_system):
         )
         
         if stats["reactions_received"]:
-            fire_count = stats["reactions_received"].get("🔥", 0)
-            trash_count = stats["reactions_received"].get("🗑️", 0)
-            neutral_count = stats["reactions_received"].get("😐", 0)
-            reaction_tally = f"🔥 {fire_count} | 🗑️ {trash_count} | 😐 {neutral_count}"
-            embed.add_field(name="Reactions Received", value=reaction_tally, inline=False)
+            reaction_tally = []
+            for emoji in REACTION_WEIGHTS:
+                if emoji in stats["reactions_received"]:
+                    reaction_tally.append(f"{emoji} {stats['reactions_received'][emoji]}")
+            embed.add_field(name="Reactions Received", value=" | ".join(reaction_tally), inline=False)
         
-        try:
-            if target_user.avatar:
-                embed.set_thumbnail(url=target_user.avatar.url)
-        except:
-            pass
+        if target_user.avatar:
+            embed.set_thumbnail(url=target_user.avatar.url)
         
         await interaction.response.send_message(embed=embed)
 
     @bot.tree.command(name="leaderboard", description="Show the top 10 users by XP")
     async def leaderboard(interaction: discord.Interaction):
-        # Global leaderboard (all servers)
         sorted_users = sorted(
             level_system.data.items(),
             key=lambda x: x[1]["xp"],
@@ -295,12 +308,11 @@ def setup_level_commands(bot, level_system):
         for rank, (user_id, data) in enumerate(sorted_users, 1):
             try:
                 user = await interaction.client.fetch_user(int(user_id))
-                if user:
-                    user_level = level_system._calculate_level(data["xp"])
-                    description.append(f"{rank}. {user.display_name} - Level {user_level} ({data['xp']:,} XP)")
+                level = level_system._calculate_level(data["xp"])
+                description.append(f"{rank}. {user.display_name} - Level {level} ({data['xp']:,} XP)")
             except:
-                user_level = level_system._calculate_level(data["xp"])
-                description.append(f"{rank}. Unknown User - Level {user_level} ({data['xp']:,} XP)")
+                level = level_system._calculate_level(data["xp"])
+                description.append(f"{rank}. Unknown User - Level {level} ({data['xp']:,} XP)")
         
         embed.description = "\n".join(description)
         await interaction.response.send_message(embed=embed)

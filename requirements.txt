@@ -5,3 +5,16 @@ mutagen==1.47.0
 google-api-python-client==2.120.0
 PyNaCl==1.5.0
 python-dotenv==1.0.1
+pyacoustid==1.2.2
+requests==2.31.0
+beautifulsoup4==4.12.2
+numpy
+aiofiles==23.2.1
+pydub
+pychromaprint
+ffmpeg
+numpy 
+audioread 
+aiohttp 
+mutagen 
+beautifulsoup4

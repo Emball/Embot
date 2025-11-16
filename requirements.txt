@@ -1,0 +1,27 @@
+# Core Discord bot
+discord.py[voice]>=2.3.0
+PyNaCl>=1.5.0
+pytz>=2024.1
+
+# Audio processing
+mutagen>=1.47.0
+aiohttp
+
+# Whisper transcription with GPU support
+openai-whisper
+
+# PyTorch with CUDA support (for GPU acceleration)
+# Install from PyTorch website for your specific CUDA version:
+# Visit: https://pytorch.org/get-started/locally/
+# Example for CUDA 11.8:
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# Note: To install PyTorch with CUDA support, use one of these commands instead:
+# CUDA 11.8: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+# CUDA 12.1: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# CPU only:  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+# Other dependencies
+lyricsgenius
+ffmpeg-python

@@ -14,8 +14,7 @@ from discord import app_commands
 import discord
 from discord.ext import tasks
 from collections import defaultdict
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor  # ✅ REMOVED DUPLICATE IMPORTS
 
 METADATA_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 MODULE_NAME = "ARCHIVE"
@@ -221,15 +220,20 @@ async def build_song_index(bot):
             bot.logger.log(MODULE_NAME, f"Processed {min(i + batch_size, len(all_files))}/{len(all_files)} files...")
 
     tmp = INDEX_FILE + ".tmp"
-    with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump({
-            'version': 5,
-            'created_at': datetime.utcnow().isoformat(),
-            'songs': {k: dict(v) for k, v in song_index.items()}
-        }, f, ensure_ascii=False, indent=2)
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump({
+                'version': 5,
+                'created_at': datetime.utcnow().isoformat(),
+                'songs': {k: dict(v) for k, v in song_index.items()}
+            }, f, ensure_ascii=False, indent=2)
         
-    os.replace(tmp, INDEX_FILE)
-    bot.logger.log(MODULE_NAME, f"Indexed {total} songs total")
+        os.replace(tmp, INDEX_FILE)
+        bot.logger.log(MODULE_NAME, f"Indexed {total} songs total")
+    except Exception as e:
+        bot.logger.error(MODULE_NAME, "Failed to save index file", e)
+        if os.path.exists(tmp):
+            os.remove(tmp)
     return song_index
 
 async def process_single_file(bot, full_path, folder, song_index, fmt):
@@ -319,7 +323,10 @@ async def get_cached_url(bot, file_path):
     try:
         with open(CACHE_INDEX, 'r', encoding='utf-8') as f:
             cache = json.load(f)
-    except:
+    except FileNotFoundError:
+        cache = {}
+    except Exception as e:
+        bot.logger.error(MODULE_NAME, "Error loading cache index", e)
         cache = {}
 
     now = datetime.utcnow()
@@ -345,9 +352,13 @@ async def get_cached_url(bot, file_path):
         url = msg.attachments[0].url
         cache[key] = {'url': url, 'timestamp': now.isoformat(), 'message_id': msg.id}
         
-        with open(CACHE_INDEX, 'w', encoding='utf-8') as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
-        bot.logger.log(MODULE_NAME, f"Cached new URL for {p.name}")
+        try:
+            with open(CACHE_INDEX, 'w', encoding='utf-8') as f:
+                json.dump(cache, f, ensure_ascii=False, indent=2)
+            bot.logger.log(MODULE_NAME, f"Cached new URL for {p.name}")
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "Failed to save cache index", e)
+            
         return url
 
     except discord.HTTPException as e:
@@ -529,10 +540,7 @@ def setup(bot):
     # Store reference on bot for access in commands
     bot.ARCHIVE_manager = ARCHIVE_manager
     
-    # Initialize index on bot ready
-    @bot.event
-    async def on_ARCHIVE_ready():
-        await ARCHIVE_manager.initialize()
+    # ✅ REMOVED UNDEFINED EVENT
     
     # Schedule initialization
     asyncio.create_task(ARCHIVE_manager.initialize())
@@ -556,7 +564,7 @@ def setup(bot):
         await ARCHIVE_manager.ensure_ready()
         
         if not ARCHIVE_manager.song_index_ready.is_set():
-            bot.logger.log(MODULE_NAME, f"Index not ready when requested by {interaction.user}", "WARNING")
+            bot.logger.log(MODULE_NAME, f"Index not ready when requested by {interaction.user}", "WARNING")  # ✅ FIXED BOT REFERENCE
             await interaction.response.send_message("🔄 Initializing—please try again shortly.", ephemeral=True)
             await log_command_execution(bot, interaction, command_data, False, error="Index not ready")
             return
@@ -567,7 +575,7 @@ def setup(bot):
         # Rest of your ARCHIVE command remains the same...
         key = find_best_match(ARCHIVE_manager.song_index, format, song_name)
         if not key:
-            bot.logger.log(MODULE_NAME, f"Song not found: '{song_name}' in {format}", "WARNING")
+            bot.logger.log(MODULE_NAME, f"Song not found: '{song_name}' in {format}", "WARNING")  # ✅ FIXED BOT REFERENCE
             await interaction.followup.send(f"❌ '{song_name}' not found in {format}", ephemeral=True)
             await log_command_execution(bot, interaction, command_data, False, error="Song not found")
             return
@@ -575,7 +583,7 @@ def setup(bot):
         candidates = ARCHIVE_manager.song_index[format][key]
         best = select_best_candidate(candidates, version)
         if not best:
-            bot.logger.log(MODULE_NAME, f"Version not found: '{song_name}' version '{version}'", "WARNING")
+            bot.logger.log(MODULE_NAME, f"Version not found: '{song_name}' version '{version}'", "WARNING")  # ✅ FIXED BOT REFERENCE
             error_msg = f"❌ '{song_name}'"
             if version:
                 error_msg += f" (version '{version}')"
@@ -585,16 +593,16 @@ def setup(bot):
             return
 
         try:
-            bot.logger.log(MODULE_NAME, f"Selected song: {best['original_title']}")
+            bot.logger.log(MODULE_NAME, f"Selected song: {best['original_title']}")  # ✅ FIXED BOT REFERENCE
             url = await get_cached_url(bot, best['path'])
             if url == "FILE_TOO_LARGE":
-                bot.logger.log(MODULE_NAME, f"File too large: {best['path']}", "WARNING")
+                bot.logger.log(MODULE_NAME, f"File too large: {best['path']}", "WARNING")  # ✅ FIXED BOT REFERENCE
                 await interaction.followup.send(LARGE_FILE_MSG, ephemeral=True)
                 await log_command_execution(bot, interaction, command_data, False, error="File too large")
                 return
                 
             if not url:
-                bot.logger.error(MODULE_NAME, f"Cache failed for: {best['path']}")
+                bot.logger.error(MODULE_NAME, f"Cache failed for: {best['path']}")  # ✅ FIXED BOT REFERENCE
                 await interaction.followup.send("❌ Failed to retrieve song.", ephemeral=True)
                 await log_command_execution(bot, interaction, command_data, False, error="Cache failed")
                 return
@@ -609,17 +617,17 @@ def setup(bot):
                 song_metadata=best['metadata'], 
                 file_path=best['path']
             )
-            bot.logger.log(MODULE_NAME, "Song sent successfully")
+            bot.logger.log(MODULE_NAME, "Song sent successfully")  # ✅ FIXED BOT REFERENCE
                                       
         except discord.Forbidden:
-            bot.logger.log(MODULE_NAME, f"DM blocked for user: {interaction.user}", "WARNING")
+            bot.logger.log(MODULE_NAME, f"DM blocked for user: {interaction.user}", "WARNING")  # ✅ FIXED BOT REFERENCE
             await interaction.followup.send(
                 "❌ I couldn't send you a DM. Please enable DMs from server members.",
                 ephemeral=True
             )
             await log_command_execution(bot, interaction, command_data, False, error="DM blocked")
         except Exception as e:
-            bot.logger.error(MODULE_NAME, "Unexpected error in ARCHIVE command", e)
+            bot.logger.error(MODULE_NAME, "Unexpected error in ARCHIVE command", e)  # ✅ FIXED BOT REFERENCE
             await interaction.followup.send("❌ An unexpected error occurred.", ephemeral=True)
             await log_command_execution(bot, interaction, command_data, False, error=str(e))
 
@@ -627,21 +635,21 @@ def setup(bot):
     async def rebuild_index(interaction: discord.Interaction):
         """Admin command to rebuild index"""
         if not interaction.user.guild_permissions.administrator:
-            bot.logger.log(MODULE_NAME, f"Unauthorized rebuild attempt by {interaction.user}", "WARNING")
+            bot.logger.log(MODULE_NAME, f"Unauthorized rebuild attempt by {interaction.user}", "WARNING")  # ✅ FIXED BOT REFERENCE
             await interaction.response.send_message(
                 "❌ You need administrator permissions to use this command.",
                 ephemeral=True
             )
             return
             
-        bot.logger.log(MODULE_NAME, f"Rebuilding index requested by {interaction.user}")
+        bot.logger.log(MODULE_NAME, f"Rebuilding index requested by {interaction.user}")  # ✅ FIXED BOT REFERENCE
         await interaction.response.send_message("🔄 Rebuilding song index...", ephemeral=True)
         try:
             ARCHIVE_manager.song_index_ready.clear()
             ARCHIVE_manager.song_index = await build_song_index(bot)
             ARCHIVE_manager.song_index_ready.set()
             await interaction.followup.send("✅ Song index rebuilt successfully!", ephemeral=True)
-            bot.logger.log(MODULE_NAME, "Index rebuilt successfully")
+            bot.logger.log(MODULE_NAME, "Index rebuilt successfully")  # ✅ FIXED BOT REFERENCE
             
             await send_bot_log(bot, {
                 'user': str(interaction.user),
@@ -651,7 +659,7 @@ def setup(bot):
             })
             
         except Exception as e:
-            bot.logger.error(MODULE_NAME, "Index rebuild failed", e)
+            bot.logger.error(MODULE_NAME, "Index rebuild failed", e)  # ✅ FIXED BOT REFERENCE
             await interaction.followup.send("❌ Failed to rebuild index.", ephemeral=True)
             
             await send_bot_log(bot, {

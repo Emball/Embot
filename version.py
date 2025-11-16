@@ -6,6 +6,7 @@ from datetime import datetime
 import discord
 from discord import app_commands
 import re
+import asyncio
 
 MODULE_NAME = "VERSION"
 
@@ -72,10 +73,24 @@ class VersionManager:
             self.bot.logger.error(MODULE_NAME, "Failed to save version data", e)
     
     def _get_file_hash(self, file_path):
-        """Calculate SHA256 hash of a file"""
+        """Calculate SHA256 hash of a file, excluding VERSION line if it's main.py"""
         try:
             with open(file_path, 'rb') as f:
-                return hashlib.sha256(f.read()).hexdigest()
+                content = f.read()
+            
+            # Special handling for main.py - exclude VERSION line from hash
+            if file_path.name == 'main.py':
+                try:
+                    text = content.decode('utf-8')
+                    # Remove VERSION line before hashing
+                    version_pattern = r'^VERSION\s*=\s*'
+                    lines = [line for line in text.split('\n') 
+                            if not re.match(version_pattern, line)]
+                    content = '\n'.join(lines).encode('utf-8')
+                except:
+                    pass  # If decode fails, use original content
+            
+            return hashlib.sha256(content).hexdigest()
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, f"Failed to hash {file_path}", e)
             return None
@@ -147,8 +162,11 @@ class VersionManager:
                 changes['files_changed'] += 1
             elif old_hashes[file_path] != new_hash:
                 changes['modified'].append(file_path)
-                # Estimate: assume 30% of file changed on average for modified files
-                changes['total_lines_changed'] += int(file_lines.get(file_path, 0) * 0.3)
+                # For modified files, estimate 10% changed (more conservative)
+                # This prevents small edits from appearing as massive changes
+                line_count = file_lines.get(file_path, 0)
+                estimated_change = max(1, int(line_count * 0.10))
+                changes['total_lines_changed'] += estimated_change
                 changes['files_changed'] += 1
         
         # Find deleted files
@@ -194,7 +212,7 @@ class VersionManager:
                 content = f.read()
             
             # Check if VERSION already exists
-            version_pattern = r'^VERSION\s*=\s*["\'][\d.]+["\']\s*$'
+            version_pattern = r'^VERSION\s*=\s*["\'][^"\']+["\']'
             
             if re.search(version_pattern, content, re.MULTILINE):
                 # Update existing VERSION
@@ -431,7 +449,6 @@ def setup(bot):
         await version_manager.send_startup_banner()
     
     # Schedule background version check
-    import asyncio
     asyncio.create_task(check_version_background())
     
     @bot.tree.command(name="version", description="Show bot version and changelog")

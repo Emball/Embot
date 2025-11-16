@@ -9,7 +9,7 @@ from datetime import datetime
 import importlib
 
 # Bot version (auto-managed by version.py)
-VERSION = "3.1.0"
+VERSION = "3.0.1"
 # Initialize bot with intents
 intents = discord.Intents.default()
 intents.message_content = True

@@ -37,105 +37,7 @@ TRANSCRIPTION_MODE_CHANCES = {
 }
 
 
-class TranscribeButton(Button):
-    """Button to request transcription for a VM"""
-    
-    def __init__(self, vm_file_path):
-        super().__init__(
-            style=discord.ButtonStyle.secondary,
-            label="Transcribe",
-            emoji="📝"
-        )
-        self.vm_file_path = vm_file_path
-        self.transcribed = False
-    
-    async def callback(self, interaction: discord.Interaction):
-        """Handle transcribe button click"""
-        if self.transcribed:
-            await interaction.response.send_message(
-                "This voice message has already been transcribed!",
-                ephemeral=True
-            )
-            return
-        
-        try:
-            await interaction.response.defer(ephemeral=True)
-            
-            bot = interaction.client
-            
-            # Check if transcribe manager exists
-            if not hasattr(bot, 'transcribe_manager'):
-                await interaction.followup.send(
-                    "❌ Transcription system not available",
-                    ephemeral=True
-                )
-                return
-            
-            # Get the VM file path
-            vm_path = Path(self.vm_file_path)
-            if not vm_path.exists():
-                await interaction.followup.send(
-                    "❌ Voice message file not found",
-                    ephemeral=True
-                )
-                return
-            
-            bot.logger.log(MODULE_NAME, 
-                f"Manual transcription requested by {interaction.user} for {vm_path.name}")
-            
-            # Transcribe using base model (fast)
-            result = await bot.transcribe_manager.transcribe_audio(vm_path, "base")
-            
-            if not result:
-                await interaction.followup.send(
-                    "❌ Failed to transcribe the voice message",
-                    ephemeral=True
-                )
-                return
-            
-            # Format transcription
-            formatted_text = bot.transcribe_manager.format_transcription(result)
-            
-            # Edit the original message to add transcription
-            try:
-                original_message = interaction.message
-                new_content = f"{original_message.content}\n\n{formatted_text}" if original_message.content else formatted_text
-                
-                # Disable the button
-                self.disabled = True
-                self.label = "Transcribed"
-                self.transcribed = True
-                
-                view = View(timeout=None)
-                view.add_item(self)
-                
-                await original_message.edit(content=new_content, view=view)
-                
-                await interaction.followup.send(
-                    "✅ Transcription added to voice message",
-                    ephemeral=True
-                )
-                
-                bot.logger.log(MODULE_NAME, 
-                    f"Added transcription to VM message for {interaction.user}")
-                
-            except Exception as e:
-                bot.logger.error(MODULE_NAME, "Failed to edit message with transcription", e)
-                # Fallback: send as separate message
-                await interaction.followup.send(
-                    f"Transcription:\n{formatted_text}",
-                    ephemeral=True
-                )
-        
-        except Exception as e:
-            bot.logger.error(MODULE_NAME, "Error in transcribe button callback", e)
-            try:
-                await interaction.followup.send(
-                    "❌ An error occurred during transcription",
-                    ephemeral=True
-                )
-            except:
-                pass
+# Button logic removed - VMs cannot be edited in Discord
 
 
 class VMSManager:
@@ -215,7 +117,7 @@ class VMSManager:
         waveform_bytes = bytes([random.randint(0, 255) for _ in range(256)])
         return base64.b64encode(waveform_bytes).decode('utf-8')
     
-    async def _send_as_voice_message(self, channel, file_path, add_transcribe_button=False):
+    async def _send_as_voice_message(self, channel, file_path):
         """Send a file as a Discord voice message using the API"""
         try:
             file_size = file_path.stat().st_size
@@ -287,31 +189,13 @@ class VMSManager:
                     message_data = await resp.json()
                 
                 self.bot.logger.log(MODULE_NAME, f"Successfully sent voice message: {file_path.name}")
-                
-                # Add transcribe button if requested
-                if add_transcribe_button:
-                    try:
-                        # Fetch the message object
-                        message = await channel.fetch_message(message_data['id'])
-                        
-                        # Create view with transcribe button
-                        view = View(timeout=None)
-                        view.add_item(TranscribeButton(str(file_path)))
-                        
-                        # Edit message to add button
-                        await message.edit(view=view)
-                        
-                        self.bot.logger.log(MODULE_NAME, "Added transcribe button to VM")
-                    except Exception as e:
-                        self.bot.logger.error(MODULE_NAME, "Failed to add transcribe button", e)
-                
                 return message_data
                 
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Error sending voice message", e)
             return None
     
-    async def _send_as_voice_message_reply(self, message, file_path, add_transcribe_button=False):
+    async def _send_as_voice_message_reply(self, message, file_path):
         """Send a file as a Discord voice message reply using the API"""
         try:
             file_size = file_path.stat().st_size
@@ -386,21 +270,6 @@ class VMSManager:
                     reply_data = await resp.json()
                 
                 self.bot.logger.log(MODULE_NAME, f"Successfully sent voice message reply: {file_path.name}")
-                
-                # Add transcribe button if requested
-                if add_transcribe_button:
-                    try:
-                        reply_message = await message.channel.fetch_message(reply_data['id'])
-                        
-                        view = View(timeout=None)
-                        view.add_item(TranscribeButton(str(file_path)))
-                        
-                        await reply_message.edit(view=view)
-                        
-                        self.bot.logger.log(MODULE_NAME, "Added transcribe button to VM reply")
-                    except Exception as e:
-                        self.bot.logger.error(MODULE_NAME, "Failed to add transcribe button to reply", e)
-                
                 return reply_data
                 
         except Exception as e:
@@ -538,7 +407,7 @@ class VMSManager:
         return 'vm_only'  # Fallback
     
     async def _transcribe_vm(self, vm_file):
-        """Transcribe a VM file using the transcription manager"""
+        """Transcribe a VM file using the transcription manager - returns plain text without quotes"""
         if not hasattr(self.bot, 'transcribe_manager'):
             self.bot.logger.log(MODULE_NAME, "Transcription manager not available", "WARNING")
             return None
@@ -548,7 +417,8 @@ class VMSManager:
             result = await self.bot.transcribe_manager.transcribe_audio(vm_file, "base")
             
             if result:
-                return self.bot.transcribe_manager.format_transcription(result)
+                # Return plain text without quote formatting for VMS random posts
+                return result['text'].strip()
             
             return None
             
@@ -582,7 +452,7 @@ class VMSManager:
         return time_since_last > timedelta(hours=INACTIVITY_TIMEOUT_HOURS)
     
     async def post_random_vm(self, reply_to=None):
-        """Post a random voice message with optional transcription"""
+        """Post a random voice message - either as VM or transcription text"""
         try:
             # Find target channel
             if reply_to:
@@ -628,38 +498,36 @@ class VMSManager:
                     # Fallback to VM if transcription fails
                     self.bot.logger.log(MODULE_NAME, "Transcription failed, falling back to VM", "WARNING")
                     if reply_to:
-                        await self._send_as_voice_message_reply(reply_to, vm_file, add_transcribe_button=True)
+                        await self._send_as_voice_message_reply(reply_to, vm_file)
                     else:
-                        await self._send_as_voice_message(target_channel, vm_file, add_transcribe_button=True)
+                        await self._send_as_voice_message(target_channel, vm_file)
             
             elif mode == 'both':
-                # Send VM with transcription
+                # Send transcription as text, then VM separately
                 transcription = await self._transcribe_vm(vm_file)
                 
-                if reply_to:
-                    result = await self._send_as_voice_message_reply(reply_to, vm_file, add_transcribe_button=False)
-                else:
-                    result = await self._send_as_voice_message(target_channel, vm_file, add_transcribe_button=False)
+                if transcription:
+                    if reply_to:
+                        await reply_to.reply(transcription, mention_author=False)
+                    else:
+                        await target_channel.send(transcription)
                 
-                if result and transcription:
-                    # Edit message to add transcription
-                    try:
-                        sent_message = await target_channel.fetch_message(result['id'])
-                        await sent_message.edit(content=transcription)
-                        self.bot.logger.log(MODULE_NAME, "Posted VM with transcription")
-                    except Exception as e:
-                        self.bot.logger.error(MODULE_NAME, "Failed to add transcription to VM", e)
+                # Send the VM as well
+                if reply_to:
+                    await self._send_as_voice_message_reply(reply_to, vm_file)
                 else:
-                    self.bot.logger.log(MODULE_NAME, "Posted VM only (transcription unavailable)")
+                    await self._send_as_voice_message(target_channel, vm_file)
+                
+                self.bot.logger.log(MODULE_NAME, "Posted both transcription and VM")
             
             else:  # vm_only
-                # Send VM with transcribe button
+                # Send VM only
                 if reply_to:
-                    await self._send_as_voice_message_reply(reply_to, vm_file, add_transcribe_button=True)
+                    await self._send_as_voice_message_reply(reply_to, vm_file)
                 else:
-                    await self._send_as_voice_message(target_channel, vm_file, add_transcribe_button=True)
+                    await self._send_as_voice_message(target_channel, vm_file)
                 
-                self.bot.logger.log(MODULE_NAME, "Posted VM with transcribe button")
+                self.bot.logger.log(MODULE_NAME, "Posted VM only")
             
             self.last_post_time = datetime.now(timezone.utc)
             self._schedule_next_post()
@@ -814,7 +682,7 @@ def setup(bot):
                       f"Archive threshold: {ARCHIVE_DAYS} days\n"
                       f"Archive play chance: {ARCHIVE_CHANCE*100:.0f}%\n"
                       f"Responds to: mentions & replies\n"
-                      f"Format: Discord Voice Messages",
+                      f"Format: VM or text transcription",
                 inline=False
             )
             

@@ -1,112 +1,163 @@
-# main.py
+import asyncio
 import discord
-import logging
-import vaulted
-from bot import bot
-from config import (
-    BOT_TOKEN, 
-    GUILD_ID,
-    VERSION,
-    setup_logging
-)
-import commands
-import magic_emball
-import levels
-import emarchive
-import submissions
-import voice_messages
-import play
-import member_management  # New import
-from splash import show_console_splash, send_startup_message
+from discord.ext import commands
+import os
+import sys
+import traceback
+import time
+from datetime import datetime
+import importlib
 
-# Configure logging first
-setup_logging()
-logger = logging.getLogger('main')
+# Bot version (auto-managed by version.py)
+VERSION = "3.1.0"
+# Initialize bot with intents
+intents = discord.Intents.default()
+intents.message_content = True
+intents.guilds = True
 
-def setup_extensions():
-    """Initialize all bot extensions"""
-    logger.info("Setting up extensions...")
+bot = commands.Bot(command_prefix='!', intents=intents)
+
+class Logger:
+    """Centralized logging system for all modules"""
     
-    # Create the level system instance
-    bot.level_system = levels.LevelSystem(bot)
-    logger.info("Level system initialized")
+    @staticmethod
+    def log(module_name: str, message: str, level: str = "INFO"):
+        """
+        Log a message with module name tag
+        
+        Args:
+            module_name: Name of the module logging the message
+            message: The message to log
+            level: Log level (INFO, WARNING, ERROR)
+        """
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] [{module_name}] [{level}] {message}")
 
-    # List of all extensions to load
-    extensions = [
-        ('commands', commands),
-        ('magic_emball', magic_emball),
-        ('levels', levels),
-        ('emarchive', emarchive),
-        ('play', play),
-        ('submissions', submissions),
-        ('voice_messages', voice_messages),
-        ('member_management', member_management),
-        ('vaulted', vaulted)  # Add this line
-    ]
+    @staticmethod
+    def error(module_name: str, message: str, exception: Exception = None):
+        """
+        Log an error with optional exception details
+        
+        Args:
+            module_name: Name of the module logging the error
+            message: Error message
+            exception: Optional exception object
+        """
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] [{module_name}] [ERROR] {message}")
+        
+        if exception:
+            print(f"[{timestamp}] [{module_name}] [ERROR] Exception: {type(exception).__name__}: {str(exception)}")
+            tb = ''.join(traceback.format_exception(type(exception), exception, exception.__traceback__))
+            print(f"[{timestamp}] [{module_name}] [ERROR] Traceback:\n{tb}")
 
-    print(f"Trying to load vaulted: {hasattr(vaulted, 'setup')}") 
+# Make logger available globally
+bot.logger = Logger()
 
-    loaded_extensions = 0
-    for name, ext in extensions:
+def load_modules():
+    """Dynamically load all modules from the current directory"""
+    modules_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    loaded_count = 0
+    failed_count = 0
+    
+    # Clear existing commands before reloading - use None for global commands
+    bot.tree.clear_commands(guild=None)
+    
+    # Discover and load all Python modules in the current directory
+    for file in os.listdir(modules_dir):
+        if not file.endswith('.py') or file == 'main.py' or file.startswith('_'):
+            continue
+            
+        name = file[:-3]  # Strip .py extension
+        
         try:
-            if hasattr(ext, 'setup'):
-                ext.setup(bot)
-                loaded_extensions += 1
-                logger.info(f"Loaded extension: {name}")
+            # Reload the module to get fresh code
+            if name in sys.modules:
+                module = importlib.reload(sys.modules[name])
             else:
-                logger.warning(f"Extension {name} has no setup function")
+                module = importlib.import_module(name)
+            
+            # Look for a setup function in the module
+            if hasattr(module, 'setup'):
+                module.setup(bot)
+                bot.logger.log("MAIN", f"Loaded module: {name}")
+                loaded_count += 1
+            else:
+                bot.logger.log("MAIN", f"Module {name} has no setup() function, skipping", "WARNING")
+                
+        except discord.app_commands.errors.CommandAlreadyRegistered as e:
+            bot.logger.log("MAIN", f"Command already registered in {name}, skipping: {e}", "WARNING")
+            failed_count += 1
         except Exception as e:
-            logger.error(f"Failed to load extension {name}: {e}")
-
-    bot.loaded_extensions_count = loaded_extensions
-    logger.info(f"Total extensions loaded: {loaded_extensions}")
-
-async def sync_commands():
-    """Sync slash commands with Discord"""
-    await bot.wait_until_ready()
-    try:
-        guild_obj = discord.Object(id=GUILD_ID)
-        bot.tree.copy_global_to(guild=guild_obj)
-        synced = await bot.tree.sync(guild=guild_obj)
-        logger.info(f"Synced {len(synced)} commands: {[cmd.name for cmd in synced]}")
-    except Exception as e:
-        logger.error(f"Failed to sync commands: {e}")
-
-@bot.event
-async def on_connect():
-    """Called when bot connects to Discord"""
-    logger.info("Connected to Discord")
-    await sync_commands()
+            bot.logger.error("MAIN", f"Failed to load module: {name}", e)
+            failed_count += 1
+    
+    bot.logger.log("MAIN", f"Successfully loaded {loaded_count} module(s), {failed_count} failed")
 
 @bot.event
 async def on_ready():
-    """Called when bot is fully ready"""
-    show_console_splash(VERSION)
-    logger.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    # Only run initialization on first ready, not on reconnects
+    if not hasattr(bot, 'initialized'):
+        bot.initialized = True
+        bot.logger.log("MAIN", f"Embot online as {bot.user}")
+        
+        # Start a background task to monitor heartbeat
+        bot.heartbeat_monitor = bot.loop.create_task(monitor_heartbeat())
+        
+        load_modules()                     # load your real commands
+        await bot.tree.sync()              # now push the fresh ones
+        bot.logger.log("MAIN", "Fresh commands synced")
+    else:
+        bot.logger.log("MAIN", f"Embot reconnected as {bot.user}")
+        # On reconnect, just sync any potential command changes
+        await bot.tree.sync()
+        bot.logger.log("MAIN", "Commands resynced after reconnect")
+
+async def monitor_heartbeat():
+    """Monitor and log heartbeat health"""
+    await bot.wait_until_ready()
     
-    # Ensure we have guild reference
-    bot.guild = bot.get_guild(GUILD_ID)
-    if not bot.guild:
-        logger.error(f"Failed to find guild with ID {GUILD_ID}")
+    while not bot.is_closed():
+        try:
+            # Check the last heartbeat time
+            latency = bot.latency
+            if latency > 1.0:  # High latency warning
+                bot.logger.log("MAIN", f"High latency detected: {latency:.2f}s", "WARNING")
+            
+            await asyncio.sleep(60)  # Check every minute
+        except Exception as e:
+            bot.logger.error("MAIN", "Heartbeat monitor error", e)
+            await asyncio.sleep(60)
+
+@bot.event
+async def on_error(event, *args, **kwargs):
+    """Global error handler for bot events"""
+    exc_type, exc_value, exc_traceback = sys.exc_info()
+    bot.logger.error("MAIN", f"Error in event {event}", exc_value)
+
+@bot.event
+async def on_command_error(ctx, error):
+    """Global error handler for commands"""
+    if isinstance(error, commands.CommandNotFound):
         return
     
-    # Get important channels
-    bot.project_channel = discord.utils.get(bot.guild.text_channels, name="projects")
-    bot.artwork_channel = discord.utils.get(bot.guild.text_channels, name="artwork")
-    bot.suggestions_channel = discord.utils.get(bot.guild.text_channels, name="suggestions")
-    bot.general_channel = discord.utils.get(bot.guild.text_channels, name="general")
-    bot.announcements_channel = discord.utils.get(bot.guild.text_channels, name="announcements")
-    bot.bot_logs_channel = discord.utils.get(bot.guild.text_channels, name="bot-logs")
-    
-    # Send startup message
-    await send_startup_message(bot, VERSION)
-    logger.info("Bot is fully initialized and ready")
+    bot.logger.error("MAIN", f"Command error in {ctx.command}", error)
+    await ctx.send(f"An error occurred: {str(error)}")
 
 if __name__ == "__main__":
+    # Get token from environment variable
+    TOKEN = os.getenv('DISCORD_BOT_TOKEN')
+    
+    if not TOKEN:
+        bot.logger.error("MAIN", "DISCORD_BOT_TOKEN environment variable not set!")
+        bot.logger.log("MAIN", "Please set your Discord bot token:")
+        bot.logger.log("MAIN", "export DISCORD_BOT_TOKEN='your-token-here'")
+        sys.exit(1)
+    
     try:
-        setup_extensions()
-        logger.info("Starting bot...")
-        bot.run(BOT_TOKEN)
+        bot.logger.log("MAIN", "Starting Embot...")
+        bot.run(TOKEN)
     except Exception as e:
-        logger.critical(f"Fatal error during startup: {e}")
-        raise
+        bot.logger.error("MAIN", "Failed to start bot", e)
+        sys.exit(1)

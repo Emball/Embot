@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+Winpython64-3.11.9.0dotb5/
+__init__.py
+
+# Large data directories
+data/
+
+# Bot-specific
+*.log
+*.json
+*.db
+*.sqlite
+data/
+cache/
+temp/
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Bot token and secrets
+config.ini

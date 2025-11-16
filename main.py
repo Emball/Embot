@@ -1,6 +1,7 @@
 import asyncio
 import discord
 from discord.ext import commands
+from discord import HTTPException
 import os
 import sys
 import traceback
@@ -109,8 +110,10 @@ def load_modules():
     loaded_count = 0
     failed_count = 0
     
-    # Clear existing commands before reloading - use None for global commands
-    bot.tree.clear_commands(guild=None)
+    # Don't clear commands every time - this causes rate limits
+    # Only clear if we're doing a full reload in development mode
+    if args.development and hasattr(bot, '_commands_cleared'):
+        bot.tree.clear_commands(guild=None)
     
     # Discover and load all Python modules in the current directory
     for file in os.listdir(modules_dir):
@@ -156,6 +159,13 @@ def load_modules():
             failed_count += 1
     
     bot.logger.log("MAIN", f"Successfully loaded {loaded_count} module(s), {failed_count} failed")
+    bot._commands_cleared = True
+
+def start_console_thread():
+    """Start the console thread - call this separately from on_ready"""
+    console_thread = threading.Thread(target=run_console, daemon=True)
+    console_thread.start()
+    bot.logger.log("MAIN", "Console thread started")
 
 @bot.event
 async def on_ready():
@@ -169,21 +179,31 @@ async def on_ready():
         mode = "DEVELOPMENT MODE" if args.development else "PRODUCTION MODE"
         bot.logger.log("MAIN", f"Embot online as {bot.user} - {mode} - v{bot.version}")
         
+        # Start console IMMEDIATELY - don't wait for anything else
+        start_console_thread()
+        
         # Start a background task to monitor heartbeat
         bot.heartbeat_monitor = bot.loop.create_task(monitor_heartbeat())
         
+        # Load modules
         load_modules()
-        await bot.tree.sync()
-        bot.logger.log("MAIN", "Commands synced")
         
-        # Start console in all modes
-        console_thread = threading.Thread(target=run_console, daemon=True)
-        console_thread.start()
+        # Try to sync commands but don't let failures stop the bot
+        try:
+            await bot.tree.sync()
+            bot.logger.log("MAIN", "Commands synced successfully")
+        except HTTPException as e:
+            if e.status == 429 and e.code == 30034:
+                bot.logger.log("MAIN", "⚠️ Daily command sync limit reached (200/200). Commands will sync tomorrow.", "WARNING")
+            else:
+                bot.logger.error("MAIN", "Command sync failed", e)
+        except Exception as e:
+            bot.logger.error("MAIN", "Command sync failed", e)
+            bot.logger.log("MAIN", "Bot will continue running with existing commands")
     else:
         bot.logger.log("MAIN", f"Embot reconnected as {bot.user}")
-        # On reconnect, just sync any potential command changes
-        await bot.tree.sync()
-        bot.logger.log("MAIN", "Commands resynced after reconnect")
+        # On reconnect, don't sync commands again to avoid rate limits
+        bot.logger.log("MAIN", "Reconnected successfully (commands not resynced to avoid rate limits)")
 
 async def monitor_heartbeat():
     """Monitor and log heartbeat health"""
@@ -203,6 +223,8 @@ async def monitor_heartbeat():
 
 def run_console():
     """Run interactive console for commands - available in all modes"""
+    # Small delay to ensure bot is ready
+    time.sleep(2)
     bot.logger.log("CONSOLE", "Console ready. Type 'help' for commands.")
     
     while True:
@@ -346,10 +368,15 @@ def setup_console_commands():
                 else:
                     module.setup(bot)
                 
-                # Sync commands
-                await bot.tree.sync()
-                
-                print(f"✅ Module '{module_name}' reloaded and synced successfully!")
+                # Try to sync but don't fail if rate limited
+                try:
+                    await bot.tree.sync()
+                    print(f"✅ Module '{module_name}' reloaded and synced successfully!")
+                except HTTPException as e:
+                    if e.status == 429 and e.code == 30034:
+                        print(f"✅ Module '{module_name}' reloaded but command sync rate limited (daily limit reached)")
+                    else:
+                        raise
             else:
                 print(f"✅ Module '{module_name}' reloaded (no setup function)")
                 
@@ -379,7 +406,15 @@ def setup_console_commands():
 async def on_error(event, *args, **kwargs):
     """Global error handler for bot events"""
     exc_type, exc_value, exc_traceback = sys.exc_info()
-    bot.logger.error("MAIN", f"Error in event {event}", exc_value)
+    
+    # Handle rate limits specifically
+    if isinstance(exc_value, HTTPException) and exc_value.status == 429:
+        retry_after = getattr(exc_value, 'retry_after', 0)
+        bot.logger.log("MAIN", f"Rate limited on event {event}. Retry after: {retry_after}s", "WARNING")
+        # Wait out the rate limit
+        await asyncio.sleep(retry_after)
+    else:
+        bot.logger.error("MAIN", f"Error in event {event}", exc_value)
 
 @bot.event
 async def on_command_error(ctx, error):
@@ -387,8 +422,16 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
     
-    bot.logger.error("MAIN", f"Command error in {ctx.command}", error)
-    await ctx.send(f"An error occurred: {str(error)}")
+    # Handle rate limits
+    if isinstance(error, HTTPException) and error.status == 429:
+        retry_after = getattr(error, 'retry_after', 0)
+        bot.logger.log("MAIN", f"Rate limited on command {ctx.command}. Retry after: {retry_after}s", "WARNING")
+        await asyncio.sleep(retry_after)
+        # Retry the command after rate limit
+        await ctx.reinvoke()
+    else:
+        bot.logger.error("MAIN", f"Command error in {ctx.command}", error)
+        await ctx.send(f"An error occurred: {str(error)}")
 
 if __name__ == "__main__":
     # Get token from environment variable

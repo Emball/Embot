@@ -20,7 +20,7 @@ MODULE_NAME = "DEV"
 # Configuration
 VERSION_DATA_FILE = "version_data.json"
 TRACKED_EXTENSIONS = ['.py']
-EXCLUDE_FILES = ['__pycache__']  # Removed dev.py from exclusions so it can track itself
+EXCLUDE_FILES = ['_version.py']  # Exclude version file to prevent self-triggering
 EXCLUDE_DIRS = ['Winpython64', 'python-3', 'venv', 'env', '.git', '__pycache__', 'data', 'icons']
 
 # Enhanced semantic versioning thresholds (actual lines changed, not estimated)
@@ -80,6 +80,8 @@ class DevManager:
         self.git_enabled = False
         self.file_observer = None
         self.watched_modules = {}
+        self.auto_commit_enabled = False  # Default to disabled
+        self.auto_versioning_enabled = True  # Default to enabled
         
         # Check Git availability
         self._check_git()
@@ -101,6 +103,8 @@ class DevManager:
         self.bot.logger.log(MODULE_NAME, "  • Git integration (commit & push)")
         self.bot.logger.log(MODULE_NAME, "  • File watcher monitoring")
         self.bot.logger.log(MODULE_NAME, "  • Development console commands")
+        self.bot.logger.log(MODULE_NAME, f"  • Auto-commit: {'ENABLED' if self.auto_commit_enabled else 'DISABLED'}")
+        self.bot.logger.log(MODULE_NAME, f"  • Auto-versioning: {'ENABLED' if self.auto_versioning_enabled else 'DISABLED'}")
     
     def _check_git(self):
         """Check if Git is available and repository is initialized"""
@@ -540,6 +544,14 @@ icons/
                 else:
                     self.bot.logger.log(MODULE_NAME, f"  {file}: {details['type']}")
             
+            # Only update version if auto-versioning is enabled
+            if not self.auto_versioning_enabled:
+                self.bot.logger.log(MODULE_NAME, "Auto-versioning disabled, skipping version update")
+                self.file_hashes = current_hashes
+                self.file_contents = current_contents
+                self._save_version_data()
+                return None
+            
             old_version = current_version
             new_version, change_type = self._increment_version(current_version, changes['total_lines_changed'])
             
@@ -582,7 +594,7 @@ icons/
                 f"Version updated: v{old_version} → v{new_version} ({change_type})")
             
             # Auto-commit if enabled
-            if auto_commit and self.git_enabled:
+            if auto_commit and self.auto_commit_enabled and self.git_enabled:
                 await self.git_commit_and_push(commit_message, history_entry)
             
             return history_entry
@@ -698,8 +710,11 @@ icons/
                 else:
                     self.bot.logger.log(MODULE_NAME, f"✅ Reloaded: {module_name} (no setup)")
                 
-                # Update version for the change
-                await self.check_and_update_version(auto_commit=False)
+                # Update version for the change (only if auto-versioning is enabled)
+                if self.auto_versioning_enabled:
+                    await self.check_and_update_version(auto_commit=self.auto_commit_enabled)
+                else:
+                    self.bot.logger.log(MODULE_NAME, "Auto-versioning disabled, skipping version check")
                 
             except Exception as e:
                 self.bot.logger.error(MODULE_NAME, f"Failed to reload {module_name}", e)
@@ -741,7 +756,9 @@ icons/
             'tracked_files': len(self.file_hashes),
             'last_update': None,
             'git_enabled': self.git_enabled,
-            'hot_reload_enabled': self.file_observer is not None
+            'hot_reload_enabled': self.file_observer is not None,
+            'auto_commit_enabled': self.auto_commit_enabled,
+            'auto_versioning_enabled': self.auto_versioning_enabled
         }
         
         if self.version_history:
@@ -919,12 +936,82 @@ def setup(bot, register_console_command):
             else:
                 print("❌ Failed to setup GitHub. Check logs.")
         
+        async def handle_dev_status(args):
+            """Show development module status"""
+            info = dev_manager.get_version_info()
+            
+            print("\n┌─────────────────────────────────────────────────────────────────────────┐")
+            print("│                      DEVELOPMENT MODULE STATUS                           │")
+            print("├─────────────────────────────────────────────────────────────────────────┤")
+            print(f"│ Current Version: v{info['current_version']:<44} │")
+            print(f"│ Tracked Files: {info['tracked_files']:<47} │")
+            print(f"│ Total Versions: {info['total_versions']:<46} │")
+            print(f"│ Git Enabled: {'✅ Yes' if info['git_enabled'] else '❌ No':<49} │")
+            print(f"│ Hot Reload: {'✅ Enabled' if info['hot_reload_enabled'] else '❌ Disabled':<46} │")
+            print(f"│ Auto-Commit: {'✅ Enabled' if info['auto_commit_enabled'] else '❌ Disabled':<45} │")
+            print(f"│ Auto-Versioning: {'✅ Enabled' if info['auto_versioning_enabled'] else '❌ Disabled':<41} │")
+            
+            if info['last_update']:
+                last = info['last_update']
+                timestamp = datetime.fromisoformat(last['timestamp']).strftime('%Y-%m-%d %H:%M')
+                print("├─────────────────────────────────────────────────────────────────────────┤")
+                print("│ Last Update:                                                            │")
+                
+                # FIXED: Calculate the spacing separately to avoid nested f-strings
+                version_text = f"v{last['version']} ({last['type']})"
+                spacing = 36 - len(version_text)
+                print(f"│   Version: {version_text}{' ' * spacing} │")
+                
+                print(f"│   Time: {timestamp}{' ' * (50 - len(timestamp))} │")
+                
+                # FIXED: Calculate the spacing separately for files/lines
+                files_text = f"{last['files_changed']}, Lines: {last['lines_changed']}"
+                spacing = 35 - len(files_text)
+                print(f"│   Files: {files_text}{' ' * spacing} │")
+            
+            print("└─────────────────────────────────────────────────────────────────────────┘\n")
+        
+        async def handle_auto_commit(args):
+            """Toggle auto-commit functionality"""
+            if args.strip().lower() in ['on', 'enable', 'true', '1']:
+                dev_manager.auto_commit_enabled = True
+                print("✅ Auto-commit ENABLED")
+            elif args.strip().lower() in ['off', 'disable', 'false', '0']:
+                dev_manager.auto_commit_enabled = False
+                print("✅ Auto-commit DISABLED")
+            else:
+                # Toggle if no args
+                dev_manager.auto_commit_enabled = not dev_manager.auto_commit_enabled
+                status = "ENABLED" if dev_manager.auto_commit_enabled else "DISABLED"
+                print(f"✅ Auto-commit {status}")
+            
+            dev_manager.bot.logger.log(MODULE_NAME, f"Auto-commit {status}")
+        
+        async def handle_auto_version(args):
+            """Toggle auto-versioning functionality"""
+            if args.strip().lower() in ['on', 'enable', 'true', '1']:
+                dev_manager.auto_versioning_enabled = True
+                print("✅ Auto-versioning ENABLED")
+            elif args.strip().lower() in ['off', 'disable', 'false', '0']:
+                dev_manager.auto_versioning_enabled = False
+                print("✅ Auto-versioning DISABLED")
+            else:
+                # Toggle if no args
+                dev_manager.auto_versioning_enabled = not dev_manager.auto_versioning_enabled
+                status = "ENABLED" if dev_manager.auto_versioning_enabled else "DISABLED"
+                print(f"✅ Auto-versioning {status}")
+            
+            dev_manager.bot.logger.log(MODULE_NAME, f"Auto-versioning {status}")
+        
         # Register development console commands
         register_console_command("commit", "Commit and push changes", handle_commit)
         register_console_command("changelog", "Show version changelog", handle_changelog)
         register_console_command("git", "Show git repository status", handle_git)
         register_console_command("files", "Show tracked files", handle_files)
         register_console_command("setup_github", "Setup GitHub with personal access token", handle_setup_github)
+        register_console_command("dev_status", "Show development module status", handle_dev_status)
+        register_console_command("auto_commit", "Toggle auto-commit on/off", handle_auto_commit)
+        register_console_command("auto_version", "Toggle auto-versioning on/off", handle_auto_version)
     
     setup_dev_console_commands()
     

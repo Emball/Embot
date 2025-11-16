@@ -1,8 +1,6 @@
-# emarchive.py
 import os
 import re
 import json
-import logging
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -14,13 +12,13 @@ import asyncio
 import difflib
 from discord import app_commands
 import discord
+from discord.ext import tasks
 from collections import defaultdict
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
-logger = logging.getLogger('emarchive')
-
-def setup(bot):  # Changed from setup_emarchive
-    """Setup the emarchive extension"""
-    logger.info("Initializing emarchive extension")
+METADATA_EXECUTOR = ThreadPoolExecutor(max_workers=4)
+MODULE_NAME = "ARCHIVE"
 
 # Configuration
 EMINEM_ROOT = Path(r"D:\Media\Music\Eminem")
@@ -40,10 +38,18 @@ SPECIAL_FOLDERS = {
 LARGE_FILE_MSG = "Sorry! The song file was too big to upload in the server."
 MAX_SEARCH_RESULTS = 5
 
-def extract_metadata(file_path):
-    """Extract metadata from audio files using Mutagen"""
+async def extract_metadata_async(file_path):
+    """Extract metadata from audio files using Mutagen in a non-blocking way"""
+    loop = asyncio.get_event_loop()
     try:
-        logger.debug(f"Extracting metadata from: {file_path}")
+        return await loop.run_in_executor(METADATA_EXECUTOR, extract_metadata_sync, file_path)
+    except Exception as e:
+        print(f"Async metadata error for {file_path}: {e}")
+        return None
+
+def extract_metadata_sync(file_path):
+    """Synchronous metadata extraction (run in executor)"""
+    try:
         if file_path.lower().endswith('.flac'):
             audio = FLAC(file_path)
             return {
@@ -53,25 +59,42 @@ def extract_metadata(file_path):
                 'year': audio.get('date', [''])[0].split('-')[0] if audio.get('date') else '',
             }
         elif file_path.lower().endswith('.mp3'):
-            audio = MP3(file_path, ID3=ID3)
-            tags = audio.tags
-            if not tags:
-                logger.warning(f"No tags found in MP3: {file_path}")
-                return None
-            return {
-                'title': tags['TIT2'].text[0] if 'TIT2' in tags else '',
-                'album': tags['TALB'].text[0] if 'TALB' in tags else '',
-                'artist': tags['TPE1'].text[0] if 'TPE1' in tags else '',
-                'year': str(tags['TDRC'].text[0]) if 'TDRC' in tags and tags['TDRC'].text else '',
-            }
+            try:
+                audio = MP3(file_path, ID3=ID3)
+                tags = audio.tags
+                if not tags:
+                    return None
+                return {
+                    'title': tags['TIT2'].text[0] if 'TIT2' in tags else '',
+                    'album': tags['TALB'].text[0] if 'TALB' in tags else '',
+                    'artist': tags['TPE1'].text[0] if 'TPE1' in tags else '',
+                    'year': str(tags['TDRC'].text[0]) if 'TDRC' in tags and tags['TDRC'].text else '',
+                }
+            except Exception as mp3_error:
+                # If MP3 metadata extraction fails, fall back to filename
+                print(f"MP3 metadata error for {file_path}: {mp3_error}")
+                return {
+                    'title': Path(file_path).stem,
+                    'album': 'Unknown',
+                    'artist': 'Eminem', 
+                    'year': ''
+                }
     except Exception as e:
-        logger.error(f"Error extracting metadata from {file_path}: {e}")
+        print(f"General metadata error for {file_path}: {e}")
     return None
+
+def fallback_metadata(file_path):
+    """Fallback metadata when extraction fails"""
+    return {
+        'title': Path(file_path).stem,
+        'album': 'Unknown',
+        'artist': 'Eminem', 
+        'year': ''
+    }
 
 def extract_artwork(file_path):
     """Extract cover art from FLAC or MP3"""
     try:
-        logger.debug(f"Extracting artwork from: {file_path}")
         if file_path.lower().endswith('.flac'):
             audio = FLAC(file_path)
             if audio.pictures:
@@ -82,14 +105,13 @@ def extract_artwork(file_path):
                 for tag in audio.tags.values():
                     if getattr(tag, "FrameID", None) == 'APIC':
                         return tag.data
-        logger.debug(f"No artwork found in: {file_path}")
-    except Exception as e:
-        logger.error(f"Error extracting artwork from {file_path}: {e}")
+    except Exception:
+        pass
     return None
+
 
 def handle_special_folder(file_path, metadata, folder_name):
     """Apply special metadata parsing for specific folders"""
-    logger.debug(f"Processing special folder: {folder_name} for {file_path}")
     if not metadata:
         metadata = {
             'title': Path(file_path).stem,
@@ -106,15 +128,15 @@ def handle_special_folder(file_path, metadata, folder_name):
                 metadata['year'] = ym.group(1)
 
             if folder_key == "8 - Features":
-                feat1 = re.match(r'\((\d{4})\)\s*(.+?)\s*-\s*(.+?)\s*\(feat', metadata.get('title',''))
+                feat1 = re.match(r'\((\d{4})\)\s*(.+?)\s*-\s*(.+?)\s*\(feat', metadata.get('title', ''))
                 if feat1:
                     metadata['year'], metadata['artist'], metadata['title'] = feat1.groups()
                 else:
-                    feat2 = re.match(r'(.+?)\s*-\s*(.+?)\s*\(feat', metadata.get('title',''))
+                    feat2 = re.match(r'(.+?)\s*-\s*(.+?)\s*\(feat', metadata.get('title', ''))
                     if feat2:
                         metadata['artist'], metadata['title'] = feat2.groups()
             elif folder_key in ["7 - Singles", "10 - Freestyles (MP3 Only)"]:
-                sm = re.match(r'\((\d{4})\)\s*(.+)', metadata.get('title',''))
+                sm = re.match(r'\((\d{4})\)\s*(.+)', metadata.get('title', ''))
                 if sm:
                     metadata['year'], metadata['title'] = sm.groups()
             elif folder_key == "11 - Leaks (Mostly MP3)":
@@ -127,6 +149,7 @@ def handle_special_folder(file_path, metadata, folder_name):
         metadata['artist'] = "Eminem"
     return metadata
 
+
 def normalize_title(title):
     """Clean and normalize titles for searching"""
     t = re.sub(r'^(\d+\s*-\s*)?\d+\s+', '', title)
@@ -135,6 +158,7 @@ def normalize_title(title):
     t = re.sub(r'[^\w\s]', '', t)
     t = re.sub(r'\s+', ' ', t).strip()
     return t.casefold()
+
 
 async def check_file_modifications():
     """Check if any music files have been modified since last index"""
@@ -152,45 +176,49 @@ async def check_file_modifications():
                         return True
     return False
 
+
 async def build_song_index(bot):
-    """Build the complete song index"""
-    logger.info("Building song index...")
+    """Build the complete song index asynchronously"""
+    bot.logger.log(MODULE_NAME, "Building song index...")
     song_index = {fmt: defaultdict(list) for fmt in FORMATS}
     total = 0
 
     for fmt in FORMATS:
         fmt_path = EMINEM_ROOT / fmt
         if not fmt_path.exists():
-            logger.warning(f"Format directory missing: {fmt_path}")
+            bot.logger.log(MODULE_NAME, f"Format directory missing: {fmt_path}", "WARNING")
             continue
             
-        logger.info(f"Scanning {fmt} directory...")
+        bot.logger.log(MODULE_NAME, f"Scanning {fmt} directory...")
+        
+        # Collect all files first
+        all_files = []
         for root, _, files in os.walk(fmt_path):
             folder = Path(root).name
-            logger.debug(f"Processing folder: {folder}")
             for fn in files:
                 if not fn.lower().endswith(('.flac', '.mp3')):
                     continue
-                    
                 full_path = Path(root) / fn
-                logger.debug(f"Processing file: {fn}")
-                md = extract_metadata(str(full_path))
-                
-                if any(k in folder for k in SPECIAL_FOLDERS):
-                    logger.debug(f"Applying special folder rules to: {fn}")
-                    md = handle_special_folder(str(full_path), md, folder)
-                    
-                if not md:
-                    md = {'title': full_path.stem, 'album': folder, 'artist': 'Eminem', 'year': ''}
-                    
-                key = normalize_title(md['title'])
-                song_index[fmt][key].append({
-                    'path': str(full_path),
-                    'original_title': full_path.stem,
-                    'folder': folder,
-                    'metadata': md
-                })
-                total += 1
+                all_files.append((full_path, folder))
+        
+        # Process files in batches with delays to prevent blocking
+        batch_size = 50
+        for i in range(0, len(all_files), batch_size):
+            batch = all_files[i:i + batch_size]
+            tasks = []
+            
+            for full_path, folder in batch:
+                tasks.append(process_single_file(bot, full_path, folder, song_index, fmt))
+            
+            # Process batch and allow event loop to run
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            total += len([r for r in results if r is not None])
+            
+            # Small delay to prevent blocking
+            if i + batch_size < len(all_files):
+                await asyncio.sleep(0.1)
+            
+            bot.logger.log(MODULE_NAME, f"Processed {min(i + batch_size, len(all_files))}/{len(all_files)} files...")
 
     tmp = INDEX_FILE + ".tmp"
     with open(tmp, 'w', encoding='utf-8') as f:
@@ -201,13 +229,36 @@ async def build_song_index(bot):
         }, f, ensure_ascii=False, indent=2)
         
     os.replace(tmp, INDEX_FILE)
-    logger.info(f"Indexed {total} songs total")
+    bot.logger.log(MODULE_NAME, f"Indexed {total} songs total")
     return song_index
 
-def load_song_index():
+async def process_single_file(bot, full_path, folder, song_index, fmt):
+    """Process a single file asynchronously"""
+    try:
+        md = await extract_metadata_async(str(full_path))
+        
+        if any(k in folder for k in SPECIAL_FOLDERS):
+            md = handle_special_folder(str(full_path), md, folder)
+            
+        if not md:
+            md = {'title': full_path.stem, 'album': folder, 'artist': 'Eminem', 'year': ''}
+            
+        key = normalize_title(md['title'])
+        song_index[fmt][key].append({
+            'path': str(full_path),
+            'original_title': full_path.stem,
+            'folder': folder,
+            'metadata': md
+        })
+        return True
+    except Exception as e:
+        bot.logger.error(MODULE_NAME, f"Error processing {full_path}", e)
+        return None
+
+def load_song_index(bot):
     """Load the song index from file"""
     if not Path(INDEX_FILE).exists():
-        logger.warning("Index file not found")
+        bot.logger.log(MODULE_NAME, "Index file not found", "WARNING")
         return None
         
     try:
@@ -215,65 +266,35 @@ def load_song_index():
             data = json.load(f)
             
         if data.get('version', 0) < 5:
-            logger.warning("Outdated index version")
+            bot.logger.log(MODULE_NAME, "Outdated index version", "WARNING")
             return None
             
         created = datetime.fromisoformat(data['created_at'])
         if datetime.utcnow() - created < timedelta(hours=INDEX_REFRESH_HOURS):
-            logger.info("Loaded index from cache")
+            bot.logger.log(MODULE_NAME, "Loaded index from cache")
             return data['songs']
             
-        logger.info("Index is outdated, needs refresh")
+        bot.logger.log(MODULE_NAME, "Index is outdated, needs refresh")
     except Exception as e:
-        logger.error(f"Error loading index: {e}")
+        bot.logger.error(MODULE_NAME, "Error loading index", e)
     return None
 
-async def cache_purge_task(bot):
-    """Periodic task to purge old cache and refresh index"""
-    logger.info("Starting cache purge task")
-    while True:
-        try:
-            if Path(CACHE_INDEX).exists():
-                cache_age = (datetime.now(timezone.utc) - 
-                           datetime.fromtimestamp(Path(CACHE_INDEX).stat().st_mtime, timezone.utc)).days
-                if cache_age < CACHE_EXPIRE_DAYS:
-                    await asyncio.sleep(3600)
-                    continue
-
-            logger.info("Purging cache...")
-            chan = discord.utils.get(bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
-            if chan:
-                cutoff = datetime.now(timezone.utc) - timedelta(days=CACHE_EXPIRE_DAYS)
-                await chan.purge(before=cutoff, limit=None)
-            
-            if await check_file_modifications():
-                bot.song_index_ready.clear()
-                bot.song_index = await build_song_index(bot)
-                bot.song_index_ready.set()
-            
-        except Exception as e:
-            logger.error(f"Purge task error: {e}")
-        finally:
-            await asyncio.sleep(CACHE_EXPIRE_DAYS * 86400)
 
 def find_best_match(idx, fmt, query):
     """Find the closest matching song title"""
-    logger.debug(f"Searching for: '{query}' in {fmt}")
     key = normalize_title(query)
     matches = difflib.get_close_matches(key, idx.get(fmt, {}).keys(), n=MAX_SEARCH_RESULTS, cutoff=0.5)
     return matches[0] if matches else None
 
+
 def select_best_candidate(cands, version=None):
     """Select the best version of a song"""
-    logger.debug(f"Selecting from {len(cands)} candidates, version={version}")
     if version:
         vl = version.lower()
         filtered = [c for c in cands if vl in c['original_title'].lower() or vl in c['folder'].lower()]
         if not filtered:
-            logger.debug(f"No candidates match version '{version}'")
             return None
         cands = filtered
-        logger.debug(f"Filtered to {len(cands)} candidates matching version")
 
     scored = []
     for c in cands:
@@ -287,14 +308,11 @@ def select_best_candidate(cands, version=None):
         scored.append((p, y, c))
     scored.sort(key=lambda x: (x[0], x[1]))
     
-    best = scored[0][2] if scored else None
-    if best:
-        logger.debug(f"Selected: {best['original_title']} (folder: {best['folder']})")
-    return best
+    return scored[0][2] if scored else None
+
 
 async def get_cached_url(bot, file_path):
     """Get or create a cached Discord URL for a file"""
-    logger.debug(f"Getting cached URL for: {file_path}")
     p = Path(file_path)
     key = str(p.resolve())
     
@@ -303,27 +321,25 @@ async def get_cached_url(bot, file_path):
             cache = json.load(f)
     except:
         cache = {}
-        logger.debug("Cache index not found, starting new")
 
     now = datetime.utcnow()
     if key in cache:
         cache_time = datetime.fromisoformat(cache[key]['timestamp'])
         if now - cache_time < timedelta(days=CACHE_EXPIRE_DAYS):
-            logger.debug(f"Using cached URL for {file_path}")
+            bot.logger.log(MODULE_NAME, f"Using cached URL for {p.name}")
             return cache[key]['url']
-        logger.debug(f"Cached URL expired for {file_path}")
 
     chan = discord.utils.get(bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
     if not chan:
-        logger.warning(f"Missing channel {CACHE_CHANNEL_NAME}")
+        bot.logger.log(MODULE_NAME, f"Missing channel {CACHE_CHANNEL_NAME}", "WARNING")
         return None
         
     if not p.exists():
-        logger.error(f"File not found: {file_path}")
+        bot.logger.error(MODULE_NAME, f"File not found: {file_path}")
         return None
 
     try:
-        logger.info(f"Uploading {p.name} to cache channel")
+        bot.logger.log(MODULE_NAME, f"Uploading {p.name} to cache channel")
         mf = discord.File(p, filename=p.name)
         msg = await chan.send(file=mf)
         url = msg.attachments[0].url
@@ -331,22 +347,22 @@ async def get_cached_url(bot, file_path):
         
         with open(CACHE_INDEX, 'w', encoding='utf-8') as f:
             json.dump(cache, f, ensure_ascii=False, indent=2)
-        logger.info(f"Cached new URL for {file_path}")
+        bot.logger.log(MODULE_NAME, f"Cached new URL for {p.name}")
         return url
 
     except discord.HTTPException as e:
         if e.status == 413:
-            logger.warning(f"File too large: {p.name} ({p.stat().st_size/1024/1024:.2f} MB)")
+            bot.logger.log(MODULE_NAME, f"File too large: {p.name} ({p.stat().st_size/1024/1024:.2f} MB)", "WARNING")
             return "FILE_TOO_LARGE"
-        logger.error(f"Upload failed: {e}")
+        bot.logger.error(MODULE_NAME, f"Upload failed", e)
         return None
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
+        bot.logger.error(MODULE_NAME, "Unexpected upload error", e)
         return None
 
-async def send_song_embed(user, metadata, url, file_path):
+
+async def send_song_embed(bot, user, metadata, url, file_path):
     """Send song info as an embed"""
-    logger.debug(f"Creating embed for {metadata.get('title')}")
     art = extract_artwork(file_path)
     embed = discord.Embed(
         title=metadata.get('title', 'Unknown Track'),
@@ -364,22 +380,21 @@ async def send_song_embed(user, metadata, url, file_path):
 
     if art:
         try:
-            logger.debug("Adding artwork to embed")
             fobj = discord.File(BytesIO(art), filename="cover.jpg")
             embed.set_thumbnail(url="attachment://cover.jpg")
             await user.send(file=fobj, embed=embed)
             return
         except Exception as e:
-            logger.warning(f"Failed to attach artwork: {e}")
+            bot.logger.log(MODULE_NAME, "Failed to attach artwork", "WARNING")
     await user.send(embed=embed)
+
 
 async def send_bot_log(bot, log_data):
     """Send command execution details to bot-logs channel"""
     try:
-        logger.debug("Sending log to bot-logs channel")
         channel = discord.utils.get(bot.get_all_channels(), name="bot-logs")
         if not channel:
-            logger.warning("bot-logs channel not found")
+            bot.logger.log(MODULE_NAME, "bot-logs channel not found", "WARNING")
             return
             
         embed = discord.Embed(
@@ -414,99 +429,153 @@ async def send_bot_log(bot, log_data):
             embed.add_field(name="Error", value=f"```{log_data.get('error', 'Unknown error')}```", inline=False)
         
         await channel.send(embed=embed)
-        logger.info("Log sent to bot-logs channel")
     except Exception as e:
-        logger.error(f"Failed to send log: {str(e)}")
+        bot.logger.error(MODULE_NAME, "Failed to send log", e)
+
 
 async def log_command_execution(bot, interaction, command_data, success, song_metadata=None, file_path=None, error=None):
     """Log command details to console and bot-logs channel"""
     user_info = f"{interaction.user} ({interaction.user.id})"
-    logger.info(f"Command from {user_info}")
-    logger.info(f"Parameters: {command_data}")
+    bot.logger.log(MODULE_NAME, f"Command from {user_info}")
     
     if success:
         title = song_metadata.get('title', 'Unknown')
-        logger.info(f"Sent song: {title}")
-        logger.info(f"Embed Details: Title={title}, Artist={song_metadata.get('artist', 'Eminem')}, "
-                   f"Album={song_metadata.get('album', 'Unknown')}, Year={song_metadata.get('year', 'N/A')}")
+        bot.logger.log(MODULE_NAME, f"Sent song: {title}")
     else:
-        logger.error(f"Error: {error}")
+        bot.logger.error(MODULE_NAME, f"Command error: {error}")
     
     log_data = {
         'user': str(interaction.user),
         'user_id': interaction.user.id,
         'success': success,
-        'error': str(error) if error else ''
+        'error': str(error) if error else '',
+        'action': 'ARCHIVE',
+        'params': command_data
     }
     
-    if 'params' in command_data:
-        log_data['params'] = command_data
     if success:
         log_data['song_metadata'] = song_metadata
         log_data['file_path'] = file_path
     
     await send_bot_log(bot, log_data)
 
-def setup(bot):  # Changed from setup_emarchive
-    """Setup the emarchive extension"""
-    logger.info("Initializing emarchive extension")
-    bot.song_index = None
-    bot.song_index_ready = asyncio.Event()
 
-    async def init_index():
-        """Initialize the song index"""
-        logger.info("Loading song index...")
-        bot.song_index = load_song_index()
-        if not bot.song_index:
-            logger.info("Building new song index...")
-            bot.song_index = await build_song_index(bot)
-        bot.song_index_ready.set()
-        logger.info("Song index ready")
-        asyncio.create_task(cache_purge_task(bot))
+class ARCHIVEManager:
+    """Manages the ARCHIVE system"""
+    
+    def __init__(self, bot):
+        self.bot = bot
+        self.song_index = None
+        self.song_index_ready = asyncio.Event()
+        self.initialization_task = None
+    
+    async def initialize(self):
+        """Initialize the song index in background"""
+        self.bot.logger.log(MODULE_NAME, "Starting song index initialization...")
+        self.initialization_task = asyncio.create_task(self._initialize_background())
+    
+    async def _initialize_background(self):
+        """Background initialization that won't block the bot"""
+        try:
+            self.song_index = load_song_index(self.bot)
+            if not self.song_index:
+                self.bot.logger.log(MODULE_NAME, "Building new song index in background...")
+                self.song_index = await build_song_index(self.bot)
+            self.song_index_ready.set()
+            self.bot.logger.log(MODULE_NAME, "Song index ready")
+            
+            # Start cache purge task
+            self.cache_purge_loop.start()
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "Background initialization failed", e)
+    
+    async def ensure_ready(self):
+        """Ensure the index is ready, wait if necessary"""
+        if not self.song_index_ready.is_set() and self.initialization_task:
+            await self.song_index_ready.wait()
+    
+    @tasks.loop(hours=CACHE_EXPIRE_DAYS * 24)
+    async def cache_purge_loop(self):
+        """Periodic task to purge old cache and refresh index"""
+        self.bot.logger.log(MODULE_NAME, "Running cache purge task")
+        try:
+            chan = discord.utils.get(self.bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
+            if chan:
+                cutoff = datetime.now(timezone.utc) - timedelta(days=CACHE_EXPIRE_DAYS)
+                await chan.purge(before=cutoff, limit=None)
+                self.bot.logger.log(MODULE_NAME, "Cache purged")
+            
+            if await check_file_modifications():
+                self.bot.logger.log(MODULE_NAME, "File modifications detected, rebuilding index")
+                self.song_index_ready.clear()
+                self.song_index = await build_song_index(self.bot)
+                self.song_index_ready.set()
+            
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "Purge task error", e)
+    
+    @cache_purge_loop.before_loop
+    async def before_cache_purge(self):
+        """Wait until bot is ready before starting the loop"""
+        await self.bot.wait_until_ready()
 
-    original = getattr(bot, 'setup_hook', None)
-    async def new_hook():
-        """Extended setup hook"""
-        if original:
-            await original()
-        asyncio.create_task(init_index())
-    bot.setup_hook = new_hook
-
-    @bot.tree.command(name="emarchive", description="Get a song from Eminem's archive")
+def setup(bot):
+    """Setup function called by main bot to initialize this module"""
+    bot.logger.log(MODULE_NAME, "Setting up ARCHIVE module")
+    
+    # Initialize the manager
+    ARCHIVE_manager = ARCHIVEManager(bot)
+    
+    # Store reference on bot for access in commands
+    bot.ARCHIVE_manager = ARCHIVE_manager
+    
+    # Initialize index on bot ready
+    @bot.event
+    async def on_ARCHIVE_ready():
+        await ARCHIVE_manager.initialize()
+    
+    # Schedule initialization
+    asyncio.create_task(ARCHIVE_manager.initialize())
+    
+    @bot.tree.command(name="archive", description="Get a song from Eminem's archive")
     @app_commands.describe(
         format="File format",
         song_name="Name of the song",
         version="Specific version (optional)"
     )
     @app_commands.choices(format=[app_commands.Choice(name=fmt, value=fmt) for fmt in FORMATS])
-    async def emarchive(interaction: discord.Interaction, format: str, song_name: str, version: Optional[str] = None):
-        """Main archive command"""
+    async def ARCHIVE(interaction: discord.Interaction, format: str, song_name: str, version: Optional[str] = None):
+        """Main ARCHIVE command"""
         command_data = {
             'format': format,
             'song_name': song_name,
             'version': version if version else 'N/A'
         }
         
-        if not bot.song_index_ready.is_set():
-            logger.warning(f"Index not ready when requested by {interaction.user}")
+        # Use ensure_ready instead of direct check
+        await ARCHIVE_manager.ensure_ready()
+        
+        if not ARCHIVE_manager.song_index_ready.is_set():
+            bot.logger.log(MODULE_NAME, f"Index not ready when requested by {interaction.user}", "WARNING")
             await interaction.response.send_message("🔄 Initializing—please try again shortly.", ephemeral=True)
             await log_command_execution(bot, interaction, command_data, False, error="Index not ready")
             return
             
         await interaction.response.defer(ephemeral=True, thinking=True)
-        logger.info(f"Command: '{song_name}' (Format: {format}, Version: {version})")
+        bot.logger.log(MODULE_NAME, f"Command: '{song_name}' (Format: {format}, Version: {version})")
 
-        key = find_best_match(bot.song_index, format, song_name)
+        # Rest of your ARCHIVE command remains the same...
+        key = find_best_match(ARCHIVE_manager.song_index, format, song_name)
         if not key:
-            logger.warning(f"Song not found: '{song_name}' in {format}")
+            bot.logger.log(MODULE_NAME, f"Song not found: '{song_name}' in {format}", "WARNING")
             await interaction.followup.send(f"❌ '{song_name}' not found in {format}", ephemeral=True)
             await log_command_execution(bot, interaction, command_data, False, error="Song not found")
             return
 
-        candidates = bot.song_index[format][key]
+        candidates = ARCHIVE_manager.song_index[format][key]
         best = select_best_candidate(candidates, version)
         if not best:
-            logger.warning(f"Version not found: '{song_name}' version '{version}'")
+            bot.logger.log(MODULE_NAME, f"Version not found: '{song_name}' version '{version}'", "WARNING")
             error_msg = f"❌ '{song_name}'"
             if version:
                 error_msg += f" (version '{version}')"
@@ -516,21 +585,21 @@ def setup(bot):  # Changed from setup_emarchive
             return
 
         try:
-            logger.info(f"Selected song: {best['path']}")
+            bot.logger.log(MODULE_NAME, f"Selected song: {best['original_title']}")
             url = await get_cached_url(bot, best['path'])
             if url == "FILE_TOO_LARGE":
-                logger.warning(f"File too large: {best['path']}")
+                bot.logger.log(MODULE_NAME, f"File too large: {best['path']}", "WARNING")
                 await interaction.followup.send(LARGE_FILE_MSG, ephemeral=True)
                 await log_command_execution(bot, interaction, command_data, False, error="File too large")
                 return
                 
             if not url:
-                logger.error(f"Cache failed for: {best['path']}")
+                bot.logger.error(MODULE_NAME, f"Cache failed for: {best['path']}")
                 await interaction.followup.send("❌ Failed to retrieve song.", ephemeral=True)
                 await log_command_execution(bot, interaction, command_data, False, error="Cache failed")
                 return
 
-            await send_song_embed(interaction.user, best['metadata'], url, best['path'])
+            await send_song_embed(bot, interaction.user, best['metadata'], url, best['path'])
             await interaction.followup.send("✅ Check your DMs for the song link!", ephemeral=True)
             await log_command_execution(
                 bot, 
@@ -540,17 +609,17 @@ def setup(bot):  # Changed from setup_emarchive
                 song_metadata=best['metadata'], 
                 file_path=best['path']
             )
-            logger.info("Song sent successfully")
+            bot.logger.log(MODULE_NAME, "Song sent successfully")
                                       
         except discord.Forbidden:
-            logger.warning(f"DM blocked for user: {interaction.user}")
+            bot.logger.log(MODULE_NAME, f"DM blocked for user: {interaction.user}", "WARNING")
             await interaction.followup.send(
                 "❌ I couldn't send you a DM. Please enable DMs from server members.",
                 ephemeral=True
             )
             await log_command_execution(bot, interaction, command_data, False, error="DM blocked")
         except Exception as e:
-            logger.exception(f"Unexpected error: {str(e)}")
+            bot.logger.error(MODULE_NAME, "Unexpected error in ARCHIVE command", e)
             await interaction.followup.send("❌ An unexpected error occurred.", ephemeral=True)
             await log_command_execution(bot, interaction, command_data, False, error=str(e))
 
@@ -558,21 +627,21 @@ def setup(bot):  # Changed from setup_emarchive
     async def rebuild_index(interaction: discord.Interaction):
         """Admin command to rebuild index"""
         if not interaction.user.guild_permissions.administrator:
-            logger.warning(f"Unauthorized rebuild attempt by {interaction.user}")
+            bot.logger.log(MODULE_NAME, f"Unauthorized rebuild attempt by {interaction.user}", "WARNING")
             await interaction.response.send_message(
                 "❌ You need administrator permissions to use this command.",
                 ephemeral=True
             )
             return
             
-        logger.info(f"Rebuilding index requested by {interaction.user}")
+        bot.logger.log(MODULE_NAME, f"Rebuilding index requested by {interaction.user}")
         await interaction.response.send_message("🔄 Rebuilding song index...", ephemeral=True)
         try:
-            bot.song_index_ready.clear()
-            bot.song_index = await build_song_index(bot)
-            bot.song_index_ready.set()
+            ARCHIVE_manager.song_index_ready.clear()
+            ARCHIVE_manager.song_index = await build_song_index(bot)
+            ARCHIVE_manager.song_index_ready.set()
             await interaction.followup.send("✅ Song index rebuilt successfully!", ephemeral=True)
-            logger.info("Index rebuilt successfully")
+            bot.logger.log(MODULE_NAME, "Index rebuilt successfully")
             
             await send_bot_log(bot, {
                 'user': str(interaction.user),
@@ -582,7 +651,7 @@ def setup(bot):  # Changed from setup_emarchive
             })
             
         except Exception as e:
-            logger.error(f"Index rebuild failed: {str(e)}")
+            bot.logger.error(MODULE_NAME, "Index rebuild failed", e)
             await interaction.followup.send("❌ Failed to rebuild index.", ephemeral=True)
             
             await send_bot_log(bot, {
@@ -593,4 +662,4 @@ def setup(bot):  # Changed from setup_emarchive
                 'action': 'rebuild_index'
             })
 
-    logger.info("Emarchive commands registered")
+    bot.logger.log(MODULE_NAME, "ARCHIVE module setup complete")

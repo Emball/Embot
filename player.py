@@ -1,25 +1,31 @@
-# play.py
 import discord
 import asyncio
-import logging
-import os
-import random
 from pathlib import Path
-from datetime import datetime
+from datetime import timedelta
 from discord import app_commands
 from typing import Optional
-from collections import defaultdict
-from io import BytesIO
+from mutagen.flac import FLAC
+from mutagen.mp3 import MP3
 
-logger = logging.getLogger('play')
+MODULE_NAME = "PLAYER"
 
-# Reuse constants from emarchive.py
-FORMATS = ["FLAC", "MP3"]
-VERSION_KEYWORDS = ['live', 'remix', 'demo', 'acoustic', 'version', 'edit', 'radio']
-CACHE_CHANNEL_NAME = "songcache"
-LARGE_FILE_MSG = "Sorry! The song file was too big to upload in the server."
+# Import shared functions from archive
+def import_archive_functions(bot):
+    """Import necessary functions from archive module"""
+    try:
+        from archive import (
+            find_best_match,
+            select_best_candidate,
+            FORMATS
+        )
+        return find_best_match, select_best_candidate, FORMATS
+    except ImportError:
+        bot.logger.error(MODULE_NAME, "Failed to import from archive module")
+        return None, None, None
+
 
 class Song:
+    """Represents a song in the queue"""
     __slots__ = ('file_path', 'metadata', 'requested_by', 'title', 'duration')
     
     def __init__(self, file_path, metadata, requested_by):
@@ -28,7 +34,6 @@ class Song:
         self.requested_by = requested_by
         self.title = metadata.get('title', Path(file_path).stem)
         self.duration = self._get_duration()
-        logger.debug(f"Created song: {self.title} (Duration: {self.duration}s)")
 
     def _get_duration(self):
         """Get duration in seconds from file metadata"""
@@ -40,10 +45,13 @@ class Song:
                 audio = MP3(self.file_path)
                 return int(audio.info.length)
         except Exception as e:
-            logger.warning(f"Couldn't get duration for {self.file_path}: {e}")
             return 0
+        return 0
+
 
 class MusicPlayer:
+    """Handles music playback for a guild"""
+    
     def __init__(self, bot, guild_id):
         self.bot = bot
         self.guild_id = guild_id
@@ -56,16 +64,16 @@ class MusicPlayer:
         self.now_playing_msg = None
         self.text_channel = None
         self.skip_votes = set()
-        logger.info(f"Initialized MusicPlayer for guild {guild_id}")
+        self.bot.logger.log(MODULE_NAME, f"Initialized player for guild {guild_id}")
 
     async def play_next(self, error=None):
         """Play the next song in queue"""
         if error:
-            logger.error(f"Player error: {error}")
+            self.bot.logger.error(MODULE_NAME, f"Player error: {error}")
 
         async with self.lock:
             if self.loop and self.current:
-                logger.debug("Looping current song")
+                self.bot.logger.log(MODULE_NAME, "Looping current song")
                 await self.queue.put(self.current)
             
             if self.queue.empty():
@@ -75,18 +83,18 @@ class MusicPlayer:
                 await asyncio.sleep(300)
                 if self.queue.empty() and (self.voice_client and not self.voice_client.is_playing()):
                     await self.voice_client.disconnect()
-                    logger.info(f"Auto-disconnected from voice in guild {self.guild_id}")
+                    self.bot.logger.log(MODULE_NAME, f"Auto-disconnected from guild {self.guild_id}")
                 return
                 
             self.current = await self.queue.get()
             self.skip_votes.clear()
-            logger.info(f"Now playing: {self.current.title}")
+            self.bot.logger.log(MODULE_NAME, f"Now playing: {self.current.title}")
 
-            # Use FFmpeg with better audio processing
+            # Use FFmpeg for audio playback
             source = discord.FFmpegPCMAudio(
                 self.current.file_path,
                 before_options='-nostdin',
-                options='-vn -af "aresample=resampler=soxr:precision=28"'
+                options='-vn'
             )
 
             def after_play(error):
@@ -94,13 +102,13 @@ class MusicPlayer:
                 try:
                     fut.result()
                 except Exception as e:
-                    logger.error(f"Error in after_play: {e}")
+                    self.bot.logger.error(MODULE_NAME, f"Error in after_play: {e}")
 
             try:
                 self.voice_client.play(source, after=after_play)
                 await self.update_now_playing()
             except Exception as e:
-                logger.error(f"Playback failed: {e}")
+                self.bot.logger.error(MODULE_NAME, f"Playback failed", e)
                 await self.play_next()
 
     async def update_now_playing(self):
@@ -120,32 +128,43 @@ class MusicPlayer:
         duration_str = str(timedelta(seconds=self.current.duration)) if self.current.duration > 0 else "Unknown"
         
         embed = discord.Embed(
-            title="Now Playing",
+            title="ðŸŽµ Now Playing",
             description=f"**{self.current.title}**",
             color=0x1abc9c
         )
         embed.add_field(name="Requested by", value=self.current.requested_by.mention, inline=True)
         embed.add_field(name="Duration", value=duration_str, inline=True)
         
-        if not self.queue.empty():
-            next_song = self.queue._queue[0]  # Safe access to first item
-            embed.add_field(name="Next Up", value=next_song.title, inline=False)
+        if self.current.metadata.get('album'):
+            embed.add_field(name="Album", value=self.current.metadata['album'], inline=True)
+        if self.current.metadata.get('year'):
+            embed.add_field(name="Year", value=self.current.metadata['year'], inline=True)
         
-        embed.set_footer(text=f"Loop: {'🔁 ON' if self.loop else '⭕ OFF'} | Queue: {self.queue.qsize()}")
+        if not self.queue.empty():
+            # Peek at next song without removing it
+            queue_list = list(self.queue._queue)
+            if queue_list:
+                next_song = queue_list[0]
+                embed.add_field(name="Next Up", value=next_song.title, inline=False)
+        
+        embed.set_footer(text=f"Loop: {'ðŸ” ON' if self.loop else 'â¹ï¸ OFF'} | Queue: {self.queue.qsize()}")
 
         try:
             self.now_playing_msg = await self.text_channel.send(embed=embed)
         except Exception as e:
-            logger.error(f"Failed to send now playing message: {e}")
+            self.bot.logger.error(MODULE_NAME, "Failed to send now playing message", e)
 
     async def add_to_queue(self, song, interaction=None):
         """Add song to queue with notification"""
         await self.queue.put(song)
+        position = self.queue.qsize()
+        
         if interaction:
             await interaction.followup.send(
-                f"✅ Added **{song.title}** to queue (position: {self.queue.qsize()})"
+                f"âœ… Added **{song.title}** to queue (position: {position})"
             )
-        logger.info(f"Added to queue: {song.title} (position: {self.queue.qsize()})")
+        
+        self.bot.logger.log(MODULE_NAME, f"Added to queue: {song.title} (position: {position})")
         
         if not self.voice_client.is_playing() and not self.paused:
             await self.play_next()
@@ -154,14 +173,17 @@ class MusicPlayer:
         """Skip current song with vote tracking"""
         if user_id:
             self.skip_votes.add(user_id)
-            required = max(2, len(self.voice_client.channel.members) // 2)
+            # Exclude bots from member count
+            member_count = len([m for m in self.voice_client.channel.members if not m.bot])
+            required = max(2, member_count // 2)
+            
             if len(self.skip_votes) < required:
-                logger.debug(f"Skip vote: {len(self.skip_votes)}/{required}")
+                self.bot.logger.log(MODULE_NAME, f"Skip vote: {len(self.skip_votes)}/{required}")
                 return False
         
         if self.voice_client and self.voice_client.is_playing():
             self.voice_client.stop()
-            logger.info("Skipped current song")
+            self.bot.logger.log(MODULE_NAME, "Skipped current song")
             return True
         return False
 
@@ -170,19 +192,23 @@ class MusicPlayer:
         if self.voice_client and self.voice_client.is_playing() and not self.paused:
             self.voice_client.pause()
             self.paused = True
-            logger.info("Playback paused")
+            self.bot.logger.log(MODULE_NAME, "Playback paused")
+            return True
+        return False
 
     def resume(self):
         """Resume playback"""
         if self.voice_client and self.voice_client.is_paused() and self.paused:
             self.voice_client.resume()
             self.paused = False
-            logger.info("Playback resumed")
+            self.bot.logger.log(MODULE_NAME, "Playback resumed")
+            return True
+        return False
 
     def toggle_loop(self):
         """Toggle loop mode"""
         self.loop = not self.loop
-        logger.info(f"Loop {'enabled' if self.loop else 'disabled'}")
+        self.bot.logger.log(MODULE_NAME, f"Loop {'enabled' if self.loop else 'disabled'}")
         return self.loop
 
     def stop(self):
@@ -192,18 +218,31 @@ class MusicPlayer:
             self.voice_client.stop()
         self.current = None
         self.loop = False
-        logger.info("Playback stopped and queue cleared")
+        self.skip_votes.clear()
+        self.bot.logger.log(MODULE_NAME, "Playback stopped and queue cleared")
 
     def is_playing(self):
+        """Check if music is currently playing"""
         return self.voice_client and (self.voice_client.is_playing() or self.paused)
 
-def setup(bot):  # Changed from setup_play
-    """Setup music commands"""
-    logger.info("Initializing play commands")
+
+def setup(bot):
+    """Setup function called by main bot to initialize this module"""
+    bot.logger.log(MODULE_NAME, "Setting up player module")
+    
+    # Import functions from archive
+    find_best_match, select_best_candidate, FORMATS = import_archive_functions(bot)
+    
+    if not find_best_match or not select_best_candidate:
+        bot.logger.error(MODULE_NAME, "Failed to import required functions from archive")
+        return
+    
+    # Initialize music players dictionary
     bot.music_players = {}
 
     @bot.event
     async def on_voice_state_update(member, before, after):
+        """Handle voice state updates for cleanup"""
         if member.id != bot.user.id:
             return
             
@@ -219,14 +258,14 @@ def setup(bot):  # Changed from setup_play
                 if player.voice_client:
                     await player.voice_client.disconnect()
                 del bot.music_players[guild_id]
-                logger.info(f"Disconnected from voice in guild {guild_id}")
+                bot.logger.log(MODULE_NAME, f"Cleaned up player for guild {guild_id}")
             except Exception as e:
-                logger.error(f"Voice disconnect error: {e}")
+                bot.logger.error(MODULE_NAME, "Voice disconnect cleanup error", e)
 
     @bot.tree.command(name="play", description="Play a song in voice channel")
     @app_commands.describe(
-        format="File format",
-        song_name="Song name", 
+        format="File format (FLAC or MP3)",
+        song_name="Name of the song",
         version="Specific version (optional)"
     )
     @app_commands.choices(format=[app_commands.Choice(name=fmt, value=fmt) for fmt in FORMATS])
@@ -238,47 +277,45 @@ def setup(bot):  # Changed from setup_play
             'version': version or 'N/A'
         }
         
-        # Check voice channel
-        voice_channel = interaction.user.voice.channel if interaction.user.voice else None
-        if not voice_channel:
-            default_channel = discord.utils.get(interaction.guild.voice_channels, name="voice 1")
-            if not default_channel:
-                await interaction.response.send_message(
-                    "❌ You're not in a voice channel!", 
-                    ephemeral=True
-                )
-                return
-            voice_channel = default_channel
-
-        # Ensure index is ready
-        if not bot.song_index_ready.is_set():
+        # Check if user is in a voice channel
+        if not interaction.user.voice or not interaction.user.voice.channel:
             await interaction.response.send_message(
-                "🔄 Initializing—please try again shortly.",
+                "âŒ You need to be in a voice channel to use this command!",
                 ephemeral=True
             )
+            return
+        
+        voice_channel = interaction.user.voice.channel
+
+        # Ensure archive index is ready
+        if not hasattr(bot, 'archive_manager') or not bot.archive_manager.song_index_ready.is_set():
+            await interaction.response.send_message(
+                "ðŸ”„ Music index not readyâ€”please try again shortly.",
+                ephemeral=True
+            )
+            bot.logger.log(MODULE_NAME, "Index not ready", "WARNING")
             return
             
         await interaction.response.defer(thinking=True)
-        logger.info(f"Play command from {interaction.user}: {song_name} ({format})")
+        bot.logger.log(MODULE_NAME, f"Play command: '{song_name}' (Format: {format}, Version: {version})")
 
-        # Find song
-        key = find_best_match(bot.song_index, format, song_name)
+        # Find song using archive functions
+        key = find_best_match(bot.archive_manager.song_index, format, song_name)
         if not key:
             await interaction.followup.send(
-                f"❌ Song not found: {song_name}",
+                f"âŒ Song not found: '{song_name}' in {format}",
                 ephemeral=True
             )
-            logger.warning(f"Song not found: {song_name}")
+            bot.logger.log(MODULE_NAME, f"Song not found: '{song_name}'", "WARNING")
             return
             
-        candidates = bot.song_index[format][key]
+        candidates = bot.archive_manager.song_index[format][key]
         best = select_best_candidate(candidates, version)
+        
         if not best:
-            await interaction.followup.send(
-                f"❌ Version not found: {version or 'default'}",
-                ephemeral=True
-            )
-            logger.warning(f"Version not found: {version}")
+            error_msg = f"âŒ Version '{version}' not found for '{song_name}'" if version else f"âŒ Song not found: '{song_name}'"
+            await interaction.followup.send(error_msg, ephemeral=True)
+            bot.logger.log(MODULE_NAME, f"Version not found: {version}", "WARNING")
             return
             
         # Create song object
@@ -288,7 +325,7 @@ def setup(bot):  # Changed from setup_play
             requested_by=interaction.user
         )
         
-        # Get or create player
+        # Get or create player for this guild
         guild_id = interaction.guild_id
         player = bot.music_players.get(guild_id)
         
@@ -299,19 +336,22 @@ def setup(bot):  # Changed from setup_play
                 player.voice_client = voice_client
                 player.text_channel = interaction.channel
                 bot.music_players[guild_id] = player
-                logger.info(f"Connected to voice in guild {guild_id}")
+                bot.logger.log(MODULE_NAME, f"Connected to voice in guild {guild_id}")
             except Exception as e:
                 await interaction.followup.send(
-                    f"❌ Failed to join voice: {e}",
+                    f"âŒ Failed to join voice channel: {str(e)}",
                     ephemeral=True
                 )
-                logger.error(f"Voice connection failed: {e}")
+                bot.logger.error(MODULE_NAME, "Voice connection failed", e)
                 return
         elif player.voice_client.channel != voice_channel:
-            await player.voice_client.move_to(voice_channel)
-            logger.info(f"Moved to voice channel {voice_channel}")
+            try:
+                await player.voice_client.move_to(voice_channel)
+                bot.logger.log(MODULE_NAME, f"Moved to voice channel: {voice_channel.name}")
+            except Exception as e:
+                bot.logger.error(MODULE_NAME, "Failed to move voice channel", e)
             
-        # Add to queue
+        # Add to queue and start playing
         await player.add_to_queue(song, interaction)
 
     @bot.tree.command(name="stop", description="Stop playback and clear queue")
@@ -322,18 +362,16 @@ def setup(bot):  # Changed from setup_play
         
         if not player or not player.is_playing():
             await interaction.response.send_message(
-                "❌ Nothing is playing",
+                "âŒ Nothing is playing",
                 ephemeral=True
             )
             return
             
         player.stop()
-        await interaction.response.send_message(
-            "⏹️ Stopped playback and cleared queue"
-        )
-        logger.info(f"Playback stopped by {interaction.user}")
+        await interaction.response.send_message("â¹ï¸ Stopped playback and cleared queue")
+        bot.logger.log(MODULE_NAME, f"Playback stopped by {interaction.user}")
 
-    @bot.tree.command(name="skip", description="Skip current song")
+    @bot.tree.command(name="skip", description="Skip current song (vote-based)")
     async def skip(interaction: discord.Interaction):
         """Skip command with vote system"""
         guild_id = interaction.guild_id
@@ -341,26 +379,28 @@ def setup(bot):  # Changed from setup_play
         
         if not player or not player.is_playing():
             await interaction.response.send_message(
-                "❌ Nothing is playing",
+                "âŒ Nothing is playing",
                 ephemeral=True
             )
             return
             
-        # Check if requester is admin or alone in voice
-        if interaction.user.guild_permissions.administrator or \
-           len(player.voice_client.channel.members) <= 2:
+        # Check if requester is admin or alone in voice (excluding bots)
+        member_count = len([m for m in player.voice_client.channel.members if not m.bot])
+        
+        if interaction.user.guild_permissions.administrator or member_count <= 1:
             player.skip()
-            await interaction.response.send_message("⏭️ Skipped current song")
-            logger.info(f"Admin skip by {interaction.user}")
+            await interaction.response.send_message("â­ï¸ Skipped current song")
+            bot.logger.log(MODULE_NAME, f"Admin/solo skip by {interaction.user}")
             return
             
         # Handle vote skip
         if player.skip(interaction.user.id):
-            await interaction.response.send_message("⏭️ Skipped current song")
+            await interaction.response.send_message("â­ï¸ Skipped current song (vote passed)")
+            bot.logger.log(MODULE_NAME, f"Vote skip passed in guild {guild_id}")
         else:
-            required = max(2, len(player.voice_client.channel.members) // 2)
+            required = max(2, member_count // 2)
             await interaction.response.send_message(
-                f"🗳️ Vote to skip ({len(player.skip_votes)}/{required} votes)"
+                f"ðŸ—³ï¸ Vote to skip: {len(player.skip_votes)}/{required} votes"
             )
 
     @bot.tree.command(name="pause", description="Pause playback")
@@ -369,23 +409,30 @@ def setup(bot):  # Changed from setup_play
         guild_id = interaction.guild_id
         player = bot.music_players.get(guild_id)
         
-        if not player or not player.voice_client.is_playing():
+        if not player or not player.voice_client:
             await interaction.response.send_message(
-                "❌ Nothing is playing",
+                "âŒ Nothing is playing",
+                ephemeral=True
+            )
+            return
+        
+        if not player.voice_client.is_playing():
+            await interaction.response.send_message(
+                "âŒ Nothing is playing",
                 ephemeral=True
             )
             return
             
         if player.paused:
             await interaction.response.send_message(
-                "❌ Already paused",
+                "âŒ Already paused",
                 ephemeral=True
             )
             return
             
         player.pause()
-        await interaction.response.send_message("⏸️ Playback paused")
-        logger.info(f"Playback paused by {interaction.user}")
+        await interaction.response.send_message("â¸ï¸ Playback paused")
+        bot.logger.log(MODULE_NAME, f"Playback paused by {interaction.user}")
 
     @bot.tree.command(name="resume", description="Resume playback")
     async def resume(interaction: discord.Interaction):
@@ -395,14 +442,14 @@ def setup(bot):  # Changed from setup_play
         
         if not player or not player.paused:
             await interaction.response.send_message(
-                "❌ Playback not paused",
+                "âŒ Playback not paused",
                 ephemeral=True
             )
             return
             
         player.resume()
-        await interaction.response.send_message("▶️ Playback resumed")
-        logger.info(f"Playback resumed by {interaction.user}")
+        await interaction.response.send_message("â–¶ï¸ Playback resumed")
+        bot.logger.log(MODULE_NAME, f"Playback resumed by {interaction.user}")
 
     @bot.tree.command(name="queue", description="Show current queue")
     async def show_queue(interaction: discord.Interaction):
@@ -410,20 +457,22 @@ def setup(bot):  # Changed from setup_play
         guild_id = interaction.guild_id
         player = bot.music_players.get(guild_id)
         
-        if not player or player.queue.empty():
+        if not player:
             await interaction.response.send_message(
-                "❌ Queue is empty",
+                "âŒ No active player",
+                ephemeral=True
+            )
+            return
+        
+        if not player.current and player.queue.empty():
+            await interaction.response.send_message(
+                "âŒ Queue is empty",
                 ephemeral=True
             )
             return
             
-        queue_items = []
-        for i, song in enumerate(list(player.queue._queue)[:10], 1):
-            queue_items.append(f"{i}. {song.title} (requested by {song.requested_by.mention})")
-        
         embed = discord.Embed(
-            title="Music Queue",
-            description="\n".join(queue_items),
+            title="ðŸŽµ Music Queue",
             color=0x3498db
         )
         
@@ -431,16 +480,31 @@ def setup(bot):  # Changed from setup_play
             duration = str(timedelta(seconds=player.current.duration)) if player.current.duration > 0 else "Unknown"
             embed.add_field(
                 name="Now Playing",
-                value=f"{player.current.title} ({duration})",
+                value=f"**{player.current.title}** ({duration})\nRequested by {player.current.requested_by.mention}",
+                inline=False
+            )
+        
+        if not player.queue.empty():
+            queue_items = []
+            queue_list = list(player.queue._queue)[:10]
+            
+            for i, song in enumerate(queue_list, 1):
+                duration = str(timedelta(seconds=song.duration)) if song.duration > 0 else "?"
+                queue_items.append(f"{i}. **{song.title}** ({duration}) - {song.requested_by.mention}")
+            
+            embed.add_field(
+                name=f"Up Next ({player.queue.qsize()} songs)",
+                value="\n".join(queue_items),
                 inline=False
             )
             
-        if player.queue.qsize() > 10:
-            embed.set_footer(text=f"Plus {player.queue.qsize() - 10} more songs...")
-            
+            if player.queue.qsize() > 10:
+                embed.set_footer(text=f"Plus {player.queue.qsize() - 10} more songs...")
+        
+        embed.set_footer(text=f"Loop: {'ðŸ” ON' if player.loop else 'â¹ï¸ OFF'}")
         await interaction.response.send_message(embed=embed)
 
-    @bot.tree.command(name="loop", description="Toggle loop mode")
+    @bot.tree.command(name="loop", description="Toggle loop mode for current song")
     async def toggle_loop(interaction: discord.Interaction):
         """Loop toggle command"""
         guild_id = interaction.guild_id
@@ -448,15 +512,45 @@ def setup(bot):  # Changed from setup_play
         
         if not player:
             await interaction.response.send_message(
-                "❌ Not currently playing",
+                "âŒ No active player",
                 ephemeral=True
             )
             return
             
         state = player.toggle_loop()
         await interaction.response.send_message(
-            f"🔁 Loop {'enabled' if state else 'disabled'}"
+            f"ðŸ” Loop {'enabled' if state else 'disabled'}"
         )
-        logger.info(f"Loop {'enabled' if state else 'disabled'} by {interaction.user}")
+        bot.logger.log(MODULE_NAME, f"Loop {'enabled' if state else 'disabled'} by {interaction.user}")
 
-    logger.info("Play commands registered")
+    @bot.tree.command(name="leave", description="Disconnect bot from voice channel")
+    async def leave(interaction: discord.Interaction):
+        """Leave voice channel command"""
+        guild_id = interaction.guild_id
+        player = bot.music_players.get(guild_id)
+        
+        if not player or not player.voice_client:
+            await interaction.response.send_message(
+                "âŒ Not in a voice channel",
+                ephemeral=True
+            )
+            return
+        
+        # Check permissions
+        if not interaction.user.guild_permissions.administrator:
+            # Check if user is in the same voice channel
+            if not interaction.user.voice or interaction.user.voice.channel != player.voice_client.channel:
+                await interaction.response.send_message(
+                    "âŒ You must be in the same voice channel",
+                    ephemeral=True
+                )
+                return
+        
+        player.stop()
+        await player.voice_client.disconnect()
+        del bot.music_players[guild_id]
+        
+        await interaction.response.send_message("ðŸ‘‹ Disconnected from voice channel")
+        bot.logger.log(MODULE_NAME, f"Left voice channel in guild {guild_id}")
+
+    bot.logger.log(MODULE_NAME, "Player module setup complete")

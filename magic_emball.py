@@ -1,11 +1,9 @@
-# magic_emball.py
 import discord
 import random
 import re
-import logging
 from discord import app_commands
 
-logger = logging.getLogger('magic_emball')
+MODULE_NAME = "MAGIC_EMBALL"
 
 RESPONSES = [
     "Yeah", "Nah", "Maybe", 
@@ -70,24 +68,23 @@ SPECIAL_RESPONSES = {
     }
 }
 
-def setup(bot):  # Changed from setup_magic_emball
-    """Setup the magic emball command"""
-    logger.info("Initializing magic emball command")
+def setup(bot):
+    """Setup function called by main bot to initialize this module"""
+    bot.logger.log(MODULE_NAME, "Setting up magic emball command")
 
     @bot.tree.command(name="magicemball", description="Ask the magic Emball a yes/no question")
     @app_commands.describe(question="Your question for the magic 8-ball")
     async def magic_emball(interaction: discord.Interaction, question: str):
         """Magic Emball with smart logic and regex-based detection"""
         try:
-            logger.info(f"Magic emball question from {interaction.user}: {question}")
+            bot.logger.log(MODULE_NAME, f"Question from {interaction.user}: {question}")
             
-            lower_q = question.lower()
             response = None
 
             # Check for special patterns
             for category, data in SPECIAL_RESPONSES.items():
                 if data['pattern'].search(question):
-                    logger.debug(f"Matched special pattern: {category}")
+                    bot.logger.log(MODULE_NAME, f"Matched special pattern: {category}")
                     if 'response' in data:
                         response = data['response']
                     else:
@@ -97,7 +94,7 @@ def setup(bot):  # Changed from setup_magic_emball
             # Default random response if no special pattern matched
             if not response:
                 response = random.choice(RESPONSES)
-                logger.debug("Using random response")
+                bot.logger.log(MODULE_NAME, "Using random response")
 
             embed = discord.Embed(
                 title="🎱 Magic Emball",
@@ -108,13 +105,16 @@ def setup(bot):  # Changed from setup_magic_emball
             embed.set_footer(text="Ask wisely.")
 
             await interaction.response.send_message(embed=embed)
-            logger.info("Sent magic emball response")
+            bot.logger.log(MODULE_NAME, "Sent magic emball response")
 
         except Exception as e:
-            logger.error(f"Magic emball error: {e}")
-            await interaction.response.send_message(
-                "❌ The magic is broken... try again later.",
-                ephemeral=True
-            )
+            bot.logger.error(MODULE_NAME, "Magic emball command failed", e)
+            try:
+                await interaction.response.send_message(
+                    "❌ The magic is broken... try again later.",
+                    ephemeral=True
+                )
+            except:
+                pass
 
-    logger.info("Magic emball command registered")
+    bot.logger.log(MODULE_NAME, "Magic emball command registered successfully")

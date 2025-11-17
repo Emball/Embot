@@ -189,7 +189,7 @@ class ModerationManager:
         self.banned_patterns = self.compile_patterns()
         
     def compile_patterns(self):
-        """Compile regex patterns for banned words"""
+        """Compile regex patterns for banned words - FIXED to match whole words only"""
         patterns = {}
         
         for category, words in [
@@ -200,7 +200,14 @@ class ModerationManager:
         ]:
             patterns[category] = []
             for word in words:
-                pattern = re.escape(word).replace(r'\ ', r'\s*')
+                # Use word boundaries to match whole words only
+                # For phrases with spaces, we need special handling
+                if ' ' in word:
+                    # For phrases, escape and use word boundaries around the whole phrase
+                    pattern = r'\b' + re.escape(word) + r'\b'
+                else:
+                    # For single words, use word boundaries
+                    pattern = r'\b' + re.escape(word) + r'\b'
                 patterns[category].append(re.compile(pattern, re.IGNORECASE))
         
         return patterns
@@ -407,7 +414,7 @@ class ModerationManager:
             
             # Handle based on severity
             if offense_category == 'banned_word':
-                # Just delete, no strikes
+                # Just delete, no strikes, no DM
                 action_data = {
                     'action': 'delete',
                     'user': str(message.author),
@@ -420,27 +427,7 @@ class ModerationManager:
                 }
                 await self.log_mod_action(action_data)
                 
-                # Send warning DM
-                try:
-                    embed = discord.Embed(
-                        title="⚠️ Content Removed",
-                        description="Your message was removed for containing banned content.",
-                        color=0xfaa61a,
-                        timestamp=datetime.utcnow()
-                    )
-                    embed.add_field(name="Action", value="Message deleted", inline=True)
-                    embed.add_field(name="Server", value=message.guild.name, inline=True)
-                    embed.add_field(
-                        name="Note",
-                        value="This is a warning. Repeated violations may result in strikes.",
-                        inline=False
-                    )
-                    
-                    embed.set_footer(text="Automated Moderation")
-                    await message.author.send(embed=embed)
-                except discord.Forbidden:
-                    pass
-                
+                # NO DM for banned words - they're not serious violations
                 return
             
             # For serious violations: child safety, racial slurs, TOS violations
@@ -454,7 +441,7 @@ class ModerationManager:
                 try:
                     await message.author.timeout(until, reason=f"Auto-mod: First strike - {offense_category}")
                     
-                    # Send DM
+                    # Send DM for serious violations only
                     try:
                         embed = discord.Embed(
                             title="⚠️ First Strike - Timeout",
@@ -530,7 +517,7 @@ class ModerationManager:
                 has_elevated_perms = self.has_elevated_permissions(message.author)
                 
                 try:
-                    # Send final DM
+                    # Send final DM for serious violations
                     try:
                         embed = discord.Embed(
                             title="❌ Second Strike - Permanent Ban",

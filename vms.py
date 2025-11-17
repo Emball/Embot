@@ -20,8 +20,8 @@ ARCHIVE_DIR = VMS_ROOT / "archived"
 GENERAL_CHANNEL_NAME = "general"
 
 # Message-based thresholds
-MIN_MESSAGES_BETWEEN = 20
-MAX_MESSAGES_BETWEEN = 40
+MIN_MESSAGES_BETWEEN = 40
+MAX_MESSAGES_BETWEEN = 80
 INACTIVITY_TIMEOUT_HOURS = 2
 
 # Time thresholds
@@ -29,15 +29,9 @@ CACHE_DAYS = 150
 ARCHIVE_DAYS = 365
 ARCHIVE_CHANCE = 0.15
 
-# Transcription behavior
-TRANSCRIPTION_MODE_CHANCES = {
-    'vm_only': 0.50,           # 50% VM only
-    'transcription_only': 0.25, # 25% transcription only
-    'both': 0.25               # 25% both VM and transcription
-}
-
-
-# Button logic removed - VMs cannot be edited in Discord
+# Cooldown configuration (prevents spam)
+PING_COOLDOWN_SECONDS = 300  # 5 minutes between ping responses
+RANDOM_VM_COOLDOWN_SECONDS = 60  # 1 minute between random VMs
 
 
 class VMSManager:
@@ -46,9 +40,11 @@ class VMSManager:
     def __init__(self, bot):
         self.bot = bot
         self.last_post_time = None
+        self.last_ping_response_time = None  # Track ping cooldown
         self.message_count = 0
         self.target_message_count = 0
         self.last_message_time = None
+        self.posting_lock = asyncio.Lock()  # Prevent duplicate posts
         self._setup_directories()
         self._schedule_next_post()
     
@@ -394,37 +390,21 @@ class VMSManager:
             self.bot.logger.error(MODULE_NAME, "Error selecting VM", e)
             return None
     
-    def _choose_transcription_mode(self):
-        """Choose how to present the VM based on configured probabilities"""
-        rand = random.random()
-        cumulative = 0
+    def can_respond_to_ping(self):
+        """Check if enough time has passed since last ping response"""
+        if self.last_ping_response_time is None:
+            return True
         
-        for mode, chance in TRANSCRIPTION_MODE_CHANCES.items():
-            cumulative += chance
-            if rand < cumulative:
-                return mode
-        
-        return 'vm_only'  # Fallback
+        time_since = (datetime.now(timezone.utc) - self.last_ping_response_time).total_seconds()
+        return time_since >= PING_COOLDOWN_SECONDS
     
-    async def _transcribe_vm(self, vm_file):
-        """Transcribe a VM file using the transcription manager - returns plain text without quotes"""
-        if not hasattr(self.bot, 'transcribe_manager'):
-            self.bot.logger.log(MODULE_NAME, "Transcription manager not available", "WARNING")
-            return None
+    def can_post_random_vm(self):
+        """Check if enough time has passed since last random VM post"""
+        if self.last_post_time is None:
+            return True
         
-        try:
-            # Use base model for quick transcription
-            result = await self.bot.transcribe_manager.transcribe_audio(vm_file, "base")
-            
-            if result:
-                # Return plain text without quote formatting for VMS random posts
-                return result['text'].strip()
-            
-            return None
-            
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Error transcribing VM", e)
-            return None
+        time_since = (datetime.now(timezone.utc) - self.last_post_time).total_seconds()
+        return time_since >= RANDOM_VM_COOLDOWN_SECONDS
     
     async def on_general_message(self, message):
         """Track messages in general channel and post VMs when threshold is reached"""
@@ -436,6 +416,14 @@ class VMSManager:
             self.message_count += 1
         
             if self.message_count >= self.target_message_count:
+                # Check cooldown before posting
+                if not self.can_post_random_vm():
+                    self.bot.logger.log(MODULE_NAME, 
+                        f"Cooldown active, skipping scheduled VM (last post was {(datetime.now(timezone.utc) - self.last_post_time).total_seconds():.0f}s ago)")
+                    # Reset counter but keep waiting
+                    self._schedule_next_post()
+                    return
+                
                 self.bot.logger.log(MODULE_NAME, 
                     f"Message threshold reached ({self.message_count}/{self.target_message_count})")
                 await self.post_random_vm()
@@ -451,91 +439,73 @@ class VMSManager:
         time_since_last = datetime.now(timezone.utc) - self.last_message_time
         return time_since_last > timedelta(hours=INACTIVITY_TIMEOUT_HOURS)
     
-    async def post_random_vm(self, reply_to=None):
-        """Post a random voice message - either as VM or transcription text"""
-        try:
-            # Find target channel
-            if reply_to:
-                target_channel = reply_to.channel
-            else:
-                general_channel = None
-                for guild in self.bot.guilds:
-                    channel = discord.utils.get(guild.text_channels, name=GENERAL_CHANNEL_NAME)
-                    if channel:
-                        general_channel = channel
-                        break
+    async def post_random_vm(self, reply_to=None, is_ping_response=False):
+        """Post a random voice message - VM only, with duplicate prevention"""
+        # Use lock to prevent duplicate posts
+        if self.posting_lock.locked():
+            self.bot.logger.log(MODULE_NAME, "Post already in progress, skipping duplicate")
+            return False
+        
+        async with self.posting_lock:
+            try:
+                # Check cooldowns
+                if is_ping_response:
+                    if not self.can_respond_to_ping():
+                        cooldown_remaining = PING_COOLDOWN_SECONDS - (datetime.now(timezone.utc) - self.last_ping_response_time).total_seconds()
+                        self.bot.logger.log(MODULE_NAME, 
+                            f"Ping cooldown active ({cooldown_remaining:.0f}s remaining), ignoring ping")
+                        return False
+                else:
+                    if not self.can_post_random_vm():
+                        cooldown_remaining = RANDOM_VM_COOLDOWN_SECONDS - (datetime.now(timezone.utc) - self.last_post_time).total_seconds()
+                        self.bot.logger.log(MODULE_NAME, 
+                            f"Random VM cooldown active ({cooldown_remaining:.0f}s remaining), skipping")
+                        return False
                 
-                if not general_channel:
-                    self.bot.logger.log(MODULE_NAME, 
-                        f"Channel '{GENERAL_CHANNEL_NAME}' not found", "WARNING")
+                # Find target channel
+                if reply_to:
+                    target_channel = reply_to.channel
+                else:
+                    general_channel = None
+                    for guild in self.bot.guilds:
+                        channel = discord.utils.get(guild.text_channels, name=GENERAL_CHANNEL_NAME)
+                        if channel:
+                            general_channel = channel
+                            break
+                    
+                    if not general_channel:
+                        self.bot.logger.log(MODULE_NAME, 
+                            f"Channel '{GENERAL_CHANNEL_NAME}' not found", "WARNING")
+                        return False
+                    
+                    target_channel = general_channel
+                
+                # Select a random VM
+                vm_file = self.select_random_vm()
+                if not vm_file:
+                    self.bot.logger.log(MODULE_NAME, "No VM to post", "WARNING")
                     return False
                 
-                target_channel = general_channel
-            
-            # Select a random VM
-            vm_file = self.select_random_vm()
-            if not vm_file:
-                self.bot.logger.log(MODULE_NAME, "No VM to post", "WARNING")
+                # Send VM only (no transcription)
+                if reply_to:
+                    await self._send_as_voice_message_reply(reply_to, vm_file)
+                    self.bot.logger.log(MODULE_NAME, "Posted VM reply")
+                else:
+                    await self._send_as_voice_message(target_channel, vm_file)
+                    self.bot.logger.log(MODULE_NAME, "Posted random VM")
+                
+                # Update timestamps
+                if is_ping_response:
+                    self.last_ping_response_time = datetime.now(timezone.utc)
+                else:
+                    self.last_post_time = datetime.now(timezone.utc)
+                    self._schedule_next_post()
+                
+                return True
+                
+            except Exception as e:
+                self.bot.logger.error(MODULE_NAME, "Error posting VM", e)
                 return False
-            
-            # Choose presentation mode
-            mode = self._choose_transcription_mode()
-            self.bot.logger.log(MODULE_NAME, f"Using mode: {mode}")
-            
-            # Handle based on mode
-            if mode == 'transcription_only':
-                # Transcribe and send text only
-                transcription = await self._transcribe_vm(vm_file)
-                
-                if transcription:
-                    if reply_to:
-                        await reply_to.reply(transcription, mention_author=False)
-                    else:
-                        await target_channel.send(transcription)
-                    
-                    self.bot.logger.log(MODULE_NAME, "Posted transcription only")
-                else:
-                    # Fallback to VM if transcription fails
-                    self.bot.logger.log(MODULE_NAME, "Transcription failed, falling back to VM", "WARNING")
-                    if reply_to:
-                        await self._send_as_voice_message_reply(reply_to, vm_file)
-                    else:
-                        await self._send_as_voice_message(target_channel, vm_file)
-            
-            elif mode == 'both':
-                # Send transcription as text, then VM separately
-                transcription = await self._transcribe_vm(vm_file)
-                
-                if transcription:
-                    if reply_to:
-                        await reply_to.reply(transcription, mention_author=False)
-                    else:
-                        await target_channel.send(transcription)
-                
-                # Send the VM as well
-                if reply_to:
-                    await self._send_as_voice_message_reply(reply_to, vm_file)
-                else:
-                    await self._send_as_voice_message(target_channel, vm_file)
-                
-                self.bot.logger.log(MODULE_NAME, "Posted both transcription and VM")
-            
-            else:  # vm_only
-                # Send VM only
-                if reply_to:
-                    await self._send_as_voice_message_reply(reply_to, vm_file)
-                else:
-                    await self._send_as_voice_message(target_channel, vm_file)
-                
-                self.bot.logger.log(MODULE_NAME, "Posted VM only")
-            
-            self.last_post_time = datetime.now(timezone.utc)
-            self._schedule_next_post()
-            return True
-            
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Error posting VM", e)
-            return False
     
     async def get_stats(self):
         """Get statistics about cached and archived VMs"""
@@ -586,7 +556,7 @@ def setup(bot):
     
     @bot.listen('on_message')
     async def on_voice_message(message):
-        """Listen for voice messages and save them, track general messages, respond to pings/replies"""
+        """Listen for voice messages and save them, track general messages, respond to pings/replies with cooldown"""
         if message.author.bot:
             return
     
@@ -605,7 +575,8 @@ def setup(bot):
                 f"Bot {'mentioned' if bot_mentioned else 'replied to'} by {message.author} in #{message.channel.name}")
             
             try:
-                await vms_manager.post_random_vm(reply_to=message)
+                # Pass is_ping_response=True to use ping cooldown
+                await vms_manager.post_random_vm(reply_to=message, is_ping_response=True)
             except Exception as e:
                 bot.logger.error(MODULE_NAME, "Error sending VM response", e)
         
@@ -663,16 +634,28 @@ def setup(bot):
                 inline=False
             )
             
-            # Add transcription mode info
-            mode_info = []
-            for mode, chance in TRANSCRIPTION_MODE_CHANCES.items():
-                mode_info.append(f"{mode.replace('_', ' ').title()}: {chance*100:.0f}%")
+            # Add cooldown status
+            cooldown_info = []
+            if vms_manager.last_post_time:
+                time_since_post = (datetime.now(timezone.utc) - vms_manager.last_post_time).total_seconds()
+                if time_since_post < RANDOM_VM_COOLDOWN_SECONDS:
+                    cooldown_info.append(f"Random VM cooldown: {RANDOM_VM_COOLDOWN_SECONDS - time_since_post:.0f}s")
+                else:
+                    cooldown_info.append("Random VM cooldown: Ready")
             
-            embed.add_field(
-                name="📝 Transcription Modes",
-                value="\n".join(mode_info),
-                inline=True
-            )
+            if vms_manager.last_ping_response_time:
+                time_since_ping = (datetime.now(timezone.utc) - vms_manager.last_ping_response_time).total_seconds()
+                if time_since_ping < PING_COOLDOWN_SECONDS:
+                    cooldown_info.append(f"Ping cooldown: {PING_COOLDOWN_SECONDS - time_since_ping:.0f}s")
+                else:
+                    cooldown_info.append("Ping cooldown: Ready")
+            
+            if cooldown_info:
+                embed.add_field(
+                    name="⏰ Cooldowns",
+                    value="\n".join(cooldown_info),
+                    inline=True
+                )
             
             embed.add_field(
                 name="📋 Configuration",
@@ -681,8 +664,10 @@ def setup(bot):
                       f"Cache threshold: {CACHE_DAYS} days\n"
                       f"Archive threshold: {ARCHIVE_DAYS} days\n"
                       f"Archive play chance: {ARCHIVE_CHANCE*100:.0f}%\n"
+                      f"Ping cooldown: {PING_COOLDOWN_SECONDS}s\n"
+                      f"Random VM cooldown: {RANDOM_VM_COOLDOWN_SECONDS}s\n"
                       f"Responds to: mentions & replies\n"
-                      f"Format: VM or text transcription",
+                      f"Format: Voice messages only",
                 inline=False
             )
             

@@ -409,8 +409,13 @@ class ModerationManager:
                 self.bot.logger.error(MODULE_NAME, f"No permission to remove Moderator role from {message.author}")
         
         try:
-            # Always delete the message
-            await message.delete()
+            # Try to delete the message, but don't fail if already deleted
+            try:
+                await message.delete()
+            except discord.NotFound:
+                self.bot.logger.log(MODULE_NAME, "Message already deleted", "WARNING")
+            except discord.Forbidden:
+                self.bot.logger.error(MODULE_NAME, "No permission to delete message")
             
             # Handle based on severity
             if offense_category == 'banned_word':

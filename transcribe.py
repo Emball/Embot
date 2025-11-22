@@ -239,7 +239,12 @@ class TranscriptionManager:
             
             conversion_success = await self.convert_to_wav(temp_original, temp_wav)
             
-            temp_original.unlink()
+            # Delete original ONLY if conversion succeeded
+            try:
+                if temp_original.exists():
+                    temp_original.unlink()
+            except Exception as e:
+                self.bot.logger.log(MODULE_NAME, f"Could not delete original: {e}", "WARNING")
             
             if not conversion_success:
                 if temp_wav.exists():
@@ -251,7 +256,7 @@ class TranscriptionManager:
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Download/convert error", e)
             return None
-    
+        
     async def use_cached_vm(self, vm_cache_path):
         """Use a cached VM file from VMS system instead of downloading"""
         try:
@@ -320,9 +325,10 @@ class TranscriptionManager:
                 reply_message = None
                 
                 try:
+                    channel_name = getattr(message.channel, 'name', 'DM')
                     async with message.channel.typing():
                         self.bot.logger.log(MODULE_NAME, 
-                            f"Processing VM from {message.author.display_name} in #{message.channel.name}")
+                            f"Processing VM from {message.author.display_name} in #{channel_name}")
                         
                         wav_path = await self.download_and_convert(message)
                         if not wav_path:
@@ -340,6 +346,12 @@ class TranscriptionManager:
                         for i, model_name in enumerate(PROGRESSIVE_MODELS):
                             self.bot.logger.log(MODULE_NAME, 
                                 f"[{i+1}/{len(PROGRESSIVE_MODELS)}] Transcribing with {model_name} model...")
+                            
+                            # Check if file still exists before transcribing
+                            if not wav_path.exists():
+                                self.bot.logger.log(MODULE_NAME, 
+                                    f"WAV file missing before {model_name} transcription", "WARNING")
+                                break
                             
                             result = await self.transcribe_audio(wav_path, model_name)
                             
@@ -376,6 +388,7 @@ class TranscriptionManager:
                         f"Error in progressive transcription", e)
                 
                 finally:
+                    # Only delete temp files AFTER all models have processed
                     for temp_file in temp_files:
                         try:
                             if temp_file.exists():
@@ -392,6 +405,14 @@ class TranscriptionManager:
 
 def setup(bot):
     """Setup function called by main bot to initialize this module"""
+
+    # Prevent duplicate listener registration
+    listener_name = f"_{MODULE_NAME.lower()}_listener_registered"
+    if hasattr(bot, listener_name):
+        bot.logger.log(MODULE_NAME, "Module already setup, skipping duplicate registration")
+        return
+    setattr(bot, listener_name, True)
+
     bot.logger.log(MODULE_NAME, "Setting up transcribe module")
     
     transcribe_manager = TranscriptionManager(bot)
@@ -403,11 +424,16 @@ def setup(bot):
         if message.author.bot:
             return
         
+        # Skip DMs - they don't have channel.name
+        if not message.guild:
+            return
+        
         if not transcribe_manager.is_voice_message(message):
             return
         
+        channel_name = getattr(message.channel, 'name', 'DM')
         bot.logger.log(MODULE_NAME, 
-            f"Detected VM from {message.author} in #{message.channel.name}")
+            f"Detected VM from {message.author} in #{channel_name}")
         
         # Start progressive transcription in background (skip bot's own VMs)
         asyncio.create_task(transcribe_manager.progressive_transcription(message, skip_bot_vms=True))

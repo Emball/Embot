@@ -547,6 +547,14 @@ class VMSManager:
 
 def setup(bot):
     """Setup function called by main bot to initialize this module"""
+
+    # Prevent duplicate listener registration
+    listener_name = f"_{MODULE_NAME.lower()}_listener_registered"
+    if hasattr(bot, listener_name):
+        bot.logger.log(MODULE_NAME, "Module already setup, skipping duplicate registration")
+        return
+    setattr(bot, listener_name, True)
+
     bot.logger.log(MODULE_NAME, "Setting up VMS module")
     
     vms_manager = VMSManager(bot)
@@ -559,8 +567,13 @@ def setup(bot):
         """Listen for voice messages and save them, track general messages, respond to pings/replies with cooldown"""
         if message.author.bot:
             return
-    
-        if message.channel.name == GENERAL_CHANNEL_NAME:
+        
+        # Skip DMs - they don't have channel.name
+        if not message.guild:
+            return
+
+        channel_name = getattr(message.channel, 'name', None)
+        if channel_name == GENERAL_CHANNEL_NAME:
             await vms_manager.on_general_message(message)
         
         bot_mentioned = bot.user in message.mentions
@@ -572,7 +585,7 @@ def setup(bot):
         
         if bot_mentioned or bot_replied_to:
             bot.logger.log(MODULE_NAME, 
-                f"Bot {'mentioned' if bot_mentioned else 'replied to'} by {message.author} in #{message.channel.name}")
+                f"Bot {'mentioned' if bot_mentioned else 'replied to'} by {message.author} in #{channel_name}")
             
             try:
                 # Pass is_ping_response=True to use ping cooldown

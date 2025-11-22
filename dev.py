@@ -20,7 +20,15 @@ MODULE_NAME = "DEV"
 # Configuration
 VERSION_DATA_FILE = "version_data.json"
 TRACKED_EXTENSIONS = ['.py']
-EXCLUDE_FILES = ['_version.py']  # Exclude version file to prevent self-triggering
+# Exclude files that the bot writes to (prevents self-triggering)
+EXCLUDE_FILES = [
+    '_version.py',           # Version file
+    'version_data.json',     # Version history
+    'song_index.json',       # Archive index
+    'cache_index.json',      # Archive cache
+    'moderation_strikes.json',  # Moderation data
+    'member_roles.json'      # Role persistence
+]
 EXCLUDE_DIRS = ['Winpython64', 'python-3', 'venv', 'env', '.git', '__pycache__', 'data', 'icons']
 
 # Enhanced semantic versioning thresholds (actual lines changed, not estimated)
@@ -39,6 +47,22 @@ class FileChangeHandler(FileSystemEventHandler):
         self.last_reload_time = {}
         self.reload_cooldown = 2  # seconds
     
+    def should_ignore_file(self, file_path):
+        """Check if file should be ignored for hot-reload"""
+        file_name = file_path.name
+        
+        # Ignore all excluded files
+        for exclude in EXCLUDE_FILES:
+            if file_name == exclude:
+                return True
+        
+        # Ignore directories
+        for exclude_dir in EXCLUDE_DIRS:
+            if exclude_dir in str(file_path):
+                return True
+        
+        return False
+    
     def on_modified(self, event):
         if event.is_directory:
             return
@@ -49,7 +73,8 @@ class FileChangeHandler(FileSystemEventHandler):
         if file_path.suffix != '.py':
             return
         
-        if any(exclude in str(file_path) for exclude in EXCLUDE_DIRS + EXCLUDE_FILES):
+        # Use the improved ignore check
+        if self.should_ignore_file(file_path):
             return
         
         # Cooldown to prevent multiple rapid reloads
@@ -105,6 +130,8 @@ class DevManager:
         self.bot.logger.log(MODULE_NAME, "  • Development console commands")
         self.bot.logger.log(MODULE_NAME, f"  • Auto-commit: {'ENABLED' if self.auto_commit_enabled else 'DISABLED'}")
         self.bot.logger.log(MODULE_NAME, f"  • Auto-versioning: {'ENABLED' if self.auto_versioning_enabled else 'DISABLED'}")
+        self.bot.logger.log(MODULE_NAME, f"  • Excluded files: {', '.join(EXCLUDE_FILES)}")
+        self.bot.logger.log(MODULE_NAME, f"  • Excluded dirs: {', '.join(EXCLUDE_DIRS)}")
     
     def _check_git(self):
         """Check if Git is available and repository is initialized"""
@@ -252,6 +279,10 @@ wheels/
 # Bot-specific
 *.log
 version_data.json
+song_index.json
+cache_index.json
+moderation_strikes.json
+member_roles.json
 .env
 *.db
 *.sqlite
@@ -392,11 +423,14 @@ icons/
     def _should_exclude_file(self, file_path):
         """Check if a file should be excluded from tracking"""
         path_str = str(file_path)
+        file_name = file_path.name
         
+        # Exclude specific files by exact name match
         for exclude in EXCLUDE_FILES:
-            if exclude in path_str:
+            if file_name == exclude:
                 return True
         
+        # Exclude by directory
         for exclude_dir in EXCLUDE_DIRS:
             if exclude_dir in path_str:
                 return True
@@ -410,9 +444,13 @@ icons/
         
         bot_dir = Path(os.path.dirname(os.path.abspath(__file__)))
         
+        tracked_count = 0
+        excluded_count = 0
+        
         for file_path in bot_dir.glob('*.py'):
             if file_path.is_file():
                 if self._should_exclude_file(file_path):
+                    excluded_count += 1
                     continue
                 
                 relative_path = file_path.name
@@ -422,6 +460,12 @@ icons/
                 if file_hash:
                     current_hashes[relative_path] = file_hash
                     current_contents[relative_path] = file_content
+                    tracked_count += 1
+        
+        if tracked_count > 0 or excluded_count > 0:
+            self.bot.logger.log(MODULE_NAME, 
+                f"Scanned codebase: {tracked_count} tracked, {excluded_count} excluded")
+        
         return current_hashes, current_contents
     
     def _calculate_actual_changes(self, old_contents, new_contents):
@@ -673,12 +717,11 @@ icons/
         try:
             module_name = file_path.stem
             
-            # Don't reload main.py
-            if module_name == 'main':
-                self.bot.logger.log(MODULE_NAME, f"Skipping reload of {module_name}")
+            # Don't reload main.py or excluded files
+            if module_name == 'main' or self._should_exclude_file(file_path):
                 return
             
-            self.bot.logger.log(MODULE_NAME, f"Reloading module: {module_name}")
+            self.bot.logger.log(MODULE_NAME, f"🔄 Reloading module: {module_name}")
             
             # Check if module exists in sys.modules
             if module_name not in sys.modules:
@@ -710,11 +753,8 @@ icons/
                 else:
                     self.bot.logger.log(MODULE_NAME, f"✅ Reloaded: {module_name} (no setup)")
                 
-                # Update version for the change (only if auto-versioning is enabled)
-                if self.auto_versioning_enabled:
-                    await self.check_and_update_version(auto_commit=self.auto_commit_enabled)
-                else:
-                    self.bot.logger.log(MODULE_NAME, "Auto-versioning disabled, skipping version check")
+                # Don't trigger version check on hot-reload - it causes cycles
+                # Version will be checked on manual saves/commits instead
                 
             except Exception as e:
                 self.bot.logger.error(MODULE_NAME, f"Failed to reload {module_name}", e)
@@ -735,7 +775,7 @@ icons/
             self.file_observer.schedule(event_handler, str(bot_dir), recursive=False)
             self.file_observer.start()
             
-            self.bot.logger.log(MODULE_NAME, "🔍 File watcher started - hot-reloading enabled")
+            self.bot.logger.log(MODULE_NAME, "📁 File watcher started - hot-reloading enabled")
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to start file watcher", e)
     
@@ -787,15 +827,28 @@ def setup(bot, register_console_command):
     # Start file watcher for hot-reloading (only in dev mode)
     dev_manager.start_file_watcher()
     
-    # Initial version check
+    # Initial version check and auto-commit
     async def initial_version_check():
         await bot.wait_until_ready()
         await asyncio.sleep(1)
         
         bot.logger.log(MODULE_NAME, "Starting initial version check...")
-        await dev_manager.check_and_update_version(auto_commit=False)
+        version_entry = await dev_manager.check_and_update_version(auto_commit=False)
         bot.version = dev_manager._get_version_from_file()
-        bot.logger.log(MODULE_NAME, f"✅ Version check complete - v{bot.version}")
+        
+        if version_entry:
+            bot.logger.log(MODULE_NAME, f"✅ Version updated to v{version_entry['version']}")
+            
+            # Auto-commit on startup if git is enabled
+            if dev_manager.git_enabled:
+                bot.logger.log(MODULE_NAME, "Auto-committing changes on startup...")
+                success = await dev_manager.git_commit_and_push(None, version_entry)
+                if success:
+                    bot.logger.log(MODULE_NAME, f"✅ Auto-committed v{bot.version} on startup")
+                else:
+                    bot.logger.log(MODULE_NAME, "Auto-commit completed with warnings", "WARNING")
+        else:
+            bot.logger.log(MODULE_NAME, f"✅ Version check complete - v{bot.version} (no changes)")
     
     asyncio.create_task(initial_version_check())
     
@@ -807,10 +860,15 @@ def setup(bot, register_console_command):
             message = args.strip() if args.strip() else None
             print("📦 Checking for changes...")
             
-            version_entry = await dev_manager.check_and_update_version(auto_commit=False)
-            
-            if version_entry:
-                print(f"✅ Version updated to v{version_entry['version']}")
+            # Only check version on manual commit if auto-versioning is enabled
+            version_entry = None
+            if dev_manager.auto_versioning_enabled:
+                version_entry = await dev_manager.check_and_update_version(auto_commit=False)
+                
+                if version_entry:
+                    print(f"✅ Version updated to v{version_entry['version']}")
+            else:
+                print("ℹ️ Auto-versioning disabled, using current version")
             
             print("📤 Committing and pushing...")
             
@@ -888,25 +946,25 @@ def setup(bot, register_console_command):
                 )
                 remotes = result.stdout.strip()
                 
-                print("\n┌─────────────────────────────────────────────────────────────────────────┐")
-                print("│                     GIT REPOSITORY STATUS                                 │")
-                print("├─────────────────────────────────────────────────────────────────────────┤")
+                print("\n┌─────────────────────────────────────────────────────────────────────┐")
+                print("│                     GIT REPOSITORY STATUS                           │")
+                print("├─────────────────────────────────────────────────────────────────────┤")
                 print(f"│ Branch: {branch:<53} │")
                 print(f"│ Status: {'🟢 Clean' if not changes else '🟡 Uncommitted changes':<53} │")
                 
                 if changes:
-                    print("├─────────────────────────────────────────────────────────────────────────┤")
-                    print("│ Uncommitted changes:                                                     │")
+                    print("├─────────────────────────────────────────────────────────────────────┤")
+                    print("│ Uncommitted changes:                                                │")
                     for line in changes.split('\n')[:10]:  # Show first 10 changes
                         print(f"│   {line:<59} │")
                 
                 if remotes:
-                    print("├─────────────────────────────────────────────────────────────────────────┤")
-                    print("│ Remotes:                                                                 │")
+                    print("├─────────────────────────────────────────────────────────────────────┤")
+                    print("│ Remotes:                                                            │")
                     for line in remotes.split('\n'):
                         print(f"│   {line[:59]:<59} │")
                 
-                print("└─────────────────────────────────────────────────────────────────────────┘\n")
+                print("└─────────────────────────────────────────────────────────────────────┘\n")
                 
             except Exception as e:
                 print(f"❌ Error getting git status: {e}")
@@ -940,9 +998,9 @@ def setup(bot, register_console_command):
             """Show development module status"""
             info = dev_manager.get_version_info()
             
-            print("\n┌─────────────────────────────────────────────────────────────────────────┐")
-            print("│                      DEVELOPMENT MODULE STATUS                           │")
-            print("├─────────────────────────────────────────────────────────────────────────┤")
+            print("\n┌─────────────────────────────────────────────────────────────────────┐")
+            print("│                      DEVELOPMENT MODULE STATUS                       │")
+            print("├─────────────────────────────────────────────────────────────────────┤")
             print(f"│ Current Version: v{info['current_version']:<44} │")
             print(f"│ Tracked Files: {info['tracked_files']:<47} │")
             print(f"│ Total Versions: {info['total_versions']:<46} │")
@@ -954,22 +1012,20 @@ def setup(bot, register_console_command):
             if info['last_update']:
                 last = info['last_update']
                 timestamp = datetime.fromisoformat(last['timestamp']).strftime('%Y-%m-%d %H:%M')
-                print("├─────────────────────────────────────────────────────────────────────────┤")
-                print("│ Last Update:                                                            │")
+                print("├─────────────────────────────────────────────────────────────────────┤")
+                print("│ Last Update:                                                        │")
                 
-                # FIXED: Calculate the spacing separately to avoid nested f-strings
                 version_text = f"v{last['version']} ({last['type']})"
                 spacing = 36 - len(version_text)
                 print(f"│   Version: {version_text}{' ' * spacing} │")
                 
                 print(f"│   Time: {timestamp}{' ' * (50 - len(timestamp))} │")
                 
-                # FIXED: Calculate the spacing separately for files/lines
                 files_text = f"{last['files_changed']}, Lines: {last['lines_changed']}"
                 spacing = 35 - len(files_text)
                 print(f"│   Files: {files_text}{' ' * spacing} │")
             
-            print("└─────────────────────────────────────────────────────────────────────────┘\n")
+            print("└─────────────────────────────────────────────────────────────────────┘\n")
         
         async def handle_auto_commit(args):
             """Toggle auto-commit functionality"""

@@ -187,6 +187,8 @@ class ModerationManager:
         self.strike_system = StrikeSystem(bot)
         self.role_persistence = RolePersistenceManager(bot)
         self.banned_patterns = self.compile_patterns()
+        # Track bot command invocations to attribute violations
+        self.command_cache = {}  # message_id -> user_id mapping
         
     def compile_patterns(self):
         """Compile regex patterns for banned words - FIXED to match whole words only"""
@@ -211,6 +213,32 @@ class ModerationManager:
                 patterns[category].append(re.compile(pattern, re.IGNORECASE))
         
         return patterns
+    
+    def extract_all_text(self, message):
+        """Extract all text from message including forwarded messages and embeds"""
+        text_parts = []
+        
+        # Main message content
+        if message.content:
+            text_parts.append(message.content)
+        
+        # Check embeds for text (including forwarded messages)
+        for embed in message.embeds:
+            if embed.description:
+                text_parts.append(embed.description)
+            if embed.title:
+                text_parts.append(embed.title)
+            for field in embed.fields:
+                if field.name:
+                    text_parts.append(field.name)
+                if field.value:
+                    text_parts.append(field.value)
+            if embed.footer and embed.footer.text:
+                text_parts.append(embed.footer.text)
+            if embed.author and embed.author.name:
+                text_parts.append(embed.author.name)
+        
+        return ' '.join(text_parts)
     
     def censor_text(self, text, category):
         """Censor offensive content in logs showing first two letters"""
@@ -327,6 +355,10 @@ class ModerationManager:
             if action_data.get('action') == 'permission_failed':
                 description_parts.append(f"\n⚠️ **Failed to execute action - Missing Permissions**")
             
+            # Add bot output trigger indicator
+            if action_data.get('triggered_by_bot'):
+                description_parts.append(f"\n🤖 **Triggered by bot command output**")
+            
             embed.description = '\n'.join(description_parts)
             
             # Add fields
@@ -380,33 +412,52 @@ class ModerationManager:
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to send mod log", e)
     
-    async def handle_auto_mod_violation(self, message):
-        """Handle auto-mod violations with category-based enforcement"""
-        if message.author.bot or not message.guild:
+    async def handle_auto_mod_violation(self, message, triggered_by_user=None):
+        """Handle auto-mod violations with category-based enforcement
+        
+        Args:
+            message: The message containing the violation
+            triggered_by_user: If this is a bot message, the user who triggered it
+        """
+        # Determine who to punish
+        if triggered_by_user:
+            # Bot output - punish the user who triggered it
+            target_user = triggered_by_user
+            is_bot_output = True
+        else:
+            # User message - punish the author
+            target_user = message.author
+            is_bot_output = False
+        
+        if target_user.bot or not message.guild:
             return
         
-        if not self.contains_banned_content(message.content):
+        # Extract all text from message including forwards and embeds
+        full_text = self.extract_all_text(message)
+        
+        if not self.contains_banned_content(full_text):
             return
         
-        offense_category = self.get_offense_category(message.content)
+        offense_category = self.get_offense_category(full_text)
         
         if not offense_category:
             return
         
+        violation_source = "bot command output" if is_bot_output else "message"
         self.bot.logger.log(MODULE_NAME, 
-            f"Auto-mod violation ({offense_category}) from {message.author} ({message.author.id})")
+            f"Auto-mod violation ({offense_category}) from {target_user} ({target_user.id}) via {violation_source}")
         
         # Check if user has Moderator role and used racial slur
         moderator_role = discord.utils.get(message.guild.roles, name="Moderator")
         moderator_role_removed = False
         
-        if moderator_role and moderator_role in message.author.roles and offense_category == 'racial_slur':
+        if moderator_role and moderator_role in target_user.roles and offense_category == 'racial_slur':
             try:
-                await message.author.remove_roles(moderator_role, reason="Auto-mod: Racial slur violation by moderator")
+                await target_user.remove_roles(moderator_role, reason="Auto-mod: Racial slur violation by moderator")
                 moderator_role_removed = True
-                self.bot.logger.log(MODULE_NAME, f"Removed Moderator role from {message.author} for racial slur")
+                self.bot.logger.log(MODULE_NAME, f"Removed Moderator role from {target_user} for racial slur")
             except discord.Forbidden:
-                self.bot.logger.error(MODULE_NAME, f"No permission to remove Moderator role from {message.author}")
+                self.bot.logger.error(MODULE_NAME, f"No permission to remove Moderator role from {target_user}")
         
         try:
             # Try to delete the message, but don't fail if already deleted
@@ -422,21 +473,20 @@ class ModerationManager:
                 # Just delete, no strikes, no DM
                 action_data = {
                     'action': 'delete',
-                    'user': str(message.author),
-                    'user_id': message.author.id,
-                    'user_obj': message.author,
+                    'user': str(target_user),
+                    'user_id': target_user.id,
+                    'user_obj': target_user,
                     'moderator': 'Auto-Mod',
-                    'reason': 'Use of banned content',
+                    'reason': 'Use of banned content' + (' (via bot command)' if is_bot_output else ''),
                     'category': offense_category,
-                    'message_content': message.content
+                    'message_content': full_text,
+                    'triggered_by_bot': is_bot_output
                 }
                 await self.log_mod_action(action_data)
-                
-                # NO DM for banned words - they're not serious violations
                 return
             
             # For serious violations: child safety, racial slurs, TOS violations
-            strike_count = self.strike_system.add_strike(message.author.id, f"Auto-mod: {offense_category}")
+            strike_count = self.strike_system.add_strike(target_user.id, f"Auto-mod: {offense_category}" + (" (bot output)" if is_bot_output else ""))
             
             if strike_count == 1:
                 # First strike: 1 day timeout (24 hours)
@@ -444,7 +494,7 @@ class ModerationManager:
                 until = discord.utils.utcnow() + timeout_duration
                 
                 try:
-                    await message.author.timeout(until, reason=f"Auto-mod: First strike - {offense_category}")
+                    await target_user.timeout(until, reason=f"Auto-mod: First strike - {offense_category}" + (" (bot output)" if is_bot_output else ""))
                     
                     # Send DM for serious violations only
                     try:
@@ -462,9 +512,14 @@ class ModerationManager:
                             'racial_slur': 'Racial Slur',
                             'tos_violation': 'Terms of Service Violation'
                         }
+                        
+                        violation_text = f"🔴 {category_names.get(offense_category, offense_category)}"
+                        if is_bot_output:
+                            violation_text += "\n🤖 Triggered via bot command output"
+                        
                         embed.add_field(
                             name="Violation",
-                            value=f"🔴 {category_names.get(offense_category, offense_category)}",
+                            value=violation_text,
                             inline=False
                         )
                         
@@ -480,23 +535,25 @@ class ModerationManager:
                         
                         embed.set_footer(text="Automated Moderation System")
                         
-                        await message.author.send(embed=embed)
+                        await target_user.send(embed=embed)
                     except discord.Forbidden:
                         pass
                     
                     # Log action
                     action_data = {
                         'action': 'timeout',
-                        'user': str(message.author),
-                        'user_id': message.author.id,
-                        'user_obj': message.author,
+                        'user': str(target_user),
+                        'user_id': target_user.id,
+                        'user_obj': target_user,
                         'moderator': 'Auto-Mod',
                         'reason': f'First strike: {self.format_category(offense_category)}' + 
-                                 (' - Moderator role removed' if moderator_role_removed else ''),
+                                 (' - Moderator role removed' if moderator_role_removed else '') +
+                                 (' (via bot command)' if is_bot_output else ''),
                         'duration': '1 day',
                         'strikes': f'{strike_count}/2',
                         'category': offense_category,
-                        'message_content': message.content
+                        'message_content': full_text,
+                        'triggered_by_bot': is_bot_output
                     }
                     await self.log_mod_action(action_data)
                     
@@ -504,22 +561,24 @@ class ModerationManager:
                     # Log permission failure
                     action_data = {
                         'action': 'permission_failed',
-                        'user': str(message.author),
-                        'user_id': message.author.id,
-                        'user_obj': message.author,
+                        'user': str(target_user),
+                        'user_id': target_user.id,
+                        'user_obj': target_user,
                         'moderator': 'Auto-Mod',
                         'reason': f'Failed to timeout user - Missing permissions. First strike: {self.format_category(offense_category)}' + 
-                                 (' - Moderator role removed' if moderator_role_removed else ''),
+                                 (' - Moderator role removed' if moderator_role_removed else '') +
+                                 (' (via bot command)' if is_bot_output else ''),
                         'strikes': f'{strike_count}/2',
                         'category': offense_category,
-                        'message_content': message.content
+                        'message_content': full_text,
+                        'triggered_by_bot': is_bot_output
                     }
                     await self.log_mod_action(action_data)
-                    self.bot.logger.error(MODULE_NAME, f"No permission to timeout {message.author}")
+                    self.bot.logger.error(MODULE_NAME, f"No permission to timeout {target_user}")
             
             elif strike_count >= 2:
                 # Second strike: permanent ban - NO MESSAGE HISTORY DELETION
-                has_elevated_perms = self.has_elevated_permissions(message.author)
+                has_elevated_perms = self.has_elevated_permissions(target_user)
                 
                 try:
                     # Send final DM for serious violations
@@ -537,9 +596,14 @@ class ModerationManager:
                             'racial_slur': 'Racial Slur',
                             'tos_violation': 'Terms of Service Violation'
                         }
+                        
+                        violation_text = f"🔴 {category_names.get(offense_category, offense_category)}"
+                        if is_bot_output:
+                            violation_text += "\n🤖 Triggered via bot command output"
+                        
                         embed.add_field(
                             name="Final Violation",
-                            value=f"🔴 {category_names.get(offense_category, offense_category)}",
+                            value=violation_text,
                             inline=False
                         )
                         
@@ -555,30 +619,31 @@ class ModerationManager:
                         
                         embed.set_footer(text="Automated Moderation System")
                         
-                        await message.author.send(embed=embed)
+                        await target_user.send(embed=embed)
                     except discord.Forbidden:
                         pass
                     
                     # Ban user WITHOUT deleting message history
-                    await message.author.ban(
-                        reason=f"Auto-mod: Second strike - {offense_category} violation",
-                        delete_message_days=0  # No message history deletion for slur punishments
+                    await target_user.ban(
+                        reason=f"Auto-mod: Second strike - {offense_category} violation" + (" (bot output)" if is_bot_output else ""),
+                        delete_message_days=0
                     )
                     
                     # Log action
                     action_data = {
                         'action': 'ban',
-                        'user': str(message.author),
-                        'user_id': message.author.id,
-                        'user_obj': message.author,
+                        'user': str(target_user),
+                        'user_id': target_user.id,
+                        'user_obj': target_user,
                         'moderator': 'Auto-Mod',
                         'reason': f'Second strike: Repeated {offense_category} violations' + 
                                  (' (Staff member)' if has_elevated_perms else '') +
-                                 (' - Moderator role was removed on first strike' if moderator_role_removed else ''),
+                                 (' - Moderator role was removed on first strike' if moderator_role_removed else '') +
+                                 (' (via bot command)' if is_bot_output else ''),
                         'strikes': f'{strike_count}/2',
                         'category': offense_category,
-                        'message_content': message.content
-                        # Removed message_deletion field since we're not deleting history
+                        'message_content': full_text,
+                        'triggered_by_bot': is_bot_output
                     }
                     await self.log_mod_action(action_data)
                     
@@ -586,19 +651,21 @@ class ModerationManager:
                     # Log permission failure
                     action_data = {
                         'action': 'permission_failed',
-                        'user': str(message.author),
-                        'user_id': message.author.id,
-                        'user_obj': message.author,
+                        'user': str(target_user),
+                        'user_id': target_user.id,
+                        'user_obj': target_user,
                         'moderator': 'Auto-Mod',
                         'reason': f'Failed to ban user - Missing permissions. Second strike: {offense_category} violation' + 
                                  (' (Staff member)' if has_elevated_perms else '') +
-                                 (' - Moderator role was removed on first strike' if moderator_role_removed else ''),
+                                 (' - Moderator role was removed on first strike' if moderator_role_removed else '') +
+                                 (' (via bot command)' if is_bot_output else ''),
                         'strikes': f'{strike_count}/2',
                         'category': offense_category,
-                        'message_content': message.content
+                        'message_content': full_text,
+                        'triggered_by_bot': is_bot_output
                     }
                     await self.log_mod_action(action_data)
-                    self.bot.logger.error(MODULE_NAME, f"No permission to ban {message.author}")
+                    self.bot.logger.error(MODULE_NAME, f"No permission to ban {target_user}")
         
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Error handling auto-mod violation", e)
@@ -614,7 +681,27 @@ def setup(bot):
     @bot.listen('on_message')
     async def moderation_on_message(message):
         """Handle auto-mod message filtering"""
-        await moderation_manager.handle_auto_mod_violation(message)
+        # Check if this is a bot message that might be from a command
+        if message.author.bot:
+            # Look up if this is in response to a user command
+            # Check reference (reply) or recent command cache
+            triggered_by = None
+            
+            # If message is a reply, check if replying to a user
+            if message.reference and message.reference.resolved:
+                referenced = message.reference.resolved
+                if not referenced.author.bot:
+                    triggered_by = referenced.author
+            
+            # If we found a triggering user, check for violations
+            if triggered_by:
+                await moderation_manager.handle_auto_mod_violation(message, triggered_by_user=triggered_by)
+            # Otherwise just check the bot message itself (might be forwarded content)
+            else:
+                await moderation_manager.handle_auto_mod_violation(message)
+        else:
+            # Regular user message
+            await moderation_manager.handle_auto_mod_violation(message)
     
     @bot.listen('on_member_remove')
     async def on_member_remove(member):
@@ -624,7 +711,6 @@ def setup(bot):
     @bot.listen('on_member_join')
     async def on_member_join(member):
         """Restore member roles when they rejoin"""
-        # Small delay to ensure member is fully loaded
         await asyncio.sleep(1)
         await moderation_manager.role_persistence.restore_member_roles(member)
     
@@ -653,9 +739,7 @@ def setup(bot):
             return
         
         try:
-            # Save roles before kicking
             moderation_manager.role_persistence.save_member_roles(member)
-            
             await member.kick(reason=reason)
             
             action_data = {
@@ -697,7 +781,7 @@ def setup(bot):
     @app_commands.default_permissions(ban_members=True)
     async def ban(interaction: discord.Interaction, member: discord.Member, 
                  reason: Optional[str] = "No reason provided", 
-                 delete_message_days: Optional[int] = 0):  # Changed default to 0
+                 delete_message_days: Optional[int] = 0):
         """Ban command"""
         if not interaction.user.guild_permissions.ban_members:
             await interaction.response.send_message("❌ You don't have permission to ban members.", ephemeral=True)
@@ -715,12 +799,10 @@ def setup(bot):
             await interaction.response.send_message("❌ You cannot ban members with equal or higher roles.", ephemeral=True)
             return
         
-        delete_days = max(0, min(7, delete_message_days or 0))  # Changed default to 0
+        delete_days = max(0, min(7, delete_message_days or 0))
         
         try:
-            # Save roles before banning
             moderation_manager.role_persistence.save_member_roles(member)
-            
             await member.ban(reason=reason, delete_message_days=delete_days)
             
             action_data = {
@@ -732,7 +814,6 @@ def setup(bot):
                 'reason': reason
             }
             
-            # Only add message deletion field if actually deleting messages
             if delete_days > 0:
                 action_data['message_deletion'] = f'{delete_days} days'
             
@@ -957,7 +1038,6 @@ def setup(bot):
             return
         
         try:
-            # Send DM to member
             try:
                 embed = discord.Embed(
                     title="⚠️ Warning",
@@ -1083,7 +1163,6 @@ def setup(bot):
         users_at_risk = sum(1 for strikes in moderation_manager.strike_system.strikes.values() if len(strikes) == 1)
         users_banned = sum(1 for strikes in moderation_manager.strike_system.strikes.values() if len(strikes) >= 2)
         
-        # Count saved roles
         total_saved_roles = sum(
             len(users) 
             for guild_data in moderation_manager.role_persistence.role_cache.values() 
@@ -1112,7 +1191,13 @@ def setup(bot):
             inline=False
         )
         
-        embed.set_footer(text=f"Requested by {interaction.user} | Command prefix: ?")
+        embed.add_field(
+            name="Enhanced Features",
+            value="🤖 Bot command output monitoring\n📨 Forwarded message detection\n📎 Embed content scanning",
+            inline=False
+        )
+        
+        embed.set_footer(text=f"Requested by {interaction.user}")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     bot.logger.log(MODULE_NAME, "Moderation module setup complete")

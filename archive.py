@@ -163,17 +163,57 @@ async def check_file_modifications():
     """Check if any music files have been modified since last index"""
     if not Path(INDEX_FILE).exists():
         return True
+    
+    try:
+        # Get index file modification time
+        last_index_time = datetime.fromtimestamp(Path(INDEX_FILE).stat().st_mtime, timezone.utc)
         
-    last_index_time = datetime.fromtimestamp(Path(INDEX_FILE).stat().st_mtime, timezone.utc)
-    for fmt in FORMATS:
-        fmt_path = EMINEM_ROOT / fmt
-        for root, _, files in os.walk(fmt_path):
-            for file in files:
-                if file.lower().endswith(('.flac', '.mp3')):
-                    file_path = Path(root) / file
-                    if datetime.fromtimestamp(file_path.stat().st_mtime, timezone.utc) > last_index_time:
-                        return True
-    return False
+        # Check if index is older than refresh threshold
+        if datetime.now(timezone.utc) - last_index_time > timedelta(hours=INDEX_REFRESH_HOURS):
+            bot.logger.log(MODULE_NAME, f"Index older than {INDEX_REFRESH_HOURS} hours, needs refresh")
+            return True
+        
+        # Only check for actual file additions/deletions, not modifications
+        # This prevents unnecessary rebuilds when file timestamps change
+        try:
+            with open(INDEX_FILE, 'r', encoding='utf-8') as f:
+                index_data = json.load(f)
+                songs = index_data.get('songs', {})
+        except Exception as e:
+            bot.logger.log(MODULE_NAME, f"Could not read index file: {e}", "WARNING")
+            return True
+        
+        # Count files in current filesystem
+        current_file_count = 0
+        for fmt in FORMATS:
+            fmt_path = EMINEM_ROOT / fmt
+            if not fmt_path.exists():
+                continue
+            for root, _, files in os.walk(fmt_path):
+                for file in files:
+                    if file.lower().endswith(('.flac', '.mp3')):
+                        current_file_count += 1
+        
+        # Count files in index
+        index_file_count = 0
+        for fmt in FORMATS:
+            if fmt in songs:
+                for entries in songs[fmt].values():
+                    index_file_count += len(entries)
+        
+        # Only rebuild if file counts differ (files added or removed)
+        if current_file_count != index_file_count:
+            bot.logger.log(MODULE_NAME, 
+                f"File count changed: {index_file_count} → {current_file_count}, rebuilding index")
+            return True
+        
+        bot.logger.log(MODULE_NAME, 
+            f"Index up-to-date: {current_file_count} files, age: {(datetime.now(timezone.utc) - last_index_time).total_seconds()/3600:.1f}h")
+        return False
+        
+    except Exception as e:
+        bot.logger.error(MODULE_NAME, "Error checking file modifications", e)
+        return False
 
 
 async def build_song_index(bot):

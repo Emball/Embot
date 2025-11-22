@@ -656,14 +656,12 @@ icons/
         try:
             current_version = self._get_version_from_file()
             
-            # Generate commit message if not provided
+            # Generate clean commit message if not provided
             if not message and version_entry:
-                change_type = version_entry['change_type']
-                version = version_entry['version']
-                files_changed = version_entry['files_changed']
-                message = f"v{version} - {change_type} update ({files_changed} files changed)"
+                # Simple, clean format: "v4.2.1.1"
+                message = f"v{version_entry['version']}"
             elif not message:
-                message = f"Update to v{current_version}"
+                message = f"v{current_version}"
             
             # Stage all changes
             result = await asyncio.create_subprocess_exec(

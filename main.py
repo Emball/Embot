@@ -28,10 +28,24 @@ intents.guilds = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 class Logger:
-    """Centralized logging system for all modules"""
+    """Centralized logging system for all modules with persistent prompt"""
     
-    @staticmethod
-    def log(module_name: str, message: str, level: str = "INFO"):
+    def __init__(self):
+        self.prompt_active = False
+        self.lock = threading.Lock()
+    
+    def _clear_line(self):
+        """Clear the current line"""
+        sys.stdout.write('\r\033[K')
+        sys.stdout.flush()
+    
+    def _restore_prompt(self):
+        """Restore the > prompt after logging"""
+        if self.prompt_active:
+            sys.stdout.write('> ')
+            sys.stdout.flush()
+    
+    def log(self, module_name: str, message: str, level: str = "INFO"):
         """
         Log a message with module name tag
         
@@ -40,11 +54,13 @@ class Logger:
             message: The message to log
             level: Log level (INFO, WARNING, ERROR)
         """
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] [{module_name}] [{level}] {message}")
+        with self.lock:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._clear_line()
+            print(f"[{timestamp}] [{module_name}] [{level}] {message}")
+            self._restore_prompt()
 
-    @staticmethod
-    def error(module_name: str, message: str, exception: Exception = None):
+    def error(self, module_name: str, message: str, exception: Exception = None):
         """
         Log an error with optional exception details
         
@@ -53,13 +69,17 @@ class Logger:
             message: Error message
             exception: Optional exception object
         """
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] [{module_name}] [ERROR] {message}")
-        
-        if exception:
-            print(f"[{timestamp}] [{module_name}] [ERROR] Exception: {type(exception).__name__}: {str(exception)}")
-            tb = ''.join(traceback.format_exception(type(exception), exception, exception.__traceback__))
-            print(f"[{timestamp}] [{module_name}] [ERROR] Traceback:\n{tb}")
+        with self.lock:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._clear_line()
+            print(f"[{timestamp}] [{module_name}] [ERROR] {message}")
+            
+            if exception:
+                print(f"[{timestamp}] [{module_name}] [ERROR] Exception: {type(exception).__name__}: {str(exception)}")
+                tb = ''.join(traceback.format_exception(type(exception), exception, exception.__traceback__))
+                print(f"[{timestamp}] [{module_name}] [ERROR] Traceback:\n{tb}")
+            
+            self._restore_prompt()
 
 # Make logger available globally
 bot.logger = Logger()
@@ -227,11 +247,19 @@ def run_console():
     time.sleep(2)
     bot.logger.log("CONSOLE", "Console ready. Type 'help' for commands.")
     
+    # Activate prompt
+    bot.logger.prompt_active = True
+    
     while True:
         try:
+            # Use input with prompt
             cmd = input("> ").strip()
             
+            # Clear prompt temporarily during command execution
+            bot.logger.prompt_active = False
+            
             if not cmd:
+                bot.logger.prompt_active = True
                 continue
             
             parts = cmd.split(maxsplit=1)
@@ -256,38 +284,43 @@ def run_console():
                 asyncio.run_coroutine_threadsafe(bot.close(), bot.loop)
                 break
             else:
-                print(f"❓ Unknown command: {command}. Type 'help' for available commands.")
+                print(f"❌ Unknown command: {command}. Type 'help' for available commands.")
+            
+            # Reactivate prompt
+            bot.logger.prompt_active = True
                 
         except KeyboardInterrupt:
             print("\nUse 'exit' to shutdown gracefully.")
+            bot.logger.prompt_active = True
         except Exception as e:
             print(f"⚠️ Error: {e}")
+            bot.logger.prompt_active = True
 
 def print_help():
     """Print available console commands"""
     help_text = """
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         BOT CONSOLE                                     │
-├─────────────────────────────────────────────────────────────────────────┤
-│ help              - Show this help message                              │
-│ status            - Show bot status                                     │
-│ version           - Show current version                                │"""
+┌─────────────────────────────────────────────────────────────────────┐
+│                         BOT CONSOLE                                 │
+├─────────────────────────────────────────────────────────────────────┤
+│ help              - Show this help message                          │
+│ status            - Show bot status                                 │
+│ version           - Show current version                            │"""
     
     # Add module-registered commands
     for cmd_name, cmd_info in sorted(bot.console_commands.items()):
         help_text += f"\n│ {cmd_name:<17} - {cmd_info['description']:<35} │"
     
     help_text += """
-│ exit / quit       - Shutdown bot gracefully                             │
-└─────────────────────────────────────────────────────────────────────────┘
+│ exit / quit       - Shutdown bot gracefully                         │
+└─────────────────────────────────────────────────────────────────────┘
 """
     print(help_text)
 
 def show_status():
     """Show bot status"""
-    print("\n┌─────────────────────────────────────────────────────────────────────────┐")
+    print("\n┌─────────────────────────────────────────────────────────────────────┐")
     print(f"│ Bot Status - v{bot.version if hasattr(bot, 'version') else '0.0.0.0':<43} │")
-    print("├─────────────────────────────────────────────────────────────────────────┤")
+    print("├─────────────────────────────────────────────────────────────────────┤")
     
     # Basic bot info
     if bot.user:
@@ -326,7 +359,7 @@ def show_status():
     # Console commands info
     print(f"│ Console commands: {len(bot.console_commands)}{' ' * (42 - len(str(len(bot.console_commands))))} │")
     
-    print("└─────────────────────────────────────────────────────────────────────────┘\n")
+    print("└─────────────────────────────────────────────────────────────────────┘\n")
 
 def show_version():
     """Show version information"""

@@ -159,7 +159,7 @@ def normalize_title(title):
     return t.casefold()
 
 
-async def check_file_modifications():
+async def check_file_modifications(bot):  # ✅ ADDED BOT PARAMETER
     """Check if any music files have been modified since last index"""
     if not Path(INDEX_FILE).exists():
         return True
@@ -215,8 +215,7 @@ async def check_file_modifications():
         bot.logger.error(MODULE_NAME, "Error checking file modifications", e)
         return False
 
-
-async def build_song_index(bot):
+async def build_song_index(bot):  # ✅ FIXED: Use parameter instead of global
     """Build the complete song index asynchronously"""
     bot.logger.log(MODULE_NAME, "Building song index...")
     song_index = {fmt: defaultdict(list) for fmt in FORMATS}
@@ -556,7 +555,8 @@ class ARCHIVEManager:
                 await chan.purge(before=cutoff, limit=None)
                 self.bot.logger.log(MODULE_NAME, "Cache purged")
             
-            if await check_file_modifications():
+            # ✅ FIXED: Pass self.bot to the function
+            if await check_file_modifications(self.bot):
                 self.bot.logger.log(MODULE_NAME, "File modifications detected, rebuilding index")
                 self.song_index_ready.clear()
                 self.song_index = await build_song_index(self.bot)

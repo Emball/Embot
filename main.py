@@ -23,7 +23,7 @@ parser.add_argument('-test', '--test', action='store_true',
 args = parser.parse_args()
 
 # Test guild ID
-TEST_GUILD_ID = 1434446391979151452
+TEST_GUILD_ID = 1443195702644576288
 
 # Initialize bot with intents
 intents = discord.Intents.default()

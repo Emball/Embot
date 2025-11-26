@@ -15,6 +15,7 @@ data/
 cache/
 temp/
 *.tmp
+*.bat
 
 # OS
 .DS_Store

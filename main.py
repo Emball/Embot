@@ -18,7 +18,12 @@ import re
 parser = argparse.ArgumentParser(description='Embot Discord Bot')
 parser.add_argument('-dev', '--development', action='store_true', 
                     help='Enable development mode (hot-reload, versioning, git integration)')
+parser.add_argument('-test', '--test', action='store_true',
+                    help='Enable test mode (only run in specific test guild)')
 args = parser.parse_args()
+
+# Test guild ID
+TEST_GUILD_ID = 1434446391979151452
 
 # Initialize bot with intents
 intents = discord.Intents.default()
@@ -196,8 +201,25 @@ async def on_ready():
         # Load version from file
         bot.version = load_version()
         
-        mode = "DEVELOPMENT MODE" if args.development else "PRODUCTION MODE"
+        # Build mode string
+        mode_parts = []
+        if args.development:
+            mode_parts.append("DEVELOPMENT MODE")
+        if args.test:
+            mode_parts.append("TEST MODE")
+        mode = " - ".join(mode_parts) if mode_parts else "PRODUCTION MODE"
+        
         bot.logger.log("MAIN", f"Embot online as {bot.user} - {mode} - v{bot.version}")
+        
+        # Log test mode restrictions if enabled
+        if args.test:
+            bot.logger.log("MAIN", f"🔬 TEST MODE: Bot restricted to guild {TEST_GUILD_ID}")
+            # Check if we're in the test guild
+            test_guild = bot.get_guild(TEST_GUILD_ID)
+            if test_guild:
+                bot.logger.log("MAIN", f"✅ Connected to test guild: {test_guild.name}")
+            else:
+                bot.logger.log("MAIN", "⚠️ Not connected to test guild - commands will be unavailable", "WARNING")
         
         # Start console IMMEDIATELY - don't wait for anything else
         start_console_thread()
@@ -210,8 +232,15 @@ async def on_ready():
         
         # Try to sync commands but don't let failures stop the bot
         try:
-            await bot.tree.sync()
-            bot.logger.log("MAIN", "Commands synced successfully")
+            if args.test:
+                # In test mode, only sync commands to the test guild
+                test_guild = discord.Object(id=TEST_GUILD_ID)
+                await bot.tree.sync(guild=test_guild)
+                bot.logger.log("MAIN", f"Commands synced to test guild {TEST_GUILD_ID}")
+            else:
+                # Normal global sync
+                await bot.tree.sync()
+                bot.logger.log("MAIN", "Commands synced globally")
         except HTTPException as e:
             if e.status == 429 and e.code == 30034:
                 bot.logger.log("MAIN", "⚠️ Daily command sync limit reached (200/200). Commands will sync tomorrow.", "WARNING")
@@ -224,6 +253,22 @@ async def on_ready():
         bot.logger.log("MAIN", f"Embot reconnected as {bot.user}")
         # On reconnect, don't sync commands again to avoid rate limits
         bot.logger.log("MAIN", "Reconnected successfully (commands not resynced to avoid rate limits)")
+
+@bot.check
+async def test_mode_check(ctx):
+    """Global check that restricts command usage in test mode"""
+    if args.test:
+        # In test mode, only allow commands from the test guild
+        if ctx.guild and ctx.guild.id == TEST_GUILD_ID:
+            return True
+        # Also allow DMs with the bot owner for testing
+        elif ctx.guild is None and await bot.is_owner(ctx.author):
+            return True
+        else:
+            if ctx.guild:
+                bot.logger.log("MAIN", f"Blocked command '{ctx.command}' from guild {ctx.guild.id} in test mode")
+            return False
+    return True
 
 async def monitor_heartbeat():
     """Monitor and log heartbeat health"""
@@ -352,8 +397,13 @@ def show_status():
     
     print(f"│ Loaded modules: {len(bot_modules)}{' ' * (45 - len(str(len(bot_modules))))} │")
     
-    # Development mode
-    mode = "🔧 DEVELOPMENT" if args.development else "⚙️ PRODUCTION"
+    # Mode information
+    mode_parts = []
+    if args.development:
+        mode_parts.append("🔧 DEVELOPMENT")
+    if args.test:
+        mode_parts.append("🔬 TEST")
+    mode = " + ".join(mode_parts) if mode_parts else "⚙️ PRODUCTION"
     print(f"│ Mode: {mode:<47} │")
     
     # Console commands info
@@ -403,8 +453,14 @@ def setup_console_commands():
                 
                 # Try to sync but don't fail if rate limited
                 try:
-                    await bot.tree.sync()
-                    print(f"✅ Module '{module_name}' reloaded and synced successfully!")
+                    if args.test:
+                        # In test mode, sync only to test guild
+                        test_guild = discord.Object(id=TEST_GUILD_ID)
+                        await bot.tree.sync(guild=test_guild)
+                        print(f"✅ Module '{module_name}' reloaded and synced to test guild!")
+                    else:
+                        await bot.tree.sync()
+                        print(f"✅ Module '{module_name}' reloaded and synced successfully!")
                 except HTTPException as e:
                     if e.status == 429 and e.code == 30034:
                         print(f"✅ Module '{module_name}' reloaded but command sync rate limited (daily limit reached)")
@@ -480,7 +536,14 @@ if __name__ == "__main__":
         # Setup console commands before starting
         setup_console_commands()
         
-        mode_str = " with development mode" if args.development else ""
+        # Build mode string for startup message
+        mode_parts = []
+        if args.development:
+            mode_parts.append("development")
+        if args.test:
+            mode_parts.append("test")
+        mode_str = " with " + " + ".join(mode_parts) + " mode" if mode_parts else ""
+        
         bot.logger.log("MAIN", f"Starting Embot v{load_version()}{mode_str}...")
         bot.run(TOKEN)
     except Exception as e:

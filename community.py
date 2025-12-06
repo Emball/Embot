@@ -652,7 +652,7 @@ class CommunityManager:
                 f"• All versions share the same votes & XP\n"
                 f"• Prevents leaderboard clutter\n"
                 f"• Your previous version is still tracked\n\n"
-                f"> **Made a mistake?** Click 'Undo' below to register this as a separate project."
+                f"**Made a mistake?** Click 'Undo' below to register this as a separate project."
             )
             
             view = VersionUndoView(self.bot, self.db, message.id, user.id)
@@ -686,7 +686,7 @@ class CommunityManager:
                 "• XP is counted once (no double-dipping)\n"
                 "• Prevents vote manipulation\n"
                 "• Both posts remain visible\n\n"
-                "> This is automatic and helps maintain fair leaderboard rankings."
+                "This is automatic and helps maintain fair leaderboard rankings."
             )
             
             view = InfoButtonsView(self.bot, self.db)
@@ -836,8 +836,8 @@ class CommunityManager:
                     color=THEME_COLORS["project"]
                 )
                 embed.description = (
-                    "# 🚀 Projects Showcase\n"
-                    "> Share your creations and get valuable feedback from the community\n\n"
+                    "# 👋 Welcome to Projects!\n"
+                    "Share your creations and get valuable feedback from the community\n\n"
                     "## 📝 How to Submit\n"
                     "```markdown\n"
                     "# Your Project Title\n"
@@ -846,23 +846,21 @@ class CommunityManager:
                     "[Link](https://your-project.com)\n"
                     "```\n"
                     f"## 🗳️ Voting System\n"
-                    f"{REACTION_FIRE} **Fire** +5 XP · {REACTION_NEUTRAL} **Neutral** 0 XP · {REACTION_TRASH} **Trash** -5 XP\n"
-                    f"💬 **Discussion** +{THREAD_MESSAGE_XP} XP per message in threads\n\n"
-                    "_Click the buttons below to explore more_ ⬇️"
+                    f"React with {REACTION_FIRE} {REACTION_NEUTRAL} {REACTION_TRASH} to vote on submissions and give XP to the creator. "
+                    f"Engage in discussion threads to award additional XP!"
                 )
             else:
                 embed = discord.Embed(
                     color=THEME_COLORS["artwork"]
                 )
                 embed.description = (
-                    "# 🎨 Artwork Gallery\n"
-                    "> Share your creative work and inspire the community\n\n"
+                    "# 👋 Welcome to Artwork!\n"
+                    "Share your creative work and inspire the community\n\n"
                     "## 📸 How to Submit\n"
                     "Simply attach one or more images to your message. That's it!\n\n"
                     f"## 🗳️ Voting System\n"
-                    f"{REACTION_FIRE} **Fire** +5 XP · {REACTION_NEUTRAL} **Neutral** 0 XP · {REACTION_TRASH} **Trash** -5 XP\n"
-                    f"💬 **Discussion** +{THREAD_MESSAGE_XP} XP per message in threads\n\n"
-                    "_Click the buttons below to explore more_ ⬇️"
+                    f"React with {REACTION_FIRE} {REACTION_NEUTRAL} {REACTION_TRASH} to vote on submissions and give XP to the creator. "
+                    f"Engage in discussion threads to award additional XP!"
                 )
             
             embed.set_footer(text="Embot Community • React to vote on submissions")
@@ -901,7 +899,7 @@ class InfoButtonsView(discord.ui.View):
         )
         embed.description = (
             "# ℹ️ Embot Projects Guide\n"
-            "> Everything you need to know about sharing and earning XP\n\n"
+            "Everything you need to know about sharing and earning XP\n\n"
             "## 📋 Project Format\n"
             "**Required Elements:**\n"
             "• Title using `#`, `##`, or `###`\n"
@@ -914,12 +912,12 @@ class InfoButtonsView(discord.ui.View):
             "[Play Now](https://example.com)\n"
             "```\n\n"
             f"## 💎 XP System Breakdown\n"
-            f"{REACTION_FIRE} **Fire** `+5 XP` — Great work!\n"
-            f"{REACTION_NEUTRAL} **Neutral** `0 XP` — Seen it\n"
-            f"{REACTION_TRASH} **Trash** `-5 XP` — Needs work\n"
-            f"{REACTION_STAR} **Star** `+10 XP` — Amazing! (special)\n"
-            f"💬 **Thread Message** `+{THREAD_MESSAGE_XP} XP` — Per reply\n\n"
-            "> Note: Each user can only vote once per submission\n\n"
+            f"{REACTION_FIRE} **Fire** — Great work!\n"
+            f"{REACTION_NEUTRAL} **Neutral** — Seen it\n"
+            f"{REACTION_TRASH} **Trash** — Needs work\n"
+            f"{REACTION_STAR} **Star** — Amazing! (special)\n"
+            f"💬 **Thread Message** — Each reply awards XP\n\n"
+            "Note: Each user can only vote once per submission\n\n"
             "## 🔄 Version System\n"
             "Reposting with the **same title**?\n"
             "• Automatically creates new version (v2.0, v3.0...)\n"
@@ -1088,7 +1086,7 @@ class CommunityDashboardView(discord.ui.View):
                 
                 embed.description = (
                     "# 🏆 Community Leaderboard\n"
-                    "> Top contributors ranked by total XP\n\n"
+                    "Top contributors ranked by total XP\n\n"
                     + "\n".join(leaderboard_lines)
                 )
             

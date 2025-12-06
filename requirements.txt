@@ -22,3 +22,4 @@ torchaudio>=2.0.0
 lyricsgenius
 ffmpeg-python
 watchdog
+pydub

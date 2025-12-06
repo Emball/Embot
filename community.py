@@ -1,11 +1,16 @@
+{
+type: uploaded file
+fileName: community.py
+fullContent:
 import discord
 from discord import app_commands
+from discord.ext import tasks
 import re
 import json
 import hashlib
 import asyncio
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List, Tuple
 import aiohttp
 from dataclasses import dataclass, asdict
@@ -16,6 +21,12 @@ MODULE_NAME = "COMMUNITY"
 # Channel configuration
 PROJECTS_CHANNEL_NAME = "projects"
 ARTWORK_CHANNEL_NAME = "artwork"
+ANNOUNCEMENTS_CHANNEL_NAME = "announcements"
+
+# Special User Configuration
+EMBALL_USER_ID = "1328822521084117033"
+EMBALL_ROLE_NAME = "Emball Releases"
+EMBALL_KEYWORDS = ["remaster", "edit"] # logic handles "remaster/edit", "remaster & edit" via inclusion check
 
 # Reaction emojis
 REACTION_FIRE = "🔥"
@@ -45,6 +56,7 @@ THEME_COLORS = {
     "project": 0x5865F2,      # Discord blurple
     "artwork": 0xEB459E,      # Vibrant pink
     "gold": 0xFFC107,         # Gold for leaderboard
+    "spotlight": 0xFFD700,    # Bright Gold for spotlight
 }
 
 # Database file
@@ -127,8 +139,12 @@ class Submission:
     
     def increment_version(self) -> str:
         """Increment version number and return new version"""
-        major, minor = map(int, self.version.split('.'))
-        self.version = f"{major + 1}.0"
+        try:
+            major, minor = map(int, self.version.split('.'))
+            self.version = f"{major + 1}.0"
+        except ValueError:
+            # Handle cases where version might not be standard x.y
+            self.version = f"{self.version}.1"
         self.updated_at = datetime.now().isoformat()
         return self.version
     
@@ -166,7 +182,11 @@ class SubmissionDatabase:
             "file_hashes": {},
             "link_registry": {},
             "sticky_messages": {},
-            "project_versions": {}
+            "project_versions": {},
+            "settings": {
+                "sticky_enabled": True,
+                "last_spotlight_week": None # Stores "YYYY-WW" string
+            }
         }
         self._load()
     
@@ -176,7 +196,16 @@ class SubmissionDatabase:
             DB_FILE.parent.mkdir(parents=True, exist_ok=True)
             if DB_FILE.exists():
                 with open(DB_FILE, 'r', encoding='utf-8') as f:
-                    self.data = json.load(f)
+                    loaded_data = json.load(f)
+                    # Merge loaded data with structure to ensure new fields exist
+                    for key, value in loaded_data.items():
+                        if key == "settings":
+                            # Deep merge settings
+                            for setting_key, setting_val in value.items():
+                                self.data["settings"][setting_key] = setting_val
+                        else:
+                            self.data[key] = value
+                            
                 self.bot.logger.log(MODULE_NAME, f"Loaded {len(self.data['submissions'])} submissions from database")
             else:
                 self._save()
@@ -195,6 +224,21 @@ class SubmissionDatabase:
     def _get_title_hash(self, title: str) -> str:
         """Generate short hash for title"""
         return hashlib.md5(title.lower().strip().encode()).hexdigest()[:8]
+
+    def set_sticky_enabled(self, enabled: bool):
+        """Toggle sticky messages"""
+        self.data["settings"]["sticky_enabled"] = enabled
+        self._save()
+        
+    def is_sticky_enabled(self) -> bool:
+        return self.data["settings"].get("sticky_enabled", True)
+
+    def get_last_spotlight_week(self) -> Optional[str]:
+        return self.data["settings"].get("last_spotlight_week")
+    
+    def set_last_spotlight_week(self, week_str: str):
+        self.data["settings"]["last_spotlight_week"] = week_str
+        self._save()
     
     def link_submissions(self, msg_id_1: str, msg_id_2: str):
         """Link two submissions to share votes"""
@@ -241,6 +285,15 @@ class SubmissionDatabase:
         existing_submission = None
         linked_message_id = None
         
+        # Smart Version Detection from Title/Description
+        detected_version = None
+        if title:
+            # Look for vX.X or Version X.X patterns
+            combined_text = title + " " + (description if description else "")
+            version_match = re.search(r'(?:v|ver|version)\.?\s*?(\d+(?:\.\d+)+)', combined_text, re.IGNORECASE)
+            if version_match:
+                detected_version = version_match.group(1)
+
         # Generate compact project ID
         if submission_type == SubmissionType.PROJECT and title:
             title_hash = self._get_title_hash(title)
@@ -260,10 +313,19 @@ class SubmissionDatabase:
                             latest_version = sub.version
                             existing_submission = sub
                 
-                major, minor = map(int, latest_version.split('.'))
-                version = f"{major + 1}.0"
+                if detected_version:
+                    version = detected_version
+                else:
+                    try:
+                        major, minor = map(int, latest_version.split('.'))
+                        version = f"{major + 1}.0"
+                    except:
+                         version = "2.0" # Fallback
+                         
                 self.data["project_versions"][version_key].append(message_id)
             else:
+                if detected_version:
+                    version = detected_version
                 self.data["project_versions"][version_key] = [message_id]
         else:
             project_id = f"a-{user_id[-6:]}-{message_id[-8:]}"
@@ -399,6 +461,10 @@ class SubmissionDatabase:
     
     def get_user_xp(self, user_id: str) -> int:
         """Calculate total XP for a user"""
+        # Emball exclusion
+        if str(user_id) == EMBALL_USER_ID:
+            return 0
+            
         total_xp = 0
         counted_projects = set()
         
@@ -424,6 +490,10 @@ class SubmissionDatabase:
         user_xp = {}
         
         for user_id in self.data["user_projects"].keys():
+            # Exclude Emball from leaderboard
+            if str(user_id) == EMBALL_USER_ID:
+                continue
+
             counted_projects = set()
             
             for project_id in self.data["user_projects"][user_id]:
@@ -701,6 +771,51 @@ class CommunityManager:
             self.bot.logger.error(MODULE_NAME, 
                                 f"Failed to send link notification to {user.display_name}", e)
     
+    async def process_emball_submission(self, message: discord.Message, submission: Submission):
+        """Special handling for Emball's posts"""
+        try:
+            guild = message.guild
+            announcements = discord.utils.get(guild.channels, name=ANNOUNCEMENTS_CHANNEL_NAME)
+            
+            if not announcements:
+                self.bot.logger.log(MODULE_NAME, "Announcements channel not found for Emball forwarding", "WARNING")
+                return
+
+            # Check for keywords to ping role
+            content_lower = message.content.lower()
+            should_ping = any(keyword in content_lower for keyword in EMBALL_KEYWORDS)
+            
+            ping_text = ""
+            if should_ping:
+                role = discord.utils.get(guild.roles, name=EMBALL_ROLE_NAME)
+                if role:
+                    ping_text = f"{role.mention} "
+            
+            # Construct embed for announcement
+            embed = discord.Embed(
+                title=f"New Release: {submission.title}",
+                description=submission.description,
+                color=THEME_COLORS["project"],
+                url=message.jump_url
+            )
+            if submission.thumbnail:
+                embed.set_image(url=submission.thumbnail)
+            
+            embed.set_author(name=message.author.display_name, icon_url=message.author.display_avatar.url)
+            embed.set_footer(text="Check it out in #projects!")
+            
+            # Send to announcements
+            announcement_msg = await announcements.send(content=ping_text, embed=embed)
+            
+            # Link the announcement message to the project message for logic consistency
+            # (Shares vote count logic, though we won't add reaction buttons to announcement)
+            self.db.link_submissions(message.id, str(announcement_msg.id))
+            
+            self.bot.logger.log(MODULE_NAME, f"Forwarded Emball's project to #announcements: {announcement_msg.id}")
+            
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "Failed to process Emball submission", e)
+
     async def process_submission(self, message: discord.Message, channel_type: str):
         """Process a submission in projects or artwork channel"""
         try:
@@ -770,6 +885,10 @@ class CommunityManager:
             await message.add_reaction(REACTION_NEUTRAL)
             await message.add_reaction(REACTION_TRASH)
             
+            # Special handling for Emball in projects channel
+            if str(message.author.id) == EMBALL_USER_ID and channel_type == "project":
+                await self.process_emball_submission(message, submission)
+
             version_str = f" v{submission.version}" if is_new_version else ""
             self.bot.logger.log(MODULE_NAME, 
                               f"✅ Successfully registered {channel_type} submission: {submission.project_id}{version_str}")
@@ -830,6 +949,9 @@ class CommunityManager:
     
     async def update_sticky_message(self, channel: discord.TextChannel):
         """Update the sticky dashboard message"""
+        if not self.db.is_sticky_enabled():
+            return
+
         try:
             if channel.name == PROJECTS_CHANNEL_NAME:
                 embed = discord.Embed(
@@ -838,7 +960,7 @@ class CommunityManager:
                 embed.description = (
                     "# 👋 Welcome to Projects!\n"
                     "Share your creations and get valuable feedback from the community\n\n"
-                    "## 📝 How to Submit\n"
+                    "## 📋 How to Submit\n"
                     "```markdown\n"
                     "# Your Project Title\n"
                     "- Feature description\n"
@@ -856,7 +978,7 @@ class CommunityManager:
                 embed.description = (
                     "# 👋 Welcome to Artwork!\n"
                     "Share your creative work and inspire the community\n\n"
-                    "## 📸 How to Submit\n"
+                    "## 📷 How to Submit\n"
                     "Simply attach one or more images to your message. That's it!\n\n"
                     f"## 🗳️ Voting System\n"
                     f"React with {REACTION_FIRE} {REACTION_NEUTRAL} {REACTION_TRASH} to vote on submissions and give XP to the creator. "
@@ -882,6 +1004,75 @@ class CommunityManager:
             
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to update sticky message", e)
+            
+    async def run_spotlight_friday(self):
+        """Execute Spotlight Friday logic"""
+        self.bot.logger.log(MODULE_NAME, "Running Spotlight Friday...")
+        
+        # 1. Find eligible submissions from last 7 days
+        cutoff = datetime.now() - timedelta(days=7)
+        eligible_submissions = []
+        
+        for msg_id, sub_data in self.db.data["submissions"].items():
+            sub = Submission.from_dict(sub_data)
+            
+            # Filter criteria
+            if (sub.is_deleted or 
+                str(sub.user_id) == EMBALL_USER_ID or 
+                datetime.fromisoformat(sub.created_at) < cutoff):
+                continue
+                
+            eligible_submissions.append(sub)
+        
+        if not eligible_submissions:
+            self.bot.logger.log(MODULE_NAME, "No eligible submissions for Spotlight Friday", "WARNING")
+            return
+
+        # 2. Sort by votes (Fire - Trash)
+        def get_score(s):
+             # Calculate pure vote score, ignore thread XP for spotlight to focus on popularity
+             return (s.votes.get(REACTION_FIRE, 0) * 5) + (s.votes.get(REACTION_STAR, 0) * 10) - (s.votes.get(REACTION_TRASH, 0) * 5)
+
+        eligible_submissions.sort(key=get_score, reverse=True)
+        winner = eligible_submissions[0]
+        score = get_score(winner)
+        
+        if score <= 0:
+             self.bot.logger.log(MODULE_NAME, "Top submission has non-positive score, skipping spotlight", "WARNING")
+             return
+
+        # 3. Post to Announcements
+        try:
+            guild = self.bot.guilds[0] # Assuming primary guild
+            announcements = discord.utils.get(guild.channels, name=ANNOUNCEMENTS_CHANNEL_NAME)
+            if not announcements:
+                self.bot.logger.error(MODULE_NAME, f"Could not find #{ANNOUNCEMENTS_CHANNEL_NAME} for Spotlight")
+                return
+
+            user = await self.bot.fetch_user(int(winner.user_id))
+            
+            embed = discord.Embed(
+                title=f"🌟 Spotlight Friday: {winner.title or 'Untitled Artwork'}",
+                description=f"This week's community favorite!\n\n{winner.description or ''}",
+                color=THEME_COLORS["spotlight"],
+                url=f"https://discord.com/channels/{guild.id}/{winner.channel_id}/{winner.message_id}"
+            )
+            embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
+            
+            if winner.thumbnail:
+                embed.set_image(url=winner.thumbnail)
+            
+            embed.add_field(name="Score", value=f"🔥 {winner.votes.get(REACTION_FIRE, 0)} Votes", inline=True)
+            if winner.version != "1.0":
+                embed.add_field(name="Version", value=winner.version, inline=True)
+                
+            embed.set_footer(text="Spotlight Friday • The best of the week!")
+            
+            await announcements.send(embed=embed)
+            self.bot.logger.log(MODULE_NAME, f"Posted Spotlight for {winner.project_id}")
+            
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "Failed to post Spotlight", e)
 
 
 class InfoButtonsView(discord.ui.View):
@@ -921,6 +1112,7 @@ class InfoButtonsView(discord.ui.View):
             "## 🔄 Version System\n"
             "Reposting with the **same title**?\n"
             "• Automatically creates new version (v2.0, v3.0...)\n"
+            "• *Tip: Put 'vX.X' in your title to set a specific version*\n"
             "• All versions share votes & XP\n"
             "• Prevents leaderboard spam\n"
             "• Option to undo if mistake\n\n"
@@ -1239,6 +1431,64 @@ def setup(bot):
     
     manager = CommunityManager(bot, db)
     bot.community_manager = manager
+
+    # --- Spotlight Friday Task ---
+    @tasks.loop(minutes=1)
+    async def spotlight_checker():
+        """Check time for Spotlight Friday (Friday 3PM CST)"""
+        try:
+            # CST is UTC-6
+            cst_tz = timezone(timedelta(hours=-6))
+            now = datetime.now(cst_tz)
+            
+            # Weekday 4 is Friday. 3 PM is 15:00.
+            if now.weekday() == 4 and now.hour == 15:
+                # Get current Week Identifier (Year-Week)
+                current_week = now.strftime("%Y-%W")
+                last_run = db.get_last_spotlight_week()
+                
+                if current_week != last_run:
+                    await manager.run_spotlight_friday()
+                    db.set_last_spotlight_week(current_week)
+                    
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "Error in spotlight checker", e)
+
+    # Start task (wait until bot is ready)
+    @spotlight_checker.before_loop
+    async def before_spotlight():
+        await bot.wait_until_ready()
+
+    spotlight_checker.start()
+    
+    # --- Console Command Handler ---
+    async def handle_toggle_sticky(args):
+        """Toggle sticky messages on/off"""
+        current_state = db.is_sticky_enabled()
+        new_state = not current_state
+        db.set_sticky_enabled(new_state)
+        
+        status_text = "ENABLED" if new_state else "DISABLED"
+        print(f"✅ Sticky messages are now {status_text}")
+        
+        # If disabled, try to clear existing stickies
+        if not new_state:
+            for channel_id, msg_id in db.data["sticky_messages"].items():
+                try:
+                    channel = bot.get_channel(int(channel_id))
+                    if channel:
+                        msg = await channel.fetch_message(int(msg_id))
+                        await msg.delete()
+                except:
+                    pass
+            print("Cleaned up existing sticky messages.")
+
+    if hasattr(bot, 'console_commands'):
+        bot.console_commands['toggle_sticky'] = {
+            'description': 'Toggle dashboard sticky messages on/off',
+            'handler': handle_toggle_sticky
+        }
+
     
     @bot.listen('on_message')
     async def on_community_message(message: discord.Message):
@@ -1391,6 +1641,13 @@ def setup(bot):
                 )
                 return
             
+            if not db.is_sticky_enabled():
+                await interaction.response.send_message(
+                    "❌ Sticky messages are currently disabled in settings.",
+                    ephemeral=True
+                )
+                return
+
             await interaction.response.defer(ephemeral=True)
             await manager.update_sticky_message(interaction.channel)
             
@@ -1449,3 +1706,4 @@ def setup(bot):
             await interaction.response.send_message("❌ Failed to load statistics", ephemeral=True)
     
     bot.logger.log(MODULE_NAME, "Community module setup complete")
+}

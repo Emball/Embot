@@ -1702,4 +1702,3 @@ def setup(bot):
             await interaction.response.send_message("❌ Failed to load statistics", ephemeral=True)
     
     bot.logger.log(MODULE_NAME, "Community module setup complete")
-}

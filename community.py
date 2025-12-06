@@ -165,8 +165,9 @@ class SubmissionDatabase:
             self.bot.logger.error(MODULE_NAME, "Failed to save database", e)
     
     def _get_title_hash(self, title: str) -> str:
-        """Generate hash for title (for version detection)"""
-        return hashlib.md5(title.lower().strip().encode()).hexdigest()
+        """Generate short hash for title (for version detection and IDs)"""
+        # Use first 8 characters of MD5 for compact IDs
+        return hashlib.md5(title.lower().strip().encode()).hexdigest()[:8]
     
     def add_submission(self, message_id: str, user_id: str, submission_type: SubmissionType, 
                       title: Optional[str], description: Optional[str], 
@@ -174,28 +175,32 @@ class SubmissionDatabase:
                       file_hashes: List[str], channel_id: Optional[str] = None) -> Tuple[Submission, bool]:
         """
         Add a new submission to the database
+        For versioned projects, updates the existing entry instead of creating duplicate
         Returns: (Submission object, is_new_version)
         """
         is_new_version = False
         version = "1.0"
+        existing_submission = None
         
-        # Check for existing versions (projects only with titles)
+        # Generate compact project ID
         if submission_type == SubmissionType.PROJECT and title:
             title_hash = self._get_title_hash(title)
+            project_id = f"p-{user_id[-6:]}-{title_hash}"  # Compact: p-123456-abc12345
             version_key = f"{user_id}:{title_hash}"
             
+            # Check for existing versions
             if version_key in self.data["project_versions"]:
-                # This is a new version
                 is_new_version = True
                 existing_message_ids = self.data["project_versions"][version_key]
                 
-                # Get the latest version
+                # Get the latest version and its submission
                 latest_version = "1.0"
                 for msg_id in existing_message_ids:
                     if msg_id in self.data["submissions"]:
                         sub = Submission.from_dict(self.data["submissions"][msg_id])
                         if sub.version > latest_version:
                             latest_version = sub.version
+                            existing_submission = sub
                 
                 # Increment version
                 major, minor = map(int, latest_version.split('.'))
@@ -206,8 +211,9 @@ class SubmissionDatabase:
             else:
                 # First version
                 self.data["project_versions"][version_key] = [message_id]
-        
-        project_id = f"{submission_type.value}_{user_id}_{self._get_title_hash(title) if title else message_id}"
+        else:
+            # Artwork gets simple ID
+            project_id = f"a-{user_id[-6:]}-{message_id[-8:]}"  # Compact: a-123456-abc12345
         
         submission = Submission(
             project_id=project_id,
@@ -220,12 +226,12 @@ class SubmissionDatabase:
             media_links=media_links,
             thumbnail=thumbnail,
             file_hashes=file_hashes,
-            votes={REACTION_FIRE: 0, REACTION_NEUTRAL: 0, REACTION_TRASH: 0, REACTION_STAR: 0},
-            user_votes={},
+            votes=existing_submission.votes if existing_submission else {REACTION_FIRE: 0, REACTION_NEUTRAL: 0, REACTION_TRASH: 0, REACTION_STAR: 0},
+            user_votes=existing_submission.user_votes if existing_submission else {},
             thread_message_count=0,
-            created_at=datetime.now().isoformat(),
+            created_at=existing_submission.created_at if existing_submission else datetime.now().isoformat(),
             updated_at=datetime.now().isoformat(),
-            last_voted_at=None,
+            last_voted_at=existing_submission.last_voted_at if existing_submission else None,
             last_thread_message_at=None,
             is_deleted=False,
             channel_id=channel_id
@@ -235,7 +241,10 @@ class SubmissionDatabase:
         
         if user_id not in self.data["user_projects"]:
             self.data["user_projects"][user_id] = []
-        self.data["user_projects"][user_id].append(project_id)
+        
+        # Only add project_id if not already present (avoid duplicates)
+        if project_id not in self.data["user_projects"][user_id]:
+            self.data["user_projects"][user_id].append(project_id)
         
         # Register file hashes
         for file_hash in file_hashes:
@@ -299,25 +308,46 @@ class SubmissionDatabase:
             self.update_submission(submission)
     
     def get_user_xp(self, user_id: str) -> int:
-        """Calculate total XP for a user (only non-deleted submissions)"""
+        """Calculate total XP for a user (only non-deleted submissions, grouped by project_id)"""
         total_xp = 0
+        counted_projects = set()
+        
         for project_id in self.data["user_projects"].get(user_id, []):
+            if project_id in counted_projects:
+                continue
+                
+            # Find latest version of this project
+            latest_submission = None
             for submission_data in self.data["submissions"].values():
                 submission = Submission.from_dict(submission_data)
                 if submission.project_id == project_id and not submission.is_deleted:
-                    total_xp += submission.calculate_xp()
+                    if latest_submission is None or submission.version > latest_submission.version:
+                        latest_submission = submission
+            
+            if latest_submission:
+                total_xp += latest_submission.calculate_xp()
+                counted_projects.add(project_id)
+        
         return total_xp
     
     async def get_leaderboard(self, bot, limit: int = 10) -> List[tuple]:
         """
         Get top users by XP
         Checks if submissions still exist (lazy deletion detection)
+        Groups versions together (only counts latest version of each project)
         """
         user_xp = {}
         
         for user_id in self.data["user_projects"].keys():
+            counted_projects = set()
+            
             # Check if user's submissions still exist
             for project_id in self.data["user_projects"][user_id]:
+                if project_id in counted_projects:
+                    continue
+                
+                # Find latest version of this project
+                latest_submission = None
                 for msg_id, submission_data in list(self.data["submissions"].items()):
                     submission = Submission.from_dict(submission_data)
                     
@@ -336,10 +366,16 @@ class SubmissionDatabase:
                                 self.update_submission(submission)
                                 continue
                         
-                        # Add XP
-                        if user_id not in user_xp:
-                            user_xp[user_id] = 0
-                        user_xp[user_id] += submission.calculate_xp()
+                        # Track latest version
+                        if latest_submission is None or submission.version > latest_submission.version:
+                            latest_submission = submission
+                
+                # Add XP from latest version only
+                if latest_submission:
+                    if user_id not in user_xp:
+                        user_xp[user_id] = 0
+                    user_xp[user_id] += latest_submission.calculate_xp()
+                    counted_projects.add(project_id)
         
         sorted_users = sorted(user_xp.items(), key=lambda x: x[1], reverse=True)
         return sorted_users[:limit]
@@ -654,8 +690,10 @@ class CommunityManager:
             if is_new_version:
                 await self.send_version_notification(message.author, submission, message)
             
-            # Create discussion thread
+            # Create discussion thread (even for version updates)
             thread_name = title[:100] if title else f"{message.author.display_name}'s artwork"
+            if is_new_version:
+                thread_name = f"{thread_name} v{submission.version}"
             thread = await message.create_thread(name=thread_name, auto_archive_duration=10080)
             
             # Add reaction votes
@@ -734,58 +772,58 @@ class CommunityManager:
             
             if channel.name == PROJECTS_CHANNEL_NAME:
                 embed = discord.Embed(
-                    title="📋 Projects Channel Guidelines",
-                    description="Share your projects using the format below!",
+                    title="👋 Welcome to Projects!",
+                    description="Share your projects and get feedback from the community.",
                     color=discord.Color.blue()
                 )
                 embed.add_field(
-                    name="✅ Required Format",
+                    name="📋 Submission Format",
                     value=(
                         "```\n"
-                        "# Your Project Title\n\n"
-                        "- Feature or description point\n"
-                        "- Another feature or detail\n\n"
-                        "[Project Link](https://example.com)\n"
-                        "or attach image/file\n"
+                        "# Your Project Title\n"
+                        "- Feature description\n"
+                        "- Another feature\n"
+                        "[Link](https://...)\n"
                         "```"
                     ),
                     inline=False
                 )
             else:  # artwork
                 embed = discord.Embed(
-                    title="🎨 Artwork Channel Guidelines",
-                    description="Share your artwork by attaching images!",
+                    title="👋 Welcome to Artwork!",
+                    description="Share your creative work and get feedback from the community.",
                     color=discord.Color.purple()
                 )
                 embed.add_field(
-                    name="✅ How to Submit",
-                    value="Simply attach one or more images to your message. That's it!",
+                    name="🎨 How to Submit",
+                    value="Attach one or more images to your message!",
                     inline=False
                 )
             
-            channel_stats = (
-                f"📊 **Total Submissions:** {stats['total_submissions']}\n"
-                f"🎯 **Projects:** {stats['total_projects']}\n"
-                f"🎨 **Artwork:** {stats['total_artwork']}\n"
-                f"👥 **Contributors:** {stats['total_users']}\n"
-                f"⭐ **Total Votes:** {stats['total_votes']}"
+            # Compact stats in two columns
+            embed.add_field(
+                name="📊 Stats",
+                value=(
+                    f"**Submissions:** {stats['total_submissions']}\n"
+                    f"**Projects:** {stats['total_projects']}\n"
+                    f"**Artwork:** {stats['total_artwork']}"
+                ),
+                inline=True
             )
-            embed.add_field(name="📈 Channel Stats", value=channel_stats, inline=False)
             
             embed.add_field(
-                name="🎮 Reactions & XP",
+                name="👥 Community",
                 value=(
-                    f"{REACTION_FIRE} Fire = +5 XP\n"
-                    f"{REACTION_NEUTRAL} Neutral = 0 XP\n"
-                    f"{REACTION_TRASH} Trash = -5 XP\n"
-                    f"{REACTION_STAR} Star = +10 XP"
+                    f"**Contributors:** {stats['total_users']}\n"
+                    f"**Total Votes:** {stats['total_votes']}\n"
+                    f"**Active:** 🟢"
                 ),
-                inline=False
+                inline=True
             )
             
-            embed.set_footer(text="Click 'View Leaderboard' to see top contributors!")
+            embed.set_footer(text="React with 🔥 😐 🗑️ to vote • Click buttons below for more")
             
-            view = LeaderboardView(self.bot, self.db)
+            view = CommunityDashboardView(self.bot, self.db)
             
             old_sticky_id = self.db.get_sticky_message(str(channel.id))
             if old_sticky_id:
@@ -858,21 +896,20 @@ class VersionUndoView(discord.ui.View):
             )
 
 
-class LeaderboardView(discord.ui.View):
-    """View with leaderboard button"""
+class CommunityDashboardView(discord.ui.View):
+    """View with leaderboard and my projects buttons"""
     
     def __init__(self, bot, db: SubmissionDatabase):
         super().__init__(timeout=None)
         self.bot = bot
         self.db = db
     
-    @discord.ui.button(label="View Leaderboard", style=discord.ButtonStyle.primary, emoji="🏆")
+    @discord.ui.button(label="Leaderboard", style=discord.ButtonStyle.primary, emoji="🏆")
     async def leaderboard_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Show leaderboard when button is clicked"""
         try:
             await interaction.response.defer(ephemeral=True)
             
-            # Get leaderboard with lazy deletion check
             leaderboard = await self.db.get_leaderboard(self.bot, limit=10)
             
             embed = discord.Embed(
@@ -892,25 +929,136 @@ class LeaderboardView(discord.ui.View):
                 leaderboard_text = ""
                 
                 for i, (user_id, xp) in enumerate(leaderboard):
+                    try:
+                        user = await self.bot.fetch_user(int(user_id))
+                        avatar_emoji = "👤"
+                        username = user.display_name
+                    except:
+                        avatar_emoji = "❓"
+                        username = f"User {user_id[-6:]}"
+                    
                     medal = medals[i] if i < 3 else f"**{i+1}.**"
-                    leaderboard_text += f"{medal} <@{user_id}> - **{xp} XP**\n"
+                    leaderboard_text += f"{medal} {avatar_emoji} **{username}** — {xp} XP\n"
                 
                 embed.add_field(name="Rankings", value=leaderboard_text, inline=False)
             
             user_xp = self.db.get_user_xp(str(interaction.user.id))
-            embed.set_footer(text=f"Your XP: {user_xp}")
+            user_submissions = len([p for p in self.db.data["user_projects"].get(str(interaction.user.id), [])])
+            embed.set_footer(
+                text=f"Your stats: {user_xp} XP • {user_submissions} submission(s)",
+                icon_url=interaction.user.display_avatar.url
+            )
             
             await interaction.followup.send(embed=embed, ephemeral=True)
             
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to show leaderboard", e)
             try:
-                await interaction.followup.send(
-                    "❌ Failed to load leaderboard",
-                    ephemeral=True
-                )
+                await interaction.followup.send("❌ Failed to load leaderboard", ephemeral=True)
             except:
                 pass
+    
+    @discord.ui.button(label="My Projects", style=discord.ButtonStyle.secondary, emoji="📁")
+    async def my_projects_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show user's projects"""
+        try:
+            await interaction.response.defer(ephemeral=True)
+            
+            user_id = str(interaction.user.id)
+            project_ids = self.db.data["user_projects"].get(user_id, [])
+            
+            if not project_ids:
+                embed = discord.Embed(
+                    title="📁 Your Projects",
+                    description="You haven't submitted anything yet!",
+                    color=discord.Color.blue()
+                )
+                embed.add_field(
+                    name="Get Started",
+                    value="Submit a project or artwork to see your stats here.",
+                    inline=False
+                )
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
+            
+            # Collect user's submissions (grouped by project_id, showing latest version)
+            user_submissions = {}
+            for msg_id, sub_data in self.db.data["submissions"].items():
+                sub = Submission.from_dict(sub_data)
+                if sub.user_id == user_id and not sub.is_deleted:
+                    if sub.project_id not in user_submissions or sub.version > user_submissions[sub.project_id].version:
+                        user_submissions[sub.project_id] = sub
+            
+            embed = discord.Embed(
+                title=f"📁 {interaction.user.display_name}'s Projects",
+                description=f"You have **{len(user_submissions)}** active submission(s)",
+                color=discord.Color.blue()
+            )
+            
+            total_xp = self.db.get_user_xp(user_id)
+            total_votes = sum(sum(sub.votes.values()) for sub in user_submissions.values())
+            
+            embed.add_field(
+                name="📊 Your Stats",
+                value=(
+                    f"**Total XP:** {total_xp}\n"
+                    f"**Total Votes:** {total_votes}\n"
+                    f"**Submissions:** {len(user_submissions)}"
+                ),
+                inline=False
+            )
+            
+            # Show up to 5 most recent projects
+            sorted_subs = sorted(user_submissions.values(), 
+                               key=lambda x: x.updated_at, reverse=True)[:5]
+            
+            projects_text = ""
+            for sub in sorted_subs:
+                title_display = sub.title if sub.title else "Artwork"
+                xp = sub.calculate_xp()
+                votes_str = " ".join(f"{emoji}{count}" for emoji, count in sub.votes.items() if count > 0)
+                version_str = f" v{sub.version}" if sub.version != "1.0" else ""
+                
+                projects_text += f"**{title_display}**{version_str}\n"
+                projects_text += f"├ ID: `{sub.project_id}`\n"
+                projects_text += f"├ XP: {xp} • Votes: {votes_str or 'None'}\n"
+                projects_text += f"└ Updated: <t:{int(datetime.fromisoformat(sub.updated_at).timestamp())}:R>\n\n"
+            
+            if projects_text:
+                embed.add_field(
+                    name="🎯 Recent Submissions",
+                    value=projects_text,
+                    inline=False
+                )
+            
+            embed.set_footer(
+                text=f"Showing {len(sorted_subs)} of {len(user_submissions)} submission(s)",
+                icon_url=interaction.user.display_avatar.url
+            )
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "Failed to show user projects", e)
+            try:
+                await interaction.followup.send("❌ Failed to load your projects", ephemeral=True)
+            except:
+                pass
+
+
+class LeaderboardView(discord.ui.View):
+    """Legacy view for backwards compatibility"""
+    
+    def __init__(self, bot, db: SubmissionDatabase):
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.db = db
+    
+    @discord.ui.button(label="View Leaderboard", style=discord.ButtonStyle.primary, emoji="🏆")
+    async def leaderboard_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show leaderboard when button is clicked"""
+        view = CommunityDashboardView(self.bot, self.db)
+        await view.leaderboard_button(interaction, button)
 
 
 def setup(bot):
@@ -1098,3 +1246,94 @@ def setup(bot):
             await interaction.response.send_message("❌ Failed to load statistics", ephemeral=True)
     
     bot.logger.log(MODULE_NAME, "Community module setup complete")
+
+
+# ============================================================================
+# UNIT TESTS
+# ============================================================================
+
+def run_tests():
+    """Run unit tests for submission validation"""
+    
+    class MockMessage:
+        def __init__(self, content, attachments=None):
+            self.content = content
+            self.attachments = attachments or []
+    
+    class MockAttachment:
+        def __init__(self, content_type, url="https://example.com/file.png"):
+            self.content_type = content_type
+            self.url = url
+    
+    print("✅ Test 8 Passed: All header formats recognized")
+    
+    print("\n" + "="*70)
+    print("All Tests Passed! ✅")
+    print("="*70 + "\n")
+
+
+# Uncomment to run tests during module load
+# run_tests()\n" + "="*70)
+    print("Running Community Module Unit Tests")
+    print("="*70 + "\n")
+    
+    # Test 1: Valid project submission
+    msg = MockMessage(
+        "# My Cool Project\n\n- Feature 1\n- Feature 2\n\nhttps://github.com/user/project"
+    )
+    is_valid, title, desc, links, error = SubmissionValidator.validate_project(msg)
+    assert is_valid, "Test 1 Failed: Valid project not recognized"
+    assert title == "My Cool Project", f"Test 1 Failed: Title mismatch (got '{title}')"
+    assert "Feature 1" in desc, "Test 1 Failed: Description missing feature"
+    print("✅ Test 1 Passed: Valid project submission")
+    
+    # Test 2: Missing title
+    msg = MockMessage("- Feature 1\n- Feature 2\n\nhttps://example.com")
+    is_valid, _, _, _, error = SubmissionValidator.validate_project(msg)
+    assert not is_valid, "Test 2 Failed: Should reject missing title"
+    assert "title" in error.lower(), "Test 2 Failed: Error should mention title"
+    print("✅ Test 2 Passed: Missing title detected")
+    
+    # Test 3: Missing description
+    msg = MockMessage("# Title\n\nhttps://example.com")
+    is_valid, _, _, _, error = SubmissionValidator.validate_project(msg)
+    assert not is_valid, "Test 3 Failed: Should reject missing description"
+    assert "bullet" in error.lower(), "Test 3 Failed: Error should mention bullets"
+    print("✅ Test 3 Passed: Missing description detected")
+    
+    # Test 4: Image-only project (should redirect to artwork)
+    msg = MockMessage(
+        "# Title\n\n- Feature 1",
+        attachments=[MockAttachment("image/png")]
+    )
+    is_valid, _, _, _, error = SubmissionValidator.validate_project(msg)
+    assert not is_valid, "Test 4 Failed: Should reject image-only project"
+    assert "artwork" in error.lower(), "Test 4 Failed: Should mention artwork channel"
+    print("✅ Test 4 Passed: Image-only project redirected to artwork")
+    
+    # Test 5: Valid artwork submission
+    msg = MockMessage("", attachments=[MockAttachment("image/jpeg")])
+    is_valid, thumbnail, error = SubmissionValidator.validate_artwork(msg)
+    assert is_valid, "Test 5 Failed: Valid artwork not recognized"
+    assert thumbnail is not None, "Test 5 Failed: Thumbnail not extracted"
+    print("✅ Test 5 Passed: Valid artwork submission")
+    
+    # Test 6: Invalid artwork (no image)
+    msg = MockMessage("Some text", attachments=[MockAttachment("application/pdf")])
+    is_valid, _, error = SubmissionValidator.validate_artwork(msg)
+    assert not is_valid, "Test 6 Failed: Should reject non-image artwork"
+    print("✅ Test 6 Passed: Non-image artwork rejected")
+    
+    # Test 7: Link extraction
+    links = SubmissionValidator.extract_links("Check out https://example.com and http://test.org")
+    assert len(links) == 2, f"Test 7 Failed: Expected 2 links, got {len(links)}"
+    assert "https://example.com" in links, "Test 7 Failed: First link not extracted"
+    print("✅ Test 7 Passed: Link extraction works")
+    
+    # Test 8: Multiple header formats
+    for header in ["# Title", "## Title", "### Title"]:
+        msg = MockMessage(f"{header}\n\n- Feature\n\nhttps://example.com")
+        is_valid, title, _, _, _ = SubmissionValidator.validate_project(msg)
+        assert is_valid, f"Test 8 Failed: {header} not recognized"
+        assert title == "Title", f"Test 8 Failed: Title mismatch for {header}"
+    print("

@@ -62,6 +62,7 @@ class Submission:
     last_voted_at: Optional[str]
     last_thread_message_at: Optional[str]
     is_deleted: bool
+    channel_id: Optional[str] = None  # For lazy deletion checks
     
     def to_dict(self) -> Dict:
         """Convert to dictionary for JSON serialization"""
@@ -71,9 +72,19 @@ class Submission:
     
     @classmethod
     def from_dict(cls, data: Dict) -> 'Submission':
-        """Create from dictionary"""
-        data['submission_type'] = SubmissionType(data['submission_type'])
-        return cls(**data)
+        """Create from dictionary, filtering out unexpected fields"""
+        # Get valid field names from the dataclass
+        import inspect
+        valid_fields = {f.name for f in cls.__dataclass_fields__.values()}
+        
+        # Filter data to only include valid fields
+        filtered_data = {k: v for k, v in data.items() if k in valid_fields}
+        
+        # Convert submission_type back to enum
+        if 'submission_type' in filtered_data:
+            filtered_data['submission_type'] = SubmissionType(filtered_data['submission_type'])
+        
+        return cls(**filtered_data)
     
     def calculate_xp(self) -> int:
         """Calculate total XP for this submission"""
@@ -160,7 +171,7 @@ class SubmissionDatabase:
     def add_submission(self, message_id: str, user_id: str, submission_type: SubmissionType, 
                       title: Optional[str], description: Optional[str], 
                       media_links: List[str], thumbnail: Optional[str],
-                      file_hashes: List[str]) -> Tuple[Submission, bool]:
+                      file_hashes: List[str], channel_id: Optional[str] = None) -> Tuple[Submission, bool]:
         """
         Add a new submission to the database
         Returns: (Submission object, is_new_version)
@@ -216,7 +227,8 @@ class SubmissionDatabase:
             updated_at=datetime.now().isoformat(),
             last_voted_at=None,
             last_thread_message_at=None,
-            is_deleted=False
+            is_deleted=False,
+            channel_id=channel_id
         )
         
         self.data["submissions"][message_id] = submission.to_dict()
@@ -310,18 +322,19 @@ class SubmissionDatabase:
                     submission = Submission.from_dict(submission_data)
                     
                     if submission.project_id == project_id and not submission.is_deleted:
-                        # Lazy deletion check
-                        try:
-                            channel = bot.get_channel(int(submission_data.get('channel_id', 0)))
-                            if channel:
-                                message = await channel.fetch_message(int(msg_id))
-                        except (discord.NotFound, discord.HTTPException, AttributeError):
-                            # Message was deleted
-                            self.bot.logger.log(MODULE_NAME, 
-                                              f"Detected deleted submission: {msg_id}", "WARNING")
-                            submission.mark_deleted()
-                            self.update_submission(submission)
-                            continue
+                        # Lazy deletion check - only if we have channel_id
+                        if submission.channel_id:
+                            try:
+                                channel = bot.get_channel(int(submission.channel_id))
+                                if channel:
+                                    await channel.fetch_message(int(msg_id))
+                            except (discord.NotFound, discord.HTTPException, AttributeError):
+                                # Message was deleted
+                                self.bot.logger.log(MODULE_NAME, 
+                                                  f"Detected deleted submission: {msg_id}", "WARNING")
+                                submission.mark_deleted()
+                                self.update_submission(submission)
+                                continue
                         
                         # Add XP
                         if user_id not in user_xp:
@@ -633,13 +646,9 @@ class CommunityManager:
                 description=description,
                 media_links=media_links,
                 thumbnail=thumbnail,
-                file_hashes=file_hashes
+                file_hashes=file_hashes,
+                channel_id=str(message.channel.id)
             )
-            
-            # Store channel ID for lazy deletion checks
-            submission_dict = self.db.data["submissions"][str(message.id)]
-            submission_dict['channel_id'] = str(message.channel.id)
-            self.db._save()
             
             # Send version notification if applicable
             if is_new_version:

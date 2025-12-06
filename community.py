@@ -34,6 +34,19 @@ XP_VALUES = {
 # Thread message XP
 THREAD_MESSAGE_XP = 0.1
 
+# Theme colors (sleek, modern palette)
+THEME_COLORS = {
+    "primary": 0x00D9FF,      # Cyan - main accent
+    "secondary": 0xFF006E,    # Pink - highlights
+    "success": 0x06FFA5,      # Mint green
+    "warning": 0xFFBE0B,      # Amber
+    "error": 0xFF006E,        # Pink-red
+    "dark": 0x2B2D31,         # Discord dark gray
+    "project": 0x5865F2,      # Discord blurple
+    "artwork": 0xEB459E,      # Vibrant pink
+    "gold": 0xFFC107,         # Gold for leaderboard
+}
+
 # Database file
 DB_FILE = Path("data/community_submissions.json")
 
@@ -608,9 +621,11 @@ class CommunityManager:
         """Send a friendly error DM to the user"""
         try:
             embed = discord.Embed(
-                title=f"❌ {submission_type.title()} Submission Issue",
-                description=error_message,
-                color=discord.Color.red()
+                color=THEME_COLORS["error"]
+            )
+            embed.description = (
+                f"# ❌ Submission Issue\n\n"
+                f"{error_message}"
             )
             
             view = InfoButtonsView(self.bot, self.db)
@@ -628,23 +643,16 @@ class CommunityManager:
         """Send DM about project version update with undo button"""
         try:
             embed = discord.Embed(
-                title="🔄 Project Version Updated",
-                description=f"Your project **{submission.title}** has been updated to version **{submission.version}**",
-                color=discord.Color.blue()
+                color=THEME_COLORS["primary"]
             )
-            embed.add_field(
-                name="Shared Features",
-                value=(
-                    "• All versions share the same votes and XP\n"
-                    "• This prevents leaderboard clutter\n"
-                    "• Your old version is still tracked"
-                ),
-                inline=False
-            )
-            embed.add_field(
-                name="Was this a mistake?",
-                value="Click **Undo** below to register this as a separate project instead.",
-                inline=False
+            embed.description = (
+                f"# 🔄 Version Update\n\n"
+                f"Your project **{submission.title}** has been updated to `v{submission.version}`\n\n"
+                f"## What This Means\n"
+                f"• All versions share the same votes & XP\n"
+                f"• Prevents leaderboard clutter\n"
+                f"• Your previous version is still tracked\n\n"
+                f"> **Made a mistake?** Click 'Undo' below to register this as a separate project."
             )
             
             view = VersionUndoView(self.bot, self.db, message.id, user.id)
@@ -668,19 +676,17 @@ class CommunityManager:
         """Notify user that their submission was linked to existing artwork"""
         try:
             embed = discord.Embed(
-                title="🔗 Submissions Linked",
-                description="Your new submission shares artwork with an existing submission, so their votes have been linked!",
-                color=discord.Color.blue()
+                color=THEME_COLORS["warning"]
             )
-            embed.add_field(
-                name="What does this mean?",
-                value=(
-                    "• Both submissions now share the same vote count\n"
-                    "• XP is counted once (not doubled)\n"
-                    "• This prevents vote manipulation\n"
-                    "• Both posts remain visible"
-                ),
-                inline=False
+            embed.description = (
+                "# 🔗 Submissions Linked\n\n"
+                "Your new submission shares artwork with an existing post, so their votes have been linked!\n\n"
+                "## What This Means\n"
+                "• Both submissions share the same vote count\n"
+                "• XP is counted once (no double-dipping)\n"
+                "• Prevents vote manipulation\n"
+                "• Both posts remain visible\n\n"
+                "> This is automatic and helps maintain fair leaderboard rankings."
             )
             
             view = InfoButtonsView(self.bot, self.db)
@@ -827,43 +833,39 @@ class CommunityManager:
         try:
             if channel.name == PROJECTS_CHANNEL_NAME:
                 embed = discord.Embed(
-                    title="👋 Welcome to Projects!",
-                    description="Share your projects and get feedback from the community.",
-                    color=discord.Color.blue()
+                    color=THEME_COLORS["project"]
                 )
-                embed.add_field(
-                    name="📋 Submission Format",
-                    value=(
-                        "```\n"
-                        "# Your Project Title\n"
-                        "- Feature description\n"
-                        "- Another feature\n"
-                        "[Link](https://...)\n"
-                        "```"
-                    ),
-                    inline=False
-                )
-                embed.add_field(
-                    name="🗳️ Voting",
-                    value=f"React with {REACTION_FIRE} {REACTION_NEUTRAL} {REACTION_TRASH} to vote on projects and give the user XP.",
-                    inline=False
+                embed.description = (
+                    "# 🚀 Projects Showcase\n"
+                    "> Share your creations and get valuable feedback from the community\n\n"
+                    "## 📝 How to Submit\n"
+                    "```markdown\n"
+                    "# Your Project Title\n"
+                    "- Feature description\n"
+                    "- Another cool feature\n"
+                    "[Link](https://your-project.com)\n"
+                    "```\n"
+                    f"## 🗳️ Voting System\n"
+                    f"{REACTION_FIRE} **Fire** +5 XP · {REACTION_NEUTRAL} **Neutral** 0 XP · {REACTION_TRASH} **Trash** -5 XP\n"
+                    f"💬 **Discussion** +{THREAD_MESSAGE_XP} XP per message in threads\n\n"
+                    "_Click the buttons below to explore more_ ⬇️"
                 )
             else:
                 embed = discord.Embed(
-                    title="👋 Welcome to Artwork!",
-                    description="Share your creative work and get feedback from the community.",
-                    color=discord.Color.purple()
+                    color=THEME_COLORS["artwork"]
                 )
-                embed.add_field(
-                    name="🎨 How to Submit",
-                    value="Attach one or more images to your message!",
-                    inline=False
+                embed.description = (
+                    "# 🎨 Artwork Gallery\n"
+                    "> Share your creative work and inspire the community\n\n"
+                    "## 📸 How to Submit\n"
+                    "Simply attach one or more images to your message. That's it!\n\n"
+                    f"## 🗳️ Voting System\n"
+                    f"{REACTION_FIRE} **Fire** +5 XP · {REACTION_NEUTRAL} **Neutral** 0 XP · {REACTION_TRASH} **Trash** -5 XP\n"
+                    f"💬 **Discussion** +{THREAD_MESSAGE_XP} XP per message in threads\n\n"
+                    "_Click the buttons below to explore more_ ⬇️"
                 )
-                embed.add_field(
-                    name="🗳️ Voting",
-                    value=f"React with {REACTION_FIRE} {REACTION_NEUTRAL} {REACTION_TRASH} to vote!",
-                    inline=False
-                )
+            
+            embed.set_footer(text="Embot Community • React to vote on submissions")
             
             view = CommunityDashboardView(self.bot, self.db)
             
@@ -895,95 +897,52 @@ class InfoButtonsView(discord.ui.View):
     async def show_more_info(self, interaction: discord.Interaction):
         """Show detailed info about Embot projects"""
         embed = discord.Embed(
-            title="ℹ️ Embot Projects - Complete Guide",
-            description="Everything you need to know about sharing and voting",
-            color=discord.Color.blue()
+            color=THEME_COLORS["primary"]
         )
-        
-        embed.add_field(
-            name="📋 Project Format",
-            value=(
-                "**Required:**\n"
-                "• Title using `#`, `##`, or `###`\n"
-                "• Description with bullet points (`-`)\n"
-                "• At least one link, image, or file\n\n"
-                "**Example:**\n"
-                "```\n# My Cool Game\n- Built with Unity\n- 2D platformer\n[Play here](link)\n```"
-            ),
-            inline=False
+        embed.description = (
+            "# ℹ️ Embot Projects Guide\n"
+            "> Everything you need to know about sharing and earning XP\n\n"
+            "## 📋 Project Format\n"
+            "**Required Elements:**\n"
+            "• Title using `#`, `##`, or `###`\n"
+            "• Description with bullet points (`-`)\n"
+            "• At least one link, image, or file\n\n"
+            "```markdown\n"
+            "# My Awesome Game\n"
+            "- Built with Unity\n"
+            "- 2D platformer mechanics\n"
+            "[Play Now](https://example.com)\n"
+            "```\n\n"
+            f"## 💎 XP System Breakdown\n"
+            f"{REACTION_FIRE} **Fire** `+5 XP` — Great work!\n"
+            f"{REACTION_NEUTRAL} **Neutral** `0 XP` — Seen it\n"
+            f"{REACTION_TRASH} **Trash** `-5 XP` — Needs work\n"
+            f"{REACTION_STAR} **Star** `+10 XP` — Amazing! (special)\n"
+            f"💬 **Thread Message** `+{THREAD_MESSAGE_XP} XP` — Per reply\n\n"
+            "> Note: Each user can only vote once per submission\n\n"
+            "## 🔄 Version System\n"
+            "Reposting with the **same title**?\n"
+            "• Automatically creates new version (v2.0, v3.0...)\n"
+            "• All versions share votes & XP\n"
+            "• Prevents leaderboard spam\n"
+            "• Option to undo if mistake\n\n"
+            "## 🔗 Linked Submissions\n"
+            "Reusing artwork as a thumbnail?\n"
+            "• Submissions auto-link\n"
+            "• Votes shared between them\n"
+            "• XP counted once (no double-dipping)\n\n"
+            "## 🎨 Artwork Guidelines\n"
+            "Post in #artwork:\n"
+            "• Just attach images — no formatting needed\n"
+            "• Same XP and voting system applies\n"
+            "• Can be reused in project posts\n\n"
+            "## 🏆 Climbing the Ranks\n"
+            "• Earn XP from votes & engagement\n"
+            "• Only latest version counts for XP\n"
+            "• Check leaderboard anytime\n"
+            "• Track stats in 'My Projects'"
         )
-        
-        embed.add_field(
-            name="🗳️ XP System",
-            value=(
-                f"{REACTION_FIRE} Fire = +5 XP\n"
-                f"{REACTION_NEUTRAL} Neutral = 0 XP\n"
-                f"{REACTION_TRASH} Trash = -5 XP\n"
-                f"{REACTION_STAR} Star = +10 XP (special!)\n\n"
-                "**Note:** Each user can only vote once per submission"
-            ),
-            inline=False
-        )
-        
-        embed.add_field(
-            name="🔄 Project Versions",
-            value=(
-                "Submit updates to the same project:\n"
-                "• Same title = new version (v2.0, v3.0...)\n"
-                "• All versions share votes/XP\n"
-                "• Prevents leaderboard spam\n"
-                "• Can undo if it was a mistake"
-            ),
-            inline=False
-        )
-        
-        embed.add_field(
-            name="🔗 Linked Submissions",
-            value=(
-                "Reusing artwork as a project thumbnail?\n"
-                "• Submissions automatically link\n"
-                "• Votes are shared between them\n"
-                "• XP counted once (no double-dipping)\n"
-                "• Both posts stay visible"
-            ),
-            inline=False
-        )
-        
-        embed.add_field(
-            name="🎨 Artwork",
-            value=(
-                "Share your art in #artwork:\n"
-                "• Just attach images - that's it!\n"
-                "• No title/description needed\n"
-                "• Same voting system\n"
-                "• Can be reused in projects"
-            ),
-            inline=False
-        )
-        
-        embed.add_field(
-            name="💬 Thread Messages",
-            value=(
-                "Engage in discussions:\n"
-                f"• Each message in a thread = +{THREAD_MESSAGE_XP} XP\n"
-                "• XP goes to the submission owner\n"
-                "• Encourages community interaction\n"
-                "• No spam protection (be genuine!)"
-            ),
-            inline=False
-        )
-        
-        embed.add_field(
-            name="🏆 Leaderboard",
-            value=(
-                "Climb the ranks:\n"
-                "• Earn XP from votes\n"
-                "• Only latest version counts\n"
-                "• Check leaderboard button anytime\n"
-                "• View your stats in 'My Projects'"
-            ),
-            inline=False
-        )
+        embed.set_footer(text="Embot Community • Version 1.0")
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
     
@@ -991,31 +950,25 @@ class InfoButtonsView(discord.ui.View):
         """Show community statistics"""
         stats = self.db.get_stats()
         
-        embed = discord.Embed(
-            title="📊 Community Statistics",
-            color=discord.Color.blue()
-        )
-        
-        embed.add_field(
-            name="📈 Overall Stats",
-            value=(
-                f"**Total Submissions:** {stats['total_submissions']}\n"
-                f"**Projects:** {stats['total_projects']}\n"
-                f"**Artwork:** {stats['total_artwork']}\n"
-                f"**Contributors:** {stats['total_users']}\n"
-                f"**Total Votes:** {stats['total_votes']}"
-            ),
-            inline=False
-        )
-        
         user_xp = self.db.get_user_xp(str(interaction.user.id))
         user_submissions = len(self.db.data["user_projects"].get(str(interaction.user.id), []))
         
-        embed.add_field(
-            name="Your Stats",
-            value=f"**XP:** {user_xp}\n**Submissions:** {user_submissions}",
-            inline=False
+        embed = discord.Embed(
+            color=THEME_COLORS["primary"]
         )
+        embed.description = (
+            "# 📊 Community Stats\n\n"
+            f"**{stats['total_submissions']}** submissions · "
+            f"**{stats['total_users']}** contributors · "
+            f"**{stats['total_votes']}** total votes\n\n"
+            f"## Breakdown\n"
+            f"🚀 Projects: `{stats['total_projects']}`\n"
+            f"🎨 Artwork: `{stats['total_artwork']}`\n\n"
+            f"## Your Profile\n"
+            f"💎 XP: **{user_xp:.1f}**\n"
+            f"📦 Submissions: **{user_submissions}**"
+        )
+        embed.set_footer(text=f"Stats for @{interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
     
@@ -1104,20 +1057,18 @@ class CommunityDashboardView(discord.ui.View):
             leaderboard = await self.db.get_leaderboard(self.bot, limit=10)
             
             embed = discord.Embed(
-                title="🏆 Community Leaderboard",
-                description="Top contributors by total XP",
-                color=discord.Color.gold()
+                color=THEME_COLORS["gold"]
             )
             
             if not leaderboard:
-                embed.add_field(
-                    name="No Data",
-                    value="No submissions yet! Be the first to contribute!",
-                    inline=False
+                embed.description = (
+                    "# 🏆 Leaderboard\n\n"
+                    "No submissions yet! Be the first to contribute and claim the top spot."
                 )
             else:
-                medals = ["🥇", "🥈", "🥉"]
-                leaderboard_text = ""
+                # Build leaderboard display
+                leaderboard_lines = []
+                medals = {0: "🥇", 1: "🥈", 2: "🥉"}
                 
                 for i, (user_id, xp) in enumerate(leaderboard):
                     try:
@@ -1126,15 +1077,26 @@ class CommunityDashboardView(discord.ui.View):
                     except:
                         username = f"User {user_id[-6:]}"
                     
-                    medal = medals[i] if i < 3 else f"**{i+1}.**"
-                    leaderboard_text += f"{medal} **{username}** — {xp} XP\n"
+                    # Medal for top 3, number for others
+                    if i in medals:
+                        prefix = medals[i]
+                    else:
+                        prefix = f"`#{i+1}`"
+                    
+                    # Create rank line
+                    leaderboard_lines.append(f"{prefix} **{username}** · `{xp:.1f} XP`")
                 
-                embed.add_field(name="Rankings", value=leaderboard_text, inline=False)
+                embed.description = (
+                    "# 🏆 Community Leaderboard\n"
+                    "> Top contributors ranked by total XP\n\n"
+                    + "\n".join(leaderboard_lines)
+                )
             
+            # Add user's stats in footer
             user_xp = self.db.get_user_xp(str(interaction.user.id))
             user_submissions = len(self.db.data["user_projects"].get(str(interaction.user.id), []))
             embed.set_footer(
-                text=f"Your stats: {user_xp} XP • {user_submissions} submission(s)",
+                text=f"Your rank: {user_xp:.1f} XP · {user_submissions} submission(s)",
                 icon_url=interaction.user.display_avatar.url
             )
             
@@ -1158,18 +1120,18 @@ class CommunityDashboardView(discord.ui.View):
             
             if not project_ids:
                 embed = discord.Embed(
-                    title="📂 Your Projects",
-                    description="You haven't submitted anything yet!",
-                    color=discord.Color.blue()
+                    color=THEME_COLORS["dark"]
                 )
-                embed.add_field(
-                    name="Get Started",
-                    value="Submit a project or artwork to see your stats here.",
-                    inline=False
+                embed.description = (
+                    "# 📂 Your Portfolio\n\n"
+                    "You haven't submitted anything yet!\n\n"
+                    "> Submit a project or artwork to start building your portfolio and earning XP."
                 )
+                embed.set_footer(text="Get started in #projects or #artwork")
                 await interaction.followup.send(embed=embed, ephemeral=True)
                 return
             
+            # Collect user's submissions (grouped by project_id, showing latest version)
             user_submissions = {}
             for msg_id, sub_data in self.db.data["submissions"].items():
                 sub = Submission.from_dict(sub_data)
@@ -1177,52 +1139,69 @@ class CommunityDashboardView(discord.ui.View):
                     if sub.project_id not in user_submissions or sub.version > user_submissions[sub.project_id].version:
                         user_submissions[sub.project_id] = sub
             
-            embed = discord.Embed(
-                title=f"📂 {interaction.user.display_name}'s Projects",
-                description=f"You have **{len(user_submissions)}** active submission(s)",
-                color=discord.Color.blue()
-            )
-            
             total_xp = self.db.get_user_xp(user_id)
             total_votes = sum(sum(sub.votes.values()) for sub in user_submissions.values())
             
-            embed.add_field(
-                name="📊 Your Stats",
-                value=(
-                    f"**Total XP:** {total_xp}\n"
-                    f"**Total Votes:** {total_votes}\n"
-                    f"**Submissions:** {len(user_submissions)}"
-                ),
-                inline=False
+            embed = discord.Embed(
+                color=THEME_COLORS["primary"]
             )
             
+            # Profile header
+            embed.description = (
+                f"# 📂 {interaction.user.display_name}'s Portfolio\n\n"
+                f"💎 **{total_xp:.1f} XP** · 🗳️ **{total_votes} votes** · 📦 **{len(user_submissions)} submissions**\n\n"
+            )
+            
+            # Show up to 5 most recent projects
             sorted_subs = sorted(user_submissions.values(), 
                                key=lambda x: x.updated_at, reverse=True)[:5]
             
-            projects_text = ""
+            projects_section = "## Recent Work\n"
             for sub in sorted_subs:
-                title_display = sub.title if sub.title else "Artwork"
-                xp = sub.calculate_xp()
-                votes_str = " ".join(f"{emoji}{count}" for emoji, count in sub.votes.items() if count > 0)
-                version_str = f" v{sub.version}" if sub.version != "1.0" else ""
-                thread_xp_str = f" (+{sub.thread_message_xp:.1f} from {sub.thread_message_count} messages)" if sub.thread_message_count > 0 else ""
+                # Determine type badge
+                type_badge = "`🚀 Project`" if sub.submission_type == SubmissionType.PROJECT else "`🎨 Art`"
                 
-                projects_text += f"**{title_display}**{version_str}\n"
-                projects_text += f"├ ID: `{sub.project_id}`\n"
-                projects_text += f"├ XP: {xp:.1f}{thread_xp_str} • Votes: {votes_str or 'None'}\n"
-                projects_text += f"└ Updated: <t:{int(datetime.fromisoformat(sub.updated_at).timestamp())}:R>\n\n"
-            
-            if projects_text:
-                embed.add_field(
-                    name="🎯 Recent Submissions",
-                    value=projects_text,
-                    inline=False
+                # Title and version
+                title_display = sub.title if sub.title else "Untitled Artwork"
+                version_badge = f" `v{sub.version}`" if sub.version != "1.0" else ""
+                
+                # Calculate XP breakdown
+                xp = sub.calculate_xp()
+                vote_xp = sum(count * XP_VALUES.get(emoji, 0) for emoji, count in sub.votes.items())
+                thread_xp = sub.thread_message_xp
+                
+                # Vote summary (only show non-zero)
+                votes_display = " · ".join(
+                    f"{emoji}`{count}`" 
+                    for emoji, count in sub.votes.items() 
+                    if count > 0
+                ) or "_no votes yet_"
+                
+                # Build project entry
+                projects_section += (
+                    f"\n### {title_display}{version_badge}\n"
+                    f"{type_badge} · `{xp:.1f} XP`"
                 )
+                
+                if thread_xp > 0:
+                    projects_section += f" · 💬 `+{thread_xp:.1f}` from {sub.thread_message_count} replies"
+                
+                projects_section += f"\n{votes_display}\n"
+                projects_section += f"> Updated <t:{int(datetime.fromisoformat(sub.updated_at).timestamp())}:R>\n"
             
-            embed.set_footer(
-                text=f"Showing {len(sorted_subs)} of {len(user_submissions)} submission(s)",
-                icon_url=interaction.user.display_avatar.url
-            )
+            embed.description += projects_section
+            
+            # Footer
+            if len(user_submissions) > 5:
+                embed.set_footer(
+                    text=f"Showing 5 of {len(user_submissions)} submissions",
+                    icon_url=interaction.user.display_avatar.url
+                )
+            else:
+                embed.set_footer(
+                    text="Your complete portfolio",
+                    icon_url=interaction.user.display_avatar.url
+                )
             
             await interaction.followup.send(embed=embed, ephemeral=True)
             

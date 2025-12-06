@@ -31,6 +31,9 @@ XP_VALUES = {
     REACTION_STAR: 10
 }
 
+# Thread message XP
+THREAD_MESSAGE_XP = 0.1
+
 # Database file
 DB_FILE = Path("data/community_submissions.json")
 
@@ -57,6 +60,7 @@ class Submission:
     votes: Dict[str, int]
     user_votes: Dict[str, str]  # user_id -> emoji (tracks first vote only)
     thread_message_count: int
+    thread_message_xp: float  # XP from thread messages
     created_at: str
     updated_at: str
     last_voted_at: Optional[str]
@@ -68,6 +72,9 @@ class Submission:
     def __post_init__(self):
         if self.linked_submissions is None:
             self.linked_submissions = []
+        # Initialize thread_message_xp if not present (for backward compatibility)
+        if not hasattr(self, 'thread_message_xp'):
+            self.thread_message_xp = 0.0
     
     def to_dict(self) -> Dict:
         """Convert to dictionary for JSON serialization"""
@@ -89,7 +96,8 @@ class Submission:
     
     def calculate_xp(self) -> int:
         """Calculate total XP for this submission"""
-        return sum(count * XP_VALUES.get(emoji, 0) for emoji, count in self.votes.items())
+        vote_xp = sum(count * XP_VALUES.get(emoji, 0) for emoji, count in self.votes.items())
+        return vote_xp + self.thread_message_xp
     
     def update_media(self, media_links: List[str], thumbnail: Optional[str], file_hashes: List[str]):
         """Update media content"""
@@ -121,6 +129,13 @@ class Submission:
         if user_id not in self.user_votes:
             self.user_votes[user_id] = emoji
         self.last_voted_at = datetime.now().isoformat()
+    
+    def add_thread_message(self):
+        """Add XP for a thread message"""
+        self.thread_message_count += 1
+        self.thread_message_xp += THREAD_MESSAGE_XP
+        self.last_thread_message_at = datetime.now().isoformat()
+        self.updated_at = datetime.now().isoformat()
     
     def has_voted(self, user_id: str) -> bool:
         """Check if user has already voted"""
@@ -264,6 +279,7 @@ class SubmissionDatabase:
             votes=existing_submission.votes if existing_submission else {REACTION_FIRE: 0, REACTION_NEUTRAL: 0, REACTION_TRASH: 0, REACTION_STAR: 0},
             user_votes=existing_submission.user_votes if existing_submission else {},
             thread_message_count=0,
+            thread_message_xp=0.0,
             created_at=existing_submission.created_at if existing_submission else datetime.now().isoformat(),
             updated_at=datetime.now().isoformat(),
             last_voted_at=existing_submission.last_voted_at if existing_submission else None,
@@ -358,6 +374,15 @@ class SubmissionDatabase:
                     self.update_submission(linked_sub)
             
             self.update_submission(submission)
+    
+    def add_thread_message_xp(self, message_id: str):
+        """Add XP for a thread message"""
+        submission = self.get_submission(message_id)
+        if submission:
+            submission.add_thread_message()
+            self.update_submission(submission)
+            self.bot.logger.log(MODULE_NAME, 
+                              f"Added {THREAD_MESSAGE_XP} XP for thread message on {submission.project_id}")
     
     def get_user_xp(self, user_id: str) -> int:
         """Calculate total XP for a user"""
@@ -867,8 +892,7 @@ class InfoButtonsView(discord.ui.View):
         self.bot = bot
         self.db = db
     
-    @discord.ui.button(label="More Info", style=discord.ButtonStyle.primary, emoji="ℹ️")
-    async def more_info_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def show_more_info(self, interaction: discord.Interaction):
         """Show detailed info about Embot projects"""
         embed = discord.Embed(
             title="ℹ️ Embot Projects - Complete Guide",
@@ -938,6 +962,18 @@ class InfoButtonsView(discord.ui.View):
         )
         
         embed.add_field(
+            name="💬 Thread Messages",
+            value=(
+                "Engage in discussions:\n"
+                f"• Each message in a thread = +{THREAD_MESSAGE_XP} XP\n"
+                "• XP goes to the submission owner\n"
+                "• Encourages community interaction\n"
+                "• No spam protection (be genuine!)"
+            ),
+            inline=False
+        )
+        
+        embed.add_field(
             name="🏆 Leaderboard",
             value=(
                 "Climb the ranks:\n"
@@ -951,8 +987,7 @@ class InfoButtonsView(discord.ui.View):
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
     
-    @discord.ui.button(label="View Stats", style=discord.ButtonStyle.secondary, emoji="📊")
-    async def stats_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def show_stats(self, interaction: discord.Interaction):
         """Show community statistics"""
         stats = self.db.get_stats()
         
@@ -983,6 +1018,16 @@ class InfoButtonsView(discord.ui.View):
         )
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    @discord.ui.button(label="More Info", style=discord.ButtonStyle.primary, emoji="ℹ️")
+    async def more_info_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Button handler for more info"""
+        await self.show_more_info(interaction)
+    
+    @discord.ui.button(label="View Stats", style=discord.ButtonStyle.secondary, emoji="📊")
+    async def stats_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Button handler for stats"""
+        await self.show_stats(interaction)
 
 
 class VersionUndoView(discord.ui.View):
@@ -1160,10 +1205,11 @@ class CommunityDashboardView(discord.ui.View):
                 xp = sub.calculate_xp()
                 votes_str = " ".join(f"{emoji}{count}" for emoji, count in sub.votes.items() if count > 0)
                 version_str = f" v{sub.version}" if sub.version != "1.0" else ""
+                thread_xp_str = f" (+{sub.thread_message_xp:.1f} from {sub.thread_message_count} messages)" if sub.thread_message_count > 0 else ""
                 
                 projects_text += f"**{title_display}**{version_str}\n"
                 projects_text += f"├ ID: `{sub.project_id}`\n"
-                projects_text += f"├ XP: {xp} • Votes: {votes_str or 'None'}\n"
+                projects_text += f"├ XP: {xp:.1f}{thread_xp_str} • Votes: {votes_str or 'None'}\n"
                 projects_text += f"└ Updated: <t:{int(datetime.fromisoformat(sub.updated_at).timestamp())}:R>\n\n"
             
             if projects_text:
@@ -1191,13 +1237,13 @@ class CommunityDashboardView(discord.ui.View):
     async def stats_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Show community statistics"""
         info_view = InfoButtonsView(self.bot, self.db)
-        await info_view.stats_button(interaction, button)
+        await info_view.show_stats(interaction)
     
     @discord.ui.button(label="More Info", style=discord.ButtonStyle.primary, emoji="ℹ️", row=0)
     async def info_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Show detailed info"""
         info_view = InfoButtonsView(self.bot, self.db)
-        await info_view.more_info_button(interaction, button)
+        await info_view.show_more_info(interaction)
 
 
 def setup(bot):
@@ -1310,6 +1356,49 @@ def setup(bot):
             
         except Exception as e:
             bot.logger.error(MODULE_NAME, "Failed to process reaction removal", e)
+    
+    @bot.listen('on_message')
+    async def on_thread_message(message: discord.Message):
+        """Award XP for messages in submission threads"""
+        try:
+            # Skip bot messages
+            if message.author.bot:
+                return
+            
+            # Check if message is in a thread
+            if not isinstance(message.channel, discord.Thread):
+                return
+            
+            # Check if thread belongs to a submission
+            parent_message_id = str(message.channel.id)
+            
+            # Try to find submission by checking if the thread's starter message is a submission
+            if message.channel.parent:
+                # Get the starter message (the message that created the thread)
+                try:
+                    # The thread ID is NOT the same as the message ID
+                    # We need to check if this thread's parent channel is projects/artwork
+                    parent_channel = message.channel.parent
+                    if parent_channel.name.lower() not in [PROJECTS_CHANNEL_NAME, ARTWORK_CHANNEL_NAME]:
+                        return
+                    
+                    # Try to get the thread's starter message
+                    starter_message = message.channel.starter_message
+                    if not starter_message:
+                        # If starter_message is not cached, fetch it
+                        starter_message = await message.channel.parent.fetch_message(message.channel.id)
+                    
+                    submission = db.get_submission(str(starter_message.id))
+                    if submission and not submission.is_deleted:
+                        # Award XP to submission owner
+                        db.add_thread_message_xp(str(starter_message.id))
+                        
+                except (discord.NotFound, discord.HTTPException):
+                    # Thread starter message not found or other error
+                    pass
+                    
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "Failed to process thread message", e)
     
     @bot.tree.command(name="update_sticky", description="[Admin] Update the sticky dashboard message")
     @app_commands.checks.has_permissions(administrator=True)

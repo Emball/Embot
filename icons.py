@@ -37,14 +37,14 @@ class IconManager:
                 'single_day': True
             },
             'Emball_Halloween.png': {
-                'start': (10, 24),  # Week before Halloween (Oct 24)
-                'end': (10, 31),  # Halloween night ends at midnight
-                'description': 'Halloween'
+                'start': (10, 1),  # All of October
+                'end': (10, 31),  # Ends at midnight after Oct 31
+                'description': 'Halloween (All October)'
             },
             'Emball_Christmas.png': {
-                'start': (12, 18),  # Week before Christmas (Dec 18)
-                'end': (12, 25),  # Christmas ends at midnight
-                'description': 'Christmas'
+                'start': (12, 1),  # All of December
+                'end': (12, 31),  # Ends at midnight after Dec 31
+                'description': 'Christmas (All December)'
             },
             'Emball_Thanksgiving.png': {
                 'start': (11, 1),  # All of November

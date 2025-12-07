@@ -188,6 +188,8 @@ class SubmissionDatabase:
         self._user_xp_cache = {}
         self._cache_timestamp = {}
         self._cache_ttl = 300  # 5 minutes cache
+        self._leaderboard_cache = None
+        self._leaderboard_cache_time = 0
         self._load()
     
     def _load(self):
@@ -373,6 +375,7 @@ class SubmissionDatabase:
         
         # Invalidate cache for this user
         self._user_xp_cache.pop(user_id, None)
+        self._leaderboard_cache = None  # Invalidate leaderboard cache
         
         self._save()
         return submission, is_new_version, linked_message_id
@@ -400,6 +403,7 @@ class SubmissionDatabase:
         
         # Invalidate cache for this user
         self._user_xp_cache.pop(submission.user_id, None)
+        self._leaderboard_cache = None  # Invalidate leaderboard cache
         
         self._save()
     
@@ -491,9 +495,13 @@ class SubmissionDatabase:
         return total_xp
     
     async def get_leaderboard(self, bot, limit: int = 10) -> List[tuple]:
-        """Get top users by XP with optimized deletion checking"""
+        """Get top users by XP with optimized deletion checking and caching"""
+        # Check cache (5 minute TTL)
+        if self._leaderboard_cache and (time.time() - self._leaderboard_cache_time < 300):
+            return self._leaderboard_cache[:limit]
+        
         user_xp = {}
-        cutoff_date = datetime.now().replace(tzinfo=None) - timedelta(days=7)  # Make timezone-naive
+        cutoff_date = datetime.now().replace(tzinfo=None) - timedelta(days=7)
         
         for user_id in self.data["user_projects"].keys():
             if str(user_id) == EMBALL_USER_ID:

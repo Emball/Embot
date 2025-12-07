@@ -503,62 +503,74 @@ class SubmissionDatabase:
         user_xp = {}
         cutoff_date = datetime.now().replace(tzinfo=None) - timedelta(days=7)
         
-        for user_id in self.data["user_projects"].keys():
+        # First pass: Build a project -> latest submission mapping (fast)
+        project_latest = {}  # project_id -> (msg_id, submission, submission_date)
+        
+        for msg_id, submission_data in self.data["submissions"].items():
+            try:
+                submission = Submission.from_dict(submission_data)
+            except Exception as e:
+                self.bot.logger.error(MODULE_NAME, f"Skipping malformed submission {msg_id}", e)
+                continue
+            
+            if submission.is_deleted:
+                continue
+            
+            project_id = submission.project_id
+            
+            # Parse date once
+            try:
+                submission_date = datetime.fromisoformat(submission.created_at).replace(tzinfo=None)
+            except:
+                submission_date = datetime.now().replace(tzinfo=None)
+            
+            # Check if this is the latest version for this project
+            if project_id not in project_latest or submission.version > project_latest[project_id][1].version:
+                project_latest[project_id] = (msg_id, submission, submission_date)
+        
+        # Second pass: Calculate XP per user (fast)
+        for user_id, project_ids in self.data["user_projects"].items():
             if str(user_id) == EMBALL_USER_ID:
                 continue
-
-            counted_projects = set()
             
-            for project_id in self.data["user_projects"][user_id]:
-                if project_id in counted_projects:
-                    continue
-                
-                latest_submission = None
-                for msg_id, submission_data in list(self.data["submissions"].items()):
-                    try:
-                        submission = Submission.from_dict(submission_data)
-                    except Exception as e:
-                        self.bot.logger.error(MODULE_NAME, f"Skipping malformed submission {msg_id}", e)
-                        continue
+            total_xp = 0
+            for project_id in project_ids:
+                if project_id in project_latest:
+                    msg_id, submission, submission_date = project_latest[project_id]
                     
-                    if submission.project_id == project_id and not submission.is_deleted:
-                        # Only check recent submissions for deletion
+                    # Only verify recent submissions aren't deleted (rate limit protection)
+                    if submission_date > cutoff_date and submission.channel_id:
                         try:
-                            submission_date = datetime.fromisoformat(submission.created_at).replace(tzinfo=None)
-                        except:
-                            submission_date = datetime.now().replace(tzinfo=None)
+                            channel = bot.get_channel(int(submission.channel_id))
+                            if channel:
+                                await asyncio.wait_for(
+                                    channel.fetch_message(int(msg_id)),
+                                    timeout=1.0
+                                )
+                        except asyncio.TimeoutError:
+                            pass  # Assume exists if timeout
+                        except (discord.NotFound, discord.HTTPException):
+                            # Mark as deleted and skip
+                            submission.mark_deleted()
+                            self.update_submission(submission)
+                            continue
+                        except Exception:
+                            pass  # Assume exists on other errors
                         
-                        if submission_date > cutoff_date and submission.channel_id:
-                            try:
-                                channel = bot.get_channel(int(submission.channel_id))
-                                if channel:
-                                    # Use asyncio.wait_for to add timeout
-                                    await asyncio.wait_for(
-                                        channel.fetch_message(int(msg_id)),
-                                        timeout=2.0
-                                    )
-                            except asyncio.TimeoutError:
-                                self.bot.logger.log(MODULE_NAME, 
-                                                  f"Timeout checking submission: {msg_id}", "WARNING")
-                            except (discord.NotFound, discord.HTTPException, AttributeError):
-                                self.bot.logger.log(MODULE_NAME, 
-                                                  f"Detected deleted submission: {msg_id}", "WARNING")
-                                submission.mark_deleted()
-                                self.update_submission(submission)
-                                continue
-                            except Exception as e:
-                                self.bot.logger.error(MODULE_NAME, f"Error checking submission {msg_id}", e)
-                        
-                        if latest_submission is None or submission.version > latest_submission.version:
-                            latest_submission = submission
-                
-                if latest_submission:
-                    if user_id not in user_xp:
-                        user_xp[user_id] = 0
-                    user_xp[user_id] += latest_submission.calculate_xp()
-                    counted_projects.add(project_id)
+                        # Small delay to avoid rate limits
+                        await asyncio.sleep(0.1)
+                    
+                    total_xp += submission.calculate_xp()
+            
+            if total_xp > 0:
+                user_xp[user_id] = total_xp
         
         sorted_users = sorted(user_xp.items(), key=lambda x: x[1], reverse=True)
+        
+        # Cache the full result
+        self._leaderboard_cache = sorted_users
+        self._leaderboard_cache_time = time.time()
+        
         return sorted_users[:limit]
     
     def check_file_duplicate(self, file_hash: str, user_id: str) -> Optional[tuple]:

@@ -936,9 +936,16 @@ class CommunityManager:
                 thread_name = f"{thread_name} v{submission.version}"
             thread = await message.create_thread(name=thread_name, auto_archive_duration=10080)
             
+            # Add reactions and immediately clean up any bot reactions
             await message.add_reaction(REACTION_FIRE)
             await message.add_reaction(REACTION_NEUTRAL)
             await message.add_reaction(REACTION_TRASH)
+            
+            # Clean up bot reactions immediately
+            for reaction in message.reactions:
+                async for user in reaction.users():
+                    if user.bot:
+                        await message.remove_reaction(reaction.emoji, user)
             
             # Special handling for Emball in projects channel
             if str(message.author.id) == EMBALL_USER_ID and channel_type == "project":
@@ -1736,9 +1743,18 @@ def setup(bot):
     async def on_community_reaction_add(payload: discord.RawReactionActionEvent):
         """Centralized vote handling with spam protection and bot exclusion"""
         try:
-            # Exclude bot reactions from vote counts
+            # Get user and check if bot
             user = await bot.fetch_user(payload.user_id)
             if user.bot:
+                # Immediately remove bot's reaction
+                try:
+                    channel = bot.get_channel(payload.channel_id)
+                    if channel:
+                        message = await channel.fetch_message(payload.message_id)
+                        await message.remove_reaction(payload.emoji, user)
+                        bot.logger.log(MODULE_NAME, f"Removed bot reaction from {payload.message_id}")
+                except Exception as e:
+                    bot.logger.log(MODULE_NAME, f"Failed to remove bot reaction: {e}", "WARNING")
                 return
             
             submission = db.get_submission(str(payload.message_id))

@@ -34,7 +34,7 @@ ARCHIVE_DAYS = 365
 ARCHIVE_CHANCE = 0.15
 
 # Cooldown configuration (prevents spam)
-PING_COOLDOWN_SECONDS = 300  # 5 minutes between ping responses
+PING_COOLDOWN_SECONDS = 30
 RANDOM_VM_COOLDOWN_SECONDS = 60  # 1 minute between random VMs
 
 # Sentience configuration

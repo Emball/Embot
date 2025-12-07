@@ -1,4 +1,3 @@
-
 import discord
 from discord import app_commands
 from discord.ext import tasks
@@ -24,7 +23,7 @@ ANNOUNCEMENTS_CHANNEL_NAME = "announcements"
 # Special User Configuration
 EMBALL_USER_ID = "1328822521084117033"
 EMBALL_ROLE_NAME = "Emball Releases"
-EMBALL_KEYWORDS = ["remaster", "edit"] # logic handles "remaster/edit", "remaster & edit" via inclusion check
+EMBALL_KEYWORDS = ["remaster", "edit"]
 
 # Reaction emojis
 REACTION_FIRE = "🔥"
@@ -60,12 +59,10 @@ THEME_COLORS = {
 # Database file
 DB_FILE = Path("data/community_submissions.json")
 
-
 class SubmissionType(Enum):
     """Submission type enumeration"""
     PROJECT = "project"
     ARTWORK = "artwork"
-
 
 @dataclass
 class Submission:
@@ -95,7 +92,6 @@ class Submission:
     def __post_init__(self):
         if self.linked_submissions is None:
             self.linked_submissions = []
-        # Initialize thread_message_xp if not present (for backward compatibility)
         if not hasattr(self, 'thread_message_xp'):
             self.thread_message_xp = 0.0
     
@@ -141,7 +137,6 @@ class Submission:
             major, minor = map(int, self.version.split('.'))
             self.version = f"{major + 1}.0"
         except ValueError:
-            # Handle cases where version might not be standard x.y
             self.version = f"{self.version}.1"
         self.updated_at = datetime.now().isoformat()
         return self.version
@@ -185,10 +180,9 @@ class SubmissionDatabase:
                 "last_spotlight_week": None
             }
         }
-        # Add caching for frequently accessed data
         self._user_xp_cache = {}
         self._cache_timestamp = {}
-        self._cache_ttl = 300  # 5 minutes cache
+        self._cache_ttl = 300
         self._leaderboard_cache = None
         self._leaderboard_cache_time = 0
         self._load()
@@ -217,7 +211,6 @@ class SubmissionDatabase:
     def _save(self):
         """Save database to file"""
         try:
-            # Use atomic write to prevent corruption
             temp_file = DB_FILE.with_suffix('.tmp')
             with open(temp_file, 'w', encoding='utf-8') as f:
                 json.dump(self.data, f, indent=2, ensure_ascii=False)
@@ -374,9 +367,8 @@ class SubmissionDatabase:
         if linked_message_id:
             self.link_submissions(message_id, linked_message_id)
         
-        # Invalidate cache for this user
         self._user_xp_cache.pop(user_id, None)
-        self._leaderboard_cache = None  # Invalidate leaderboard cache
+        self._leaderboard_cache = None
         
         self._save()
         return submission, is_new_version, linked_message_id
@@ -402,9 +394,8 @@ class SubmissionDatabase:
         for link in submission.media_links:
             self.data["link_registry"][link] = (submission.user_id, submission.message_id, submission.project_id)
         
-        # Invalidate cache for this user
         self._user_xp_cache.pop(submission.user_id, None)
-        self._leaderboard_cache = None  # Invalidate leaderboard cache
+        self._leaderboard_cache = None
         
         self._save()
     
@@ -460,14 +451,12 @@ class SubmissionDatabase:
     
     def get_user_xp(self, user_id: str) -> int:
         """Calculate total XP for a user with caching"""
-        # Check cache
         cache_key = user_id
         if cache_key in self._user_xp_cache:
             cache_time = self._cache_timestamp.get(cache_key, 0)
             if time.time() - cache_time < self._cache_ttl:
                 return self._user_xp_cache[cache_key]
         
-        # Emball exclusion
         if str(user_id) == EMBALL_USER_ID:
             return 0
             
@@ -489,7 +478,6 @@ class SubmissionDatabase:
                 total_xp += latest_submission.calculate_xp()
                 counted_projects.add(project_id)
         
-        # Cache the result
         self._user_xp_cache[cache_key] = total_xp
         self._cache_timestamp[cache_key] = time.time()
         
@@ -497,15 +485,13 @@ class SubmissionDatabase:
     
     async def get_leaderboard(self, bot, limit: int = 10) -> List[tuple]:
         """Get top users by XP with optimized deletion checking and caching"""
-        # Check cache (5 minute TTL)
         if self._leaderboard_cache and (time.time() - self._leaderboard_cache_time < 300):
             return self._leaderboard_cache[:limit]
         
         user_xp = {}
         cutoff_date = datetime.now().replace(tzinfo=None) - timedelta(days=7)
         
-        # First pass: Build a project -> latest submission mapping (fast)
-        project_latest = {}  # project_id -> (msg_id, submission, submission_date)
+        project_latest = {}
         
         for msg_id, submission_data in self.data["submissions"].items():
             try:
@@ -519,17 +505,14 @@ class SubmissionDatabase:
             
             project_id = submission.project_id
             
-            # Parse date once
             try:
                 submission_date = datetime.fromisoformat(submission.created_at).replace(tzinfo=None)
             except:
                 submission_date = datetime.now().replace(tzinfo=None)
             
-            # Check if this is the latest version for this project
             if project_id not in project_latest or submission.version > project_latest[project_id][1].version:
                 project_latest[project_id] = (msg_id, submission, submission_date)
         
-        # Second pass: Calculate XP per user (fast)
         for user_id, project_ids in self.data["user_projects"].items():
             if str(user_id) == EMBALL_USER_ID:
                 continue
@@ -539,7 +522,6 @@ class SubmissionDatabase:
                 if project_id in project_latest:
                     msg_id, submission, submission_date = project_latest[project_id]
                     
-                    # Only verify recent submissions aren't deleted (rate limit protection)
                     if submission_date > cutoff_date and submission.channel_id:
                         try:
                             channel = bot.get_channel(int(submission.channel_id))
@@ -549,16 +531,14 @@ class SubmissionDatabase:
                                     timeout=1.0
                                 )
                         except asyncio.TimeoutError:
-                            pass  # Assume exists if timeout
+                            pass
                         except (discord.NotFound, discord.HTTPException):
-                            # Mark as deleted and skip
                             submission.mark_deleted()
                             self.update_submission(submission)
                             continue
                         except Exception:
-                            pass  # Assume exists on other errors
+                            pass
                         
-                        # Small delay to avoid rate limits
                         await asyncio.sleep(0.1)
                     
                     total_xp += submission.calculate_xp()
@@ -568,7 +548,6 @@ class SubmissionDatabase:
         
         sorted_users = sorted(user_xp.items(), key=lambda x: x[1], reverse=True)
         
-        # Cache the full result
         self._leaderboard_cache = sorted_users
         self._leaderboard_cache_time = time.time()
         
@@ -642,7 +621,7 @@ class SubmissionDatabase:
 
 
 class SubmissionValidator:
-    """Validates submission format and content"""
+    """Validates submission format and content with relaxed requirements"""
     
     @staticmethod
     def extract_links(content: str) -> List[str]:
@@ -653,44 +632,43 @@ class SubmissionValidator:
     @staticmethod
     def validate_project(message: discord.Message) -> Tuple[bool, Optional[str], Optional[str], List[str], Optional[str]]:
         """
-        Validate project submission
+        Validate project submission with relaxed requirements
         Returns: (is_valid, title, description, media_links, error_message)
         """
         content = message.content
         
-        # Extract title if provided
+        # Extract title from markdown header if present
         title_match = re.search(r'^#{1,3}\s+(.+)$', content, re.MULTILINE)
         title = title_match.group(1).strip() if title_match else None
         
-        # Extract description if provided
+        # Extract description lines from bullet points if present
         description_lines = re.findall(r'^\s*-\s+(.+)$', content, re.MULTILINE)
         description = "\n".join(description_lines) if description_lines else None
-        
-        # If no title or description in formatted way, use the whole content as description
-        if not title and not description and content.strip():
-            description = content.strip()
         
         links = SubmissionValidator.extract_links(content)
         has_attachment = len(message.attachments) > 0
         
-        # Image-only submissions go to artwork
-        if has_attachment and not links:
-            all_images = all(
-                att.content_type and att.content_type.startswith('image/')
-                for att in message.attachments
-            )
-            if all_images:
-                return (False, None, None, [], 
-                       "Image-only submissions should be posted in #artwork instead!")
-        
-        # Must have at least one link or file
+        # Check if we have at least one link or attachment
         if not links and not has_attachment:
             return (False, None, None, [], 
                    "Your project submission must include at least one link or file attachment")
         
-        # If no title but has attachment, use first attachment filename as title
-        if not title and has_attachment:
-            title = message.attachments[0].filename
+        # Check if we have either title or description (or both)
+        if not title and not description:
+            # If no formatted title/description but we have attachments, use filename as title
+            if has_attachment and message.attachments:
+                title = message.attachments[0].filename
+                description = content if content.strip() else "No description provided"
+            else:
+                # If no attachments, use entire content as description
+                description = content if content.strip() else None
+                if not description:
+                    return (False, None, None, [], 
+                           "Your project submission must include either a title or description")
+        
+        # If we have a title but no description, use message content as description
+        if title and not description:
+            description = content if content.strip() else "No description provided"
         
         media_links = links.copy()
         for att in message.attachments:
@@ -796,7 +774,7 @@ class CommunityManager:
                 f"**Made a mistake?** Click 'Undo' below to register this as a separate project."
             )
             
-            view = VersionUndoView(self.bot, self.db, str(message.id), user.id)
+            view = VersionUndoView(self.bot, self.db, message.id, user.id)
             dm_message = await user.send(embed=embed, view=view)
             
             self.bot.logger.log(MODULE_NAME, 
@@ -843,16 +821,8 @@ class CommunityManager:
                                 f"Failed to send link notification to {user.display_name}", e)
     
     async def process_emball_submission(self, message: discord.Message, submission: Submission):
-        """Special handling for Emball's posts"""
+        """Special handling for Emball's posts - only forward if contains remaster/edit"""
         try:
-            # Check for keywords - only forward if contains remaster or edit
-            content_lower = message.content.lower()
-            has_keywords = any(keyword in content_lower for keyword in EMBALL_KEYWORDS)
-            
-            if not has_keywords:
-                self.bot.logger.log(MODULE_NAME, "Emball post does not contain required keywords, skipping forward")
-                return
-            
             guild = message.guild
             announcements = discord.utils.get(guild.channels, name=ANNOUNCEMENTS_CHANNEL_NAME)
             
@@ -860,9 +830,19 @@ class CommunityManager:
                 self.bot.logger.log(MODULE_NAME, "Announcements channel not found for Emball forwarding", "WARNING")
                 return
 
-            # Ping role
-            role = discord.utils.get(guild.roles, name=EMBALL_ROLE_NAME)
-            ping_text = f"{role.mention} " if role else ""
+            # Check for keywords to ping role - only forward if contains remaster OR edit
+            content_lower = message.content.lower()
+            should_forward = any(keyword in content_lower for keyword in EMBALL_KEYWORDS)
+            
+            if not should_forward:
+                self.bot.logger.log(MODULE_NAME, "Emball submission doesn't contain remaster/edit keywords, skipping forwarding")
+                return
+            
+            ping_text = ""
+            if should_forward:
+                role = discord.utils.get(guild.roles, name=EMBALL_ROLE_NAME)
+                if role:
+                    ping_text = f"{role.mention} "
             
             # Construct embed for announcement
             embed = discord.Embed(
@@ -880,14 +860,11 @@ class CommunityManager:
             # Send to announcements
             announcement_msg = await announcements.send(content=ping_text, embed=embed)
             
-            # Disable reactions on the announcement message
-            try:
-                await announcement_msg.clear_reactions()
-            except:
-                pass
+            # Clear reactions from announcement message to prevent voting
+            await announcement_msg.clear_reactions()
             
             # Link the announcement message to the project message
-            self.db.link_submissions(str(message.id), str(announcement_msg.id))
+            self.db.link_submissions(message.id, str(announcement_msg.id))
             
             self.bot.logger.log(MODULE_NAME, f"Forwarded Emball's project to #announcements: {announcement_msg.id}")
             
@@ -1026,26 +1003,27 @@ class CommunityManager:
             self.bot.logger.error(MODULE_NAME, "Failed to process edit", e)
     
     async def update_sticky_message(self, channel: discord.TextChannel):
-        """Update the sticky dashboard message"""
+        """Update the sticky dashboard message with auto-clean of previous embeds"""
         if not self.db.is_sticky_enabled():
             return
 
         try:
-            # Clean up ALL old sticky messages, not just the tracked one
+            # Clean up old sticky messages from this bot in the last 50 messages
             try:
                 async for message in channel.history(limit=50):
-                    # Check if message is from bot and has the dashboard view signature
-                    if (message.author == self.bot.user and 
-                        message.embeds and 
-                        any(view_button in str(message.components) for view_button in ["Leaderboard", "My Projects"])):
+                    if message.author.id == self.bot.user.id and hasattr(message, 'components') and message.components:
+                        # Check if this is a sticky message by looking for dashboard buttons
                         try:
                             await message.delete()
-                            self.bot.logger.log(MODULE_NAME, f"Cleaned up old sticky message {message.id}")
-                        except:
+                            self.bot.logger.log(MODULE_NAME, f"Cleaned up old sticky message: {message.id}")
+                        except discord.NotFound:
                             pass
+                        except Exception as e:
+                            self.bot.logger.log(MODULE_NAME, f"Failed to delete old message: {e}", "WARNING")
             except Exception as e:
-                self.bot.logger.log(MODULE_NAME, f"Error during sticky cleanup: {e}", "WARNING")
+                self.bot.logger.log(MODULE_NAME, f"Error cleaning old messages: {e}", "WARNING")
             
+            # Create slimmed down embed
             if channel.name == PROJECTS_CHANNEL_NAME:
                 embed = discord.Embed(
                     color=THEME_COLORS["project"]
@@ -1054,6 +1032,7 @@ class CommunityManager:
                     "# 👋 Welcome to Projects!\n"
                     "Share your creations and get valuable feedback from the community"
                 )
+                embed.set_footer(text="Embot Community • Share your projects here!")
             else:
                 embed = discord.Embed(
                     color=THEME_COLORS["artwork"]
@@ -1062,11 +1041,11 @@ class CommunityManager:
                     "# 👋 Welcome to Artwork!\n"
                     "Share your creative work and inspire the community"
                 )
-            
-            embed.set_footer(text="Embot Community • Click buttons below for more info")
+                embed.set_footer(text="Embot Community • Share your artwork here!")
             
             view = CommunityDashboardView(self.bot, self.db)
             
+            # Send new sticky message - DO NOT add reactions
             new_sticky = await channel.send(embed=embed, view=view)
             self.db.set_sticky_message(str(channel.id), str(new_sticky.id))
             
@@ -1074,19 +1053,38 @@ class CommunityManager:
             
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to update sticky message", e)
+    
+    async def auto_send_sticky(self):
+        """Automatically send sticky messages on bot startup"""
+        try:
+            # Wait for bot to be fully ready
+            await asyncio.sleep(3)
             
+            for guild in self.bot.guilds:
+                projects_channel = discord.utils.get(guild.channels, name=PROJECTS_CHANNEL_NAME)
+                artwork_channel = discord.utils.get(guild.channels, name=ARTWORK_CHANNEL_NAME)
+                
+                if projects_channel:
+                    await self.update_sticky_message(projects_channel)
+                    self.bot.logger.log(MODULE_NAME, f"Auto-sent sticky to #{projects_channel.name}")
+                
+                if artwork_channel:
+                    await self.update_sticky_message(artwork_channel)
+                    self.bot.logger.log(MODULE_NAME, f"Auto-sent sticky to #{artwork_channel.name}")
+                    
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "Failed to auto-send sticky messages", e)
+    
     async def run_spotlight_friday(self):
         """Execute Spotlight Friday logic"""
         self.bot.logger.log(MODULE_NAME, "Running Spotlight Friday...")
         
-        # 1. Find eligible submissions from last 7 days
         cutoff = datetime.now() - timedelta(days=7)
         eligible_submissions = []
         
         for msg_id, sub_data in self.db.data["submissions"].items():
             sub = Submission.from_dict(sub_data)
             
-            # Filter criteria
             if (sub.is_deleted or 
                 str(sub.user_id) == EMBALL_USER_ID or 
                 datetime.fromisoformat(sub.created_at) < cutoff):
@@ -1098,9 +1096,7 @@ class CommunityManager:
             self.bot.logger.log(MODULE_NAME, "No eligible submissions for Spotlight Friday", "WARNING")
             return
 
-        # 2. Sort by votes (Fire - Trash)
         def get_score(s):
-             # Calculate pure vote score, ignore thread XP for spotlight to focus on popularity
              return (s.votes.get(REACTION_FIRE, 0) * 5) + (s.votes.get(REACTION_STAR, 0) * 10) - (s.votes.get(REACTION_TRASH, 0) * 5)
 
         eligible_submissions.sort(key=get_score, reverse=True)
@@ -1111,9 +1107,8 @@ class CommunityManager:
              self.bot.logger.log(MODULE_NAME, "Top submission has non-positive score, skipping spotlight", "WARNING")
              return
 
-        # 3. Post to Announcements
         try:
-            guild = self.bot.guilds[0] # Assuming primary guild
+            guild = self.bot.guilds[0]
             announcements = discord.utils.get(guild.channels, name=ANNOUNCEMENTS_CHANNEL_NAME)
             if not announcements:
                 self.bot.logger.error(MODULE_NAME, f"Could not find #{ANNOUNCEMENTS_CHANNEL_NAME} for Spotlight")
@@ -1154,792 +1149,773 @@ class InfoButtonsView(discord.ui.View):
         self.db = db
     
     async def show_more_info(self, interaction: discord.Interaction):
-            """Show detailed info about Embot projects"""
-            embed = discord.Embed(
-                color=THEME_COLORS["primary"]
-            )
-            embed.description = (
-                "# ℹ️ Embot Projects Guide\n"
-                "Everything you need to know about sharing and earning XP\n\n"
-                "## 📋 Project Format\n"
-                "**Required:**\n"
-                "• At least one link or file\n"
-                "• A title OR description (or both)\n\n"
-                "**Optional Formatting:**\n"
-                "```markdown\n"
-                "# My Awesome Game\n"
-                "- Built with Unity\n"
-                "- 2D platformer mechanics\n"
-                "[Play Now](https://example.com)\n"
-                "```\n"
-                "**Simple:**\n"
-                "Just describe your project and include a link!\n"
-                "If you attach a file without a title, the filename becomes the title.\n\n"
-                f"## 💎 XP System Breakdown\n"
-                f"{REACTION_FIRE} **Fire** — Great work!\n"
-                f"{REACTION_NEUTRAL} **Neutral** — Seen it\n"
-                f"{REACTION_TRASH} **Trash** — Needs work\n"
-                f"{REACTION_STAR} **Star** — Amazing! (special)\n"
-                f"💬 **Thread Message** — Each reply awards XP\n\n"
-                "Note: Each user can only vote once per submission\n\n"
-                "## 🔄 Version System\n"
-                "Reposting with the **same title**?\n"
-                "• Automatically creates new version (v2.0, v3.0...)\n"
-                "• *Tip: Put 'vX.X' in your title to set a specific version*\n"
-                "• All versions share votes & XP\n"
-                "• Prevents leaderboard spam\n"
-                "• Option to undo if mistake\n\n"
-                "## 🔗 Linked Submissions\n"
-                "Reusing artwork as a thumbnail?\n"
-                "• Submissions auto-link\n"
-                "• Votes shared between them\n"
-                "• XP counted once (no double-dipping)\n\n"
-                "## 🎨 Artwork Guidelines\n"
-                "Post in #artwork:\n"
-                "• Just attach images — no formatting needed\n"
-                "• Same XP and voting system applies\n"
-                "• Can be reused in project posts\n\n"
-                "## 🏆 Climbing the Ranks\n"
-                "• Earn XP from votes & engagement\n"
-                "• Only latest version counts for XP\n"
-                "• Check leaderboard anytime\n"
-                "• Track stats in 'My Projects'"
-            )
-            embed.set_footer(text="Embot Community • Version 1.0")
-            
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+        """Show detailed info about Embot projects"""
+        embed = discord.Embed(
+            color=THEME_COLORS["primary"]
+        )
+        embed.description = (
+            "# ℹ️ Embot Projects Guide\n"
+            "Everything you need to know about sharing and earning XP\n\n"
+            "## 📋 Project Format (Relaxed!)\n"
+            "**Required:**\n"
+            "• At least one link or file attachment\n"
+            "• A title OR description (or both)\n\n"
+            "**Optional formatting:**\n"
+            "```markdown\n"
+            "# My Awesome Project\n"
+            "- Feature description\n"
+            "[Link](https://example.com)\n"
+            "```\n"
+            "**Simple alternative:**\n"
+            "Just attach a file and write a description!\n\n"
+            f"## 💎 XP System Breakdown\n"
+            f"{REACTION_FIRE} **Fire** — Great work!\n"
+            f"{REACTION_NEUTRAL} **Neutral** — Seen it\n"
+            f"{REACTION_TRASH} **Trash** — Needs work\n"
+            f"{REACTION_STAR} **Star** — Amazing! (special)\n"
+            f"💬 **Thread Message** — Each reply awards XP\n\n"
+            "Note: Each user can only vote once per submission\n\n"
+            "## 🔄 Version System\n"
+            "Reposting with the **same title**?\n"
+            "• Automatically creates new version (v2.0, v3.0...)\n"
+            "• *Tip: Put 'vX.X' in your title to set a specific version*\n"
+            "• All versions share votes & XP\n"
+            "• Prevents leaderboard spam\n"
+            "• Option to undo if mistake\n\n"
+            "## 🔗 Linked Submissions\n"
+            "Reusing artwork as a thumbnail?\n"
+            "• Submissions auto-link\n"
+            "• Votes shared between them\n"
+            "• XP counted once (no double-dipping)\n\n"
+            "## 🎨 Artwork Guidelines\n"
+            "Post in #artwork:\n"
+            "• Just attach images — no formatting needed\n"
+            "• Same XP and voting system applies\n"
+            "• Can be reused in project posts\n\n"
+            "## 🏆 Climbing the Ranks\n"
+            "• Earn XP from votes & engagement\n"
+            "• Only latest version counts for XP\n"
+            "• Check leaderboard anytime\n"
+            "• Track stats in 'My Projects'"
+        )
+        embed.set_footer(text="Embot Community • Version 2.0")
         
-        async def show_stats(self, interaction: discord.Interaction):
-            """Show community statistics"""
-            stats = self.db.get_stats()
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    async def show_stats(self, interaction: discord.Interaction):
+        """Show community statistics"""
+        stats = self.db.get_stats()
+        
+        user_xp = self.db.get_user_xp(str(interaction.user.id))
+        user_submissions = len(self.db.data["user_projects"].get(str(interaction.user.id), []))
+        
+        embed = discord.Embed(
+            color=THEME_COLORS["primary"]
+        )
+        embed.description = (
+            "# 📊 Community Stats\n\n"
+            f"**{stats['total_submissions']}** submissions · "
+            f"**{stats['total_users']}** contributors · "
+            f"**{stats['total_votes']}** total votes\n\n"
+            f"## Breakdown\n"
+            f"🚀 Projects: `{stats['total_projects']}`\n"
+            f"🎨 Artwork: `{stats['total_artwork']}`\n\n"
+            f"## Your Profile\n"
+            f"💎 XP: **{user_xp:.1f}**\n"
+            f"📦 Submissions: **{user_submissions}**"
+        )
+        embed.set_footer(text=f"Stats for @{interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    @discord.ui.button(label="More Info", style=discord.ButtonStyle.primary, emoji="ℹ️")
+    async def more_info_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Button handler for more info"""
+        await self.show_more_info(interaction)
+    
+    @discord.ui.button(label="View Stats", style=discord.ButtonStyle.secondary, emoji="📊")
+    async def stats_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Button handler for stats"""
+        await self.show_stats(interaction)
+
+
+class VersionUndoView(discord.ui.View):
+    """View with undo button for version updates"""
+    
+    def __init__(self, bot, db: SubmissionDatabase, message_id: str, user_id: int):
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.db = db
+        self.message_id = message_id
+        self.user_id = user_id
+        
+        info_view = InfoButtonsView(bot, db)
+        for item in info_view.children:
+            self.add_item(item)
+    
+    @discord.ui.button(label="Undo - Register Separately", style=discord.ButtonStyle.danger, emoji="↩️", row=0)
+    async def undo_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Undo version linking and register as separate project"""
+        try:
+            if interaction.user.id != self.user_id:
+                await interaction.response.send_message(
+                    "❌ Only the project owner can undo this.",
+                    ephemeral=True
+                )
+                return
+            
+            submission = self.db.get_submission(self.message_id)
+            if not submission:
+                await interaction.response.send_message(
+                    "❌ Submission not found.",
+                    ephemeral=True
+                )
+                return
+            
+            submission.version = "1.0"
+            submission.project_id = f"project_{submission.user_id}_{submission.message_id}"
+            self.db.update_submission(submission)
+            
+            await interaction.response.send_message(
+                f"✅ Project **{submission.title}** is now registered separately with version 1.0",
+                ephemeral=False
+            )
+            
+            button.disabled = True
+            await interaction.message.edit(view=self)
+            
+            self.bot.logger.log(MODULE_NAME, 
+                              f"User {interaction.user.id} undid version linking for {self.message_id}")
+            
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "Failed to undo version", e)
+            await interaction.response.send_message(
+                "❌ Failed to undo version linking.",
+                ephemeral=True
+            )
+
+
+class CommunityDashboardView(discord.ui.View):
+    """View with buttons for the sticky message"""
+    
+    def __init__(self, bot, db: SubmissionDatabase):
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.db = db
+    
+    @discord.ui.button(label="Leaderboard", style=discord.ButtonStyle.primary, emoji="🏆", row=0)
+    async def leaderboard_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show leaderboard"""
+        try:
+            await interaction.response.defer(ephemeral=True)
+            
+            leaderboard = await self.db.get_leaderboard(self.bot, limit=10)
+            
+            embed = discord.Embed(
+                color=THEME_COLORS["gold"]
+            )
+            
+            if not leaderboard:
+                embed.description = (
+                    "# 🏆 Leaderboard\n\n"
+                    "No submissions yet! Be the first to contribute and claim the top spot."
+                )
+            else:
+                leaderboard_lines = []
+                medals = {0: "🥇", 1: "🥈", 2: "🥉"}
+                
+                for i, (user_id, xp) in enumerate(leaderboard):
+                    try:
+                        user = await self.bot.fetch_user(int(user_id))
+                        username = user.display_name
+                    except:
+                        username = f"User {user_id[-6:]}"
+                    
+                    if i in medals:
+                        prefix = medals[i]
+                    else:
+                        prefix = f"`#{i+1}`"
+                    
+                    leaderboard_lines.append(f"{prefix} **{username}** · `{xp:.1f} XP`")
+                
+                embed.description = (
+                    "# 🏆 Community Leaderboard\n"
+                    "Top contributors ranked by total XP\n\n"
+                    + "\n".join(leaderboard_lines)
+                )
             
             user_xp = self.db.get_user_xp(str(interaction.user.id))
             user_submissions = len(self.db.data["user_projects"].get(str(interaction.user.id), []))
+            embed.set_footer(
+                text=f"Your rank: {user_xp:.1f} XP · {user_submissions} submission(s)",
+                icon_url=interaction.user.display_avatar.url
+            )
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "Failed to show leaderboard", e)
+            try:
+                await interaction.followup.send("❌ Failed to load leaderboard", ephemeral=True)
+            except:
+                pass
+    
+    @discord.ui.button(label="My Projects", style=discord.ButtonStyle.secondary, emoji="📂", row=0)
+    async def my_projects_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show user's projects"""
+        try:
+            await interaction.response.defer(ephemeral=True)
+            
+            user_id = str(interaction.user.id)
+            project_ids = self.db.data["user_projects"].get(user_id, [])
+            
+            if not project_ids:
+                embed = discord.Embed(
+                    color=THEME_COLORS["dark"]
+                )
+                embed.description = (
+                    "# 📂 Your Portfolio\n\n"
+                    "You haven't submitted anything yet!\n\n"
+                    "> Submit a project or artwork to start building your portfolio and earning XP."
+                )
+                embed.set_footer(text="Get started in #projects or #artwork")
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
+            
+            user_submissions = {}
+            for msg_id, sub_data in self.db.data["submissions"].items():
+                try:
+                    sub = Submission.from_dict(sub_data)
+                    if sub.user_id == user_id and not sub.is_deleted:
+                        if sub.project_id not in user_submissions or sub.version > user_submissions[sub.project_id].version:
+                            user_submissions[sub.project_id] = sub
+                except Exception as e:
+                    self.bot.logger.error(MODULE_NAME, f"Error parsing submission {msg_id} in My Projects", e)
+                    continue
+            
+            if not user_submissions:
+                embed = discord.Embed(
+                    color=THEME_COLORS["dark"]
+                )
+                embed.description = (
+                    "# 📂 Your Portfolio\n\n"
+                    "Your submissions may have been deleted or are being processed.\n\n"
+                    "> Submit a project or artwork to start building your portfolio and earning XP."
+                )
+                embed.set_footer(text="Get started in #projects or #artwork")
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
+            
+            total_xp = self.db.get_user_xp(user_id)
+            total_votes = sum(sum(sub.votes.values()) for sub in user_submissions.values())
             
             embed = discord.Embed(
                 color=THEME_COLORS["primary"]
             )
+            
             embed.description = (
-                "# 📊 Community Stats\n\n"
-                f"**{stats['total_submissions']}** submissions · "
-                f"**{stats['total_users']}** contributors · "
-                f"**{stats['total_votes']}** total votes\n\n"
-                f"## Breakdown\n"
-                f"🚀 Projects: `{stats['total_projects']}`\n"
-                f"🎨 Artwork: `{stats['total_artwork']}`\n\n"
-                f"## Your Profile\n"
-                f"💎 XP: **{user_xp:.1f}**\n"
-                f"📦 Submissions: **{user_submissions}**"
+                f"# 📂 {interaction.user.display_name}'s Portfolio\n\n"
+                f"💎 **{total_xp:.1f} XP** · 🗳️ **{total_votes} votes** · 📦 **{len(user_submissions)} submissions**\n\n"
             )
-            embed.set_footer(text=f"Stats for @{interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
             
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-        
-        @discord.ui.button(label="More Info", style=discord.ButtonStyle.primary, emoji="ℹ️")
-        async def more_info_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-            """Button handler for more info"""
-            await self.show_more_info(interaction)
-        
-        @discord.ui.button(label="View Stats", style=discord.ButtonStyle.secondary, emoji="📊")
-        async def stats_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-            """Button handler for stats"""
-            await self.show_stats(interaction)
-
-
-    class VersionUndoView(discord.ui.View):
-        """View with undo button for version updates"""
-        
-        def __init__(self, bot, db: SubmissionDatabase, message_id: str, user_id: int):
-            super().__init__(timeout=300)
-            self.bot = bot
-            self.db = db
-            self.message_id = message_id
-            self.user_id = user_id
+            sorted_subs = sorted(user_submissions.values(), 
+                               key=lambda x: x.updated_at, reverse=True)[:5]
             
-            # Add info buttons
-            info_view = InfoButtonsView(bot, db)
-            for item in info_view.children:
-                self.add_item(item)
-        
-        @discord.ui.button(label="Undo - Register Separately", style=discord.ButtonStyle.danger, emoji="↩️", row=0)
-        async def undo_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-            """Undo version linking and register as separate project"""
-            try:
-                if interaction.user.id != self.user_id:
-                    await interaction.response.send_message(
-                        "❌ Only the project owner can undo this.",
-                        ephemeral=True
-                    )
-                    return
+            projects_section = "## Recent Work\n"
+            for sub in sorted_subs:
+                type_badge = "`🚀 Project`" if sub.submission_type == SubmissionType.PROJECT else "`🎨 Art`"
                 
-                submission = self.db.get_submission(self.message_id)
-                if not submission:
-                    await interaction.response.send_message(
-                        "❌ Submission not found.",
-                        ephemeral=True
-                    )
-                    return
+                title_display = sub.title if sub.title else "Untitled Artwork"
+                version_badge = f" `v{sub.version}`" if sub.version != "1.0" else ""
                 
-                submission.version = "1.0"
-                submission.project_id = f"project_{submission.user_id}_{submission.message_id}"
-                self.db.update_submission(submission)
+                xp = sub.calculate_xp()
+                thread_xp = sub.thread_message_xp
                 
-                await interaction.response.send_message(
-                    f"✅ Project **{submission.title}** is now registered separately with version 1.0",
-                    ephemeral=False
+                votes_display = " · ".join(
+                    f"{emoji}`{count}`" 
+                    for emoji, count in sub.votes.items() 
+                    if count > 0
+                ) or "_no votes yet_"
+                
+                projects_section += (
+                    f"\n### {title_display}{version_badge}\n"
+                    f"{type_badge} · `{xp:.1f} XP`"
                 )
                 
-                button.disabled = True
-                await interaction.message.edit(view=self)
+                if thread_xp > 0:
+                    projects_section += f" · 💬 `+{thread_xp:.1f}` from {sub.thread_message_count} replies"
                 
-                self.bot.logger.log(MODULE_NAME, 
-                                f"User {interaction.user.id} undid version linking for {self.message_id}")
+                projects_section += f"\n{votes_display}\n"
                 
-            except Exception as e:
-                self.bot.logger.error(MODULE_NAME, "Failed to undo version", e)
-                await interaction.response.send_message(
-                    "❌ Failed to undo version linking.",
-                    ephemeral=True
-                )
-
-
-    class CommunityDashboardView(discord.ui.View):
-        """View with buttons for the sticky message"""
-        
-        def __init__(self, bot, db: SubmissionDatabase):
-            super().__init__(timeout=None)
-            self.bot = bot
-            self.db = db
-        
-        @discord.ui.button(label="Leaderboard", style=discord.ButtonStyle.primary, emoji="🏆", row=0)
-        async def leaderboard_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-            """Show leaderboard"""
-            try:
-                await interaction.response.defer(ephemeral=True)
-                
-                # Get leaderboard directly (it's already async)
-                leaderboard = await self.db.get_leaderboard(self.bot, limit=10)
-                
-                embed = discord.Embed(
-                    color=THEME_COLORS["gold"]
-                )
-                
-                if not leaderboard:
-                    embed.description = (
-                        "# 🏆 Leaderboard\n\n"
-                        "No submissions yet! Be the first to contribute and claim the top spot."
-                    )
-                else:
-                    leaderboard_lines = []
-                    medals = {0: "🥇", 1: "🥈", 2: "🥉"}
-                    
-                    for i, (user_id, xp) in enumerate(leaderboard):
-                        try:
-                            user = await self.bot.fetch_user(int(user_id))
-                            username = user.display_name
-                        except:
-                            username = f"User {user_id[-6:]}"
-                        
-                        if i in medals:
-                            prefix = medals[i]
-                        else:
-                            prefix = f"`#{i+1}`"
-                        
-                        leaderboard_lines.append(f"{prefix} **{username}** · `{xp:.1f} XP`")
-                    
-                    embed.description = (
-                        "# 🏆 Community Leaderboard\n"
-                        "Top contributors ranked by total XP\n\n"
-                        + "\n".join(leaderboard_lines)
-                    )
-                
-                user_xp = self.db.get_user_xp(str(interaction.user.id))
-                user_submissions = len(self.db.data["user_projects"].get(str(interaction.user.id), []))
+                try:
+                    timestamp = int(datetime.fromisoformat(sub.updated_at).timestamp())
+                    projects_section += f"> Updated <t:{timestamp}:R>\n"
+                except:
+                    projects_section += f"> Updated recently\n"
+            
+            embed.description += projects_section
+            
+            if len(user_submissions) > 5:
                 embed.set_footer(
-                    text=f"Your rank: {user_xp:.1f} XP · {user_submissions} submission(s)",
+                    text=f"Showing 5 of {len(user_submissions)} submissions",
                     icon_url=interaction.user.display_avatar.url
                 )
-                
-                await interaction.followup.send(embed=embed, ephemeral=True)
-                
-            except Exception as e:
-                self.bot.logger.error(MODULE_NAME, "Failed to show leaderboard", e)
-                try:
-                    await interaction.followup.send("❌ Failed to load leaderboard", ephemeral=True)
-                except:
-                    pass
-        
-        @discord.ui.button(label="My Projects", style=discord.ButtonStyle.secondary, emoji="📂", row=0)
-        async def my_projects_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-            """Show user's projects"""
-            try:
-                await interaction.response.defer(ephemeral=True)
-                
-                user_id = str(interaction.user.id)
-                project_ids = self.db.data["user_projects"].get(user_id, [])
-                
-                if not project_ids:
-                    embed = discord.Embed(
-                        color=THEME_COLORS["dark"]
-                    )
-                    embed.description = (
-                        "# 📂 Your Portfolio\n\n"
-                        "You haven't submitted anything yet!\n\n"
-                        "> Submit a project or artwork to start building your portfolio and earning XP."
-                    )
-                    embed.set_footer(text="Get started in #projects or #artwork")
-                    await interaction.followup.send(embed=embed, ephemeral=True)
-                    return
-                
-                # Collect user's submissions (grouped by project_id, showing latest version)
-                user_submissions = {}
-                for msg_id, sub_data in self.db.data["submissions"].items():
-                    try:
-                        sub = Submission.from_dict(sub_data)
-                        if sub.user_id == user_id and not sub.is_deleted:
-                            if sub.project_id not in user_submissions or sub.version > user_submissions[sub.project_id].version:
-                                user_submissions[sub.project_id] = sub
-                    except Exception as e:
-                        self.bot.logger.error(MODULE_NAME, f"Error parsing submission {msg_id} in My Projects", e)
-                        continue
-                
-                if not user_submissions:
-                    embed = discord.Embed(
-                        color=THEME_COLORS["dark"]
-                    )
-                    embed.description = (
-                        "# 📂 Your Portfolio\n\n"
-                        "Your submissions may have been deleted or are being processed.\n\n"
-                        "> Submit a project or artwork to start building your portfolio and earning XP."
-                    )
-                    embed.set_footer(text="Get started in #projects or #artwork")
-                    await interaction.followup.send(embed=embed, ephemeral=True)
-                    return
-                
-                total_xp = self.db.get_user_xp(user_id)
-                total_votes = sum(sum(sub.votes.values()) for sub in user_submissions.values())
-                
-                embed = discord.Embed(
-                    color=THEME_COLORS["primary"]
+            else:
+                embed.set_footer(
+                    text="Your complete portfolio",
+                    icon_url=interaction.user.display_avatar.url
                 )
-                
-                # Profile header
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "Failed to show user projects", e)
+            try:
+                await interaction.followup.send("❌ Failed to load your projects", ephemeral=True)
+            except:
+                pass
+    
+    @discord.ui.button(label="Submission Format", style=discord.ButtonStyle.primary, emoji="📝", row=0)
+    async def format_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show submission format guidelines"""
+        try:
+            channel_name = interaction.channel.name.lower()
+            
+            embed = discord.Embed(
+                color=THEME_COLORS["primary"]
+            )
+            
+            if channel_name == PROJECTS_CHANNEL_NAME:
+                embed.title = "📝 Projects Submission Format"
                 embed.description = (
-                    f"# 📂 {interaction.user.display_name}'s Portfolio\n\n"
-                    f"💎 **{total_xp:.1f} XP** · 🗳️ **{total_votes} votes** · 📦 **{len(user_submissions)} submissions**\n\n"
+                    "# How to Submit Projects\n\n"
+                    "## Required:\n"
+                    "• At least one **link** or **file attachment**\n"
+                    "• A **title** OR **description** (or both)\n\n"
+                    "## Recommended Format:\n"
+                    "```markdown\n"
+                    "# Project Title\n"
+                    "- Key feature or description\n"
+                    "- Another important detail\n"
+                    "[Download/Play Link](https://example.com)\n"
+                    "```\n\n"
+                    "## Simple Alternative:\n"
+                    "Just attach your project file and write a description!\n\n"
+                    "## Examples:\n"
+                    "**Formatted:**\n"
+                    "> # My Game\n"
+                    "> - Made with Unity\n"
+                    "> - 2D platformer\n"
+                    "> [itch.io page](https://mygame.itch.io)\n\n"
+                    "**Simple:**\n"
+                    "> Check out my new tool! (attaches .zip file)\n"
+                    "> It helps with pixel art animation."
                 )
+            elif channel_name == ARTWORK_CHANNEL_NAME:
+                embed.title = "🎨 Artwork Submission Format"
+                embed.description = (
+                    "# How to Submit Artwork\n\n"
+                    "## Simple:\n"
+                    "• Attach one or more images\n"
+                    "• That's it! No formatting required\n\n"
+                    "## Optional:\n"
+                    "• Add a title or description\n"
+                    "• Use markdown for formatting\n\n"
+                    "## Examples:\n"
+                    "**Simple:**\n"
+                    "> (attaches image.png)\n\n"
+                    "**With Description:**\n"
+                    "> My latest character design - made in Procreate"
+                )
+            else:
+                embed.title = "📝 Submission Guidelines"
+                embed.description = (
+                    "Visit #projects for project submissions or #artwork for artwork!\n\n"
+                    "**Projects:** Links/attachments + title/description\n"
+                    "**Artwork:** Just attach images!"
+                )
+            
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "Failed to show format guide", e)
+            try:
+                await interaction.response.send_message("❌ Failed to load format guide", ephemeral=True)
+            except:
+                pass
+    
+    @discord.ui.button(label="More Info", style=discord.ButtonStyle.secondary, emoji="ℹ️", row=0)
+    async def info_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show detailed info"""
+        info_view = InfoButtonsView(self.bot, self.db)
+        await info_view.show_more_info(interaction)
+
+
+def setup(bot):
+    """Setup function called by main bot to initialize this module"""
+    
+    listener_name = f"_{MODULE_NAME.lower()}_listener_registered"
+    if hasattr(bot, listener_name):
+        bot.logger.log(MODULE_NAME, "Module already setup, skipping duplicate registration")
+        return
+    setattr(bot, listener_name, True)
+    
+    bot.logger.log(MODULE_NAME, "Setting up community module")
+    
+    db = SubmissionDatabase(bot)
+    bot.community_db = db
+    
+    manager = CommunityManager(bot, db)
+    bot.community_manager = manager
+    
+    # --- Auto-send sticky on startup ---
+    @tasks.loop(count=1)
+    async def auto_send_sticky_task():
+        """Auto-send sticky messages once on startup"""
+        await manager.auto_send_sticky()
+    
+    @auto_send_sticky_task.before_loop
+    async def before_auto_send():
+        await bot.wait_until_ready()
+        await asyncio.sleep(3)  # Wait 3 seconds after ready
+    
+    auto_send_sticky_task.start()
+    
+    # --- Spotlight Friday Task ---
+    @tasks.loop(minutes=1)
+    async def spotlight_checker():
+        """Check time for Spotlight Friday (Friday 3PM CST)"""
+        try:
+            cst_tz = timezone(timedelta(hours=-6))
+            now = datetime.now(cst_tz)
+            
+            if now.weekday() == 4 and now.hour == 15:
+                current_week = now.strftime("%Y-%W")
+                last_run = db.get_last_spotlight_week()
                 
-                # Show up to 5 most recent projects
-                sorted_subs = sorted(user_submissions.values(), 
-                                key=lambda x: x.updated_at, reverse=True)[:5]
-                
-                projects_section = "## Recent Work\n"
-                for sub in sorted_subs:
-                    # Determine type badge
-                    type_badge = "`🚀 Project`" if sub.submission_type == SubmissionType.PROJECT else "`🎨 Art`"
+                if current_week != last_run:
+                    await manager.run_spotlight_friday()
+                    db.set_last_spotlight_week(current_week)
                     
-                    # Title and version
-                    title_display = sub.title if sub.title else "Untitled Artwork"
-                    version_badge = f" `v{sub.version}`" if sub.version != "1.0" else ""
-                    
-                    # Calculate XP breakdown
-                    xp = sub.calculate_xp()
-                    thread_xp = sub.thread_message_xp
-                    
-                    # Vote summary (only show non-zero)
-                    votes_display = " · ".join(
-                        f"{emoji}`{count}`" 
-                        for emoji, count in sub.votes.items() 
-                        if count > 0
-                    ) or "_no votes yet_"
-                    
-                    # Build project entry
-                    projects_section += (
-                        f"\n### {title_display}{version_badge}\n"
-                        f"{type_badge} · `{xp:.1f} XP`"
-                    )
-                    
-                    if thread_xp > 0:
-                        projects_section += f" · 💬 `+{thread_xp:.1f}` from {sub.thread_message_count} replies"
-                    
-                    projects_section += f"\n{votes_display}\n"
-                    
-                    try:
-                        timestamp = int(datetime.fromisoformat(sub.updated_at).timestamp())
-                        projects_section += f"> Updated <t:{timestamp}:R>\n"
-                    except:
-                        projects_section += f"> Updated recently\n"
-                
-                embed.description += projects_section
-                
-                # Footer
-                if len(user_submissions) > 5:
-                    embed.set_footer(
-                        text=f"Showing 5 of {len(user_submissions)} submissions",
-                        icon_url=interaction.user.display_avatar.url
-                    )
-                else:
-                    embed.set_footer(
-                        text="Your complete portfolio",
-                        icon_url=interaction.user.display_avatar.url
-                    )
-                
-                await interaction.followup.send(embed=embed, ephemeral=True)
-                
-            except Exception as e:
-                self.bot.logger.error(MODULE_NAME, "Failed to show user projects", e)
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "Error in spotlight checker", e)
+    
+    @spotlight_checker.before_loop
+    async def before_spotlight():
+        await bot.wait_until_ready()
+    
+    spotlight_checker.start()
+    
+    # --- Database Cleanup Task ---
+    @tasks.loop(hours=24)
+    async def database_cleanup():
+        """Clean up old deleted submissions daily"""
+        try:
+            removed = db.cleanup_old_deleted_submissions(days=30)
+            if removed > 0:
+                bot.logger.log(MODULE_NAME, f"Daily cleanup removed {removed} old deleted submissions")
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "Error in database cleanup", e)
+    
+    @database_cleanup.before_loop
+    async def before_cleanup():
+        await bot.wait_until_ready()
+        await asyncio.sleep(3600)
+    
+    database_cleanup.start()
+    
+    # --- Console Command Handlers ---
+    async def handle_toggle_sticky(args):
+        """Toggle sticky messages on/off"""
+        current_state = db.is_sticky_enabled()
+        new_state = not current_state
+        db.set_sticky_enabled(new_state)
+        
+        status_text = "ENABLED" if new_state else "DISABLED"
+        print(f"✅ Sticky messages are now {status_text}")
+        
+        if not new_state:
+            for channel_id, msg_id in db.data["sticky_messages"].items():
                 try:
-                    await interaction.followup.send("❌ Failed to load your projects", ephemeral=True)
+                    channel = bot.get_channel(int(channel_id))
+                    if channel:
+                        msg = await channel.fetch_message(int(msg_id))
+                        await msg.delete()
                 except:
                     pass
-        
-        @discord.ui.button(label="Submission Format", style=discord.ButtonStyle.secondary, emoji="📋", row=0)
-        async def format_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-            """Show submission format guide"""
+            print("Cleaned up existing sticky messages.")
+    
+    async def handle_db_cleanup(args):
+        """Manually trigger database cleanup"""
+        days = 30
+        if args.strip():
             try:
-                channel_name = interaction.channel.name.lower()
-                
-                embed = discord.Embed(
-                    color=THEME_COLORS["primary"]
-                )
-                
-                if channel_name == PROJECTS_CHANNEL_NAME:
-                    embed.description = (
-                        "# 📋 Project Submission Format\n\n"
-                        "## Required\n"
-                        "• At least one **link** or **file attachment**\n"
-                        "• A **title** OR **description** (or both)\n\n"
-                        "## Optional Format\n"
-                        "```markdown\n"
-                        "# Your Project Title\n"
-                        "- Feature description\n"
-                        "- Another cool feature\n"
-                        "[Link](https://your-project.com)\n"
-                        "```\n\n"
-                        "## Simple Format\n"
-                        "Just describe your project and attach a link or file!\n"
-                        "If you attach a file without a title, the filename becomes the title.\n\n"
-                        "## Examples\n"
-                        "**With formatting:**\n"
-                        "`# My Game`\n"
-                        "`- 2D platformer`\n"
-                        "`- 10 levels`\n"
-                        "`https://mygame.com`\n\n"
-                        "**Simple:**\n"
-                        "`Check out my new game!`\n"
-                        "`https://mygame.com`"
-                    )
-                else:
-                    embed.description = (
-                        "# 📷 Artwork Submission Format\n\n"
-                        "## How to Submit\n"
-                        "Simply attach one or more images to your message!\n\n"
-                        "That's it! Optional descriptions are welcome but not required."
-                    )
-                
-                embed.set_footer(text="Embot Community • Happy creating!")
-                
-                await interaction.response.send_message(embed=embed, ephemeral=True)
-                
-            except Exception as e:
-                self.bot.logger.error(MODULE_NAME, "Failed to show format guide", e)
-                await interaction.response.send_message("❌ Failed to load format guide", ephemeral=True)
+                days = int(args.strip())
+            except ValueError:
+                print("⚠️ Invalid number of days, using default (30)")
         
-        @discord.ui.button(label="More Info", style=discord.ButtonStyle.primary, emoji="ℹ️", row=0)
-        async def info_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-            """Show detailed info"""
-            info_view = InfoButtonsView(self.bot, self.db)
-            await info_view.show_more_info(interaction)
-
-
-    def setup(bot):
-        """Setup function called by main bot to initialize this module"""
+        print(f"🔄 Cleaning up submissions deleted more than {days} days ago...")
+        removed = db.cleanup_old_deleted_submissions(days)
         
-        listener_name = f"_{MODULE_NAME.lower()}_listener_registered"
-        if hasattr(bot, listener_name):
-            bot.logger.log(MODULE_NAME, "Module already setup, skipping duplicate registration")
+        import os
+        db_size = os.path.getsize(DB_FILE) / (1024 * 1024)
+        
+        print(f"✅ Removed {removed} old submissions")
+        print(f"📊 Database size: {db_size:.2f} MB")
+        print(f"📦 Active submissions: {len([s for s in db.data['submissions'].values() if not Submission.from_dict(s).is_deleted])}")
+    
+    async def handle_db_stats(args):
+        """Show detailed database statistics"""
+        stats = db.get_stats()
+        
+        import os
+        db_size = os.path.getsize(DB_FILE) / (1024 * 1024)
+        
+        deleted_count = len([s for s in db.data['submissions'].values() if Submission.from_dict(s).is_deleted])
+        
+        print("\n┌─────────────────────────────────────────────────────────────────┐")
+        print("│                      DATABASE STATISTICS                        │")
+        print("├─────────────────────────────────────────────────────────────────┤")
+        print(f"│ File Size: {db_size:.2f} MB{' ' * (49 - len(f'{db_size:.2f} MB'))}│")
+        print(f"│ Active Submissions: {stats['total_submissions']}{' ' * (44 - len(str(stats['total_submissions'])))}│")
+        print(f"│ Deleted Submissions: {deleted_count}{' ' * (43 - len(str(deleted_count)))}│")
+        print(f"│ Projects: {stats['total_projects']}{' ' * (50 - len(str(stats['total_projects'])))}│")
+        print(f"│ Artwork: {stats['total_artwork']}{' ' * (51 - len(str(stats['total_artwork'])))}│")
+        print(f"│ Users: {stats['total_users']}{' ' * (53 - len(str(stats['total_users'])))}│")
+        print(f"│ Total Votes: {stats['total_votes']}{' ' * (47 - len(str(stats['total_votes'])))}│")
+        print(f"│ File Hashes: {len(db.data['file_hashes'])}{' ' * (47 - len(str(len(db.data['file_hashes']))))}│")
+        print(f"│ Link Registry: {len(db.data['link_registry'])}{' ' * (45 - len(str(len(db.data['link_registry']))))}│")
+        print("└─────────────────────────────────────────────────────────────────┘\n")
+    
+    if hasattr(bot, 'console_commands'):
+        bot.console_commands['toggle_sticky'] = {
+            'description': 'Toggle dashboard sticky messages on/off',
+            'handler': handle_toggle_sticky
+        }
+        bot.console_commands['db_cleanup'] = {
+            'description': 'Clean up old deleted submissions [days]',
+            'handler': handle_db_cleanup
+        }
+        bot.console_commands['db_stats'] = {
+            'description': 'Show detailed database statistics',
+            'handler': handle_db_stats
+        }
+    
+    # --- Event Listeners with Bot Reaction Exclusion ---
+    @bot.listen('on_message')
+    async def on_community_message(message: discord.Message):
+        """Listen for messages in projects and artwork channels"""
+        if message.author.bot:
             return
-        setattr(bot, listener_name, True)
         
-        bot.logger.log(MODULE_NAME, "Setting up community module")
+        if not message.guild:
+            return
         
-        db = SubmissionDatabase(bot)
-        bot.community_db = db
+        channel_name = message.channel.name.lower()
         
-        manager = CommunityManager(bot, db)
-        bot.community_manager = manager
-
-        # --- Auto-send sticky messages on startup ---
-        @tasks.loop(count=1)
-        async def auto_send_sticky():
-            """Send sticky messages to projects and artwork channels on startup"""
-            try:
-                await bot.wait_until_ready()
-                
-                # Wait a bit for bot to fully initialize
-                await asyncio.sleep(3)
-                
-                if not db.is_sticky_enabled():
-                    bot.logger.log(MODULE_NAME, "Sticky messages disabled, skipping auto-send")
-                    return
-                
-                guild = bot.guilds[0] if bot.guilds else None
-                if not guild:
-                    bot.logger.log(MODULE_NAME, "No guild found for sticky auto-send", "WARNING")
-                    return
-                
-                # Send to projects channel
-                projects_channel = discord.utils.get(guild.channels, name=PROJECTS_CHANNEL_NAME)
-                if projects_channel:
-                    await manager.update_sticky_message(projects_channel)
-                    bot.logger.log(MODULE_NAME, "Auto-sent sticky to #projects")
-                
-                # Send to artwork channel
-                artwork_channel = discord.utils.get(guild.channels, name=ARTWORK_CHANNEL_NAME)
-                if artwork_channel:
-                    await manager.update_sticky_message(artwork_channel)
-                    bot.logger.log(MODULE_NAME, "Auto-sent sticky to #artwork")
-                    
-            except Exception as e:
-                bot.logger.error(MODULE_NAME, "Error in auto-send sticky", e)
+        if channel_name == PROJECTS_CHANNEL_NAME:
+            await manager.process_submission(message, "project")
+        elif channel_name == ARTWORK_CHANNEL_NAME:
+            await manager.process_submission(message, "artwork")
+    
+    @bot.listen('on_message_edit')
+    async def on_community_edit(before: discord.Message, after: discord.Message):
+        """Detect submission edits and update database"""
+        if after.author.bot:
+            return
         
-        auto_send_sticky.start()
-
-        # --- Spotlight Friday Task ---
-        @tasks.loop(minutes=1)
-        async def spotlight_checker():
-            """Check time for Spotlight Friday (Friday 3PM CST)"""
-            try:
-                cst_tz = timezone(timedelta(hours=-6))
-                now = datetime.now(cst_tz)
-                
-                if now.weekday() == 4 and now.hour == 15:
-                    current_week = now.strftime("%Y-%W")
-                    last_run = db.get_last_spotlight_week()
-                    
-                    if current_week != last_run:
-                        await manager.run_spotlight_friday()
-                        db.set_last_spotlight_week(current_week)
-                        
-            except Exception as e:
-                bot.logger.error(MODULE_NAME, "Error in spotlight checker", e)
-
-        @spotlight_checker.before_loop
-        async def before_spotlight():
-            await bot.wait_until_ready()
-
-        spotlight_checker.start()
+        if not after.guild:
+            return
         
-        # --- Database Cleanup Task ---
-        @tasks.loop(hours=24)
-        async def database_cleanup():
-            """Clean up old deleted submissions daily"""
-            try:
-                removed = db.cleanup_old_deleted_submissions(days=30)
-                if removed > 0:
-                    bot.logger.log(MODULE_NAME, f"Daily cleanup removed {removed} old deleted submissions")
-            except Exception as e:
-                bot.logger.error(MODULE_NAME, "Error in database cleanup", e)
-
-        @database_cleanup.before_loop
-        async def before_cleanup():
-            await bot.wait_until_ready()
-            # Wait 1 hour after startup before first cleanup
-            await asyncio.sleep(3600)
-
-        database_cleanup.start()
+        channel_name = after.channel.name.lower()
         
-        # --- Console Command Handlers ---
-        async def handle_toggle_sticky(args):
-            """Toggle sticky messages on/off"""
-            current_state = db.is_sticky_enabled()
-            new_state = not current_state
-            db.set_sticky_enabled(new_state)
+        if channel_name in [PROJECTS_CHANNEL_NAME, ARTWORK_CHANNEL_NAME]:
+            await manager.process_edit(before, after)
+    
+    @bot.listen('on_raw_reaction_add')
+    async def on_community_reaction_add(payload: discord.RawReactionActionEvent):
+        """Centralized vote handling with spam protection and bot exclusion"""
+        try:
+            # Exclude bot reactions from vote counts
+            user = await bot.fetch_user(payload.user_id)
+            if user.bot:
+                return
             
-            status_text = "ENABLED" if new_state else "DISABLED"
-            print(f"✅ Sticky messages are now {status_text}")
+            submission = db.get_submission(str(payload.message_id))
+            if not submission:
+                return
             
-            if not new_state:
-                for channel_id, msg_id in db.data["sticky_messages"].items():
-                    try:
-                        channel = bot.get_channel(int(channel_id))
-                        if channel:
-                            msg = await channel.fetch_message(int(msg_id))
-                            await msg.delete()
-                    except:
-                        pass
-                print("Cleaned up existing sticky messages.")
-
-        async def handle_db_cleanup(args):
-            """Manually trigger database cleanup"""
-            days = 30
-            if args.strip():
-                try:
-                    days = int(args.strip())
-                except ValueError:
-                    print("⚠️ Invalid number of days, using default (30)")
+            emoji = str(payload.emoji)
             
-            print(f"🔄 Cleaning up submissions deleted more than {days} days ago...")
-            removed = db.cleanup_old_deleted_submissions(days)
+            if emoji not in XP_VALUES:
+                return
             
-            # Calculate database size
-            import os
-            db_size = os.path.getsize(DB_FILE) / (1024 * 1024)  # MB
+            channel = bot.get_channel(payload.channel_id)
+            if not channel:
+                return
             
-            print(f"✅ Removed {removed} old submissions")
-            print(f"📊 Database size: {db_size:.2f} MB")
-            print(f"📦 Active submissions: {len([s for s in db.data['submissions'].values() if not Submission.from_dict(s).is_deleted])}")
-        
-        async def handle_db_stats(args):
-            """Show detailed database statistics"""
-            stats = db.get_stats()
+            message = await channel.fetch_message(payload.message_id)
             
-            import os
-            db_size = os.path.getsize(DB_FILE) / (1024 * 1024)  # MB
+            # Count only non-bot reactions
+            count = 0
+            for reaction in message.reactions:
+                if str(reaction.emoji) == emoji:
+                    # Get non-bot users who reacted
+                    users = [user async for user in reaction.users() if not user.bot]
+                    count = len(users)
+                    break
             
-            deleted_count = len([s for s in db.data['submissions'].values() if Submission.from_dict(s).is_deleted])
+            was_recorded = db.handle_vote(str(message.id), str(payload.user_id), emoji, count)
             
-            print("\n┌────────────────────────────────────────────────────────────────┐")
-            print("│                      DATABASE STATISTICS                        │")
-            print("├────────────────────────────────────────────────────────────────┤")
-            print(f"│ File Size: {db_size:.2f} MB{' ' * (49 - len(f'{db_size:.2f} MB'))}│")
-            print(f"│ Active Submissions: {stats['total_submissions']}{' ' * (44 - len(str(stats['total_submissions'])))}│")
-            print(f"│ Deleted Submissions: {deleted_count}{' ' * (43 - len(str(deleted_count)))}│")
-            print(f"│ Projects: {stats['total_projects']}{' ' * (50 - len(str(stats['total_projects'])))}│")
-            print(f"│ Artwork: {stats['total_artwork']}{' ' * (51 - len(str(stats['total_artwork'])))}│")
-            print(f"│ Users: {stats['total_users']}{' ' * (53 - len(str(stats['total_users'])))}│")
-            print(f"│ Total Votes: {stats['total_votes']}{' ' * (47 - len(str(stats['total_votes'])))}│")
-            print(f"│ File Hashes: {len(db.data['file_hashes'])}{' ' * (47 - len(str(len(db.data['file_hashes']))))}│")
-            print(f"│ Link Registry: {len(db.data['link_registry'])}{' ' * (45 - len(str(len(db.data['link_registry']))))}│")
-            print("└────────────────────────────────────────────────────────────────┘\n")
-
-        if hasattr(bot, 'console_commands'):
-            bot.console_commands['toggle_sticky'] = {
-                'description': 'Toggle dashboard sticky messages on/off',
-                'handler': handle_toggle_sticky
-            }
-            bot.console_commands['db_cleanup'] = {
-                'description': 'Clean up old deleted submissions [days]',
-                'handler': handle_db_cleanup
-            }
-            bot.console_commands['db_stats'] = {
-                'description': 'Show detailed database statistics',
-                'handler': handle_db_stats
-            }
-        
-        # --- Event Listeners ---
-        @bot.listen('on_message')
-        async def on_community_message(message: discord.Message):
-            """Listen for messages in projects and artwork channels"""
+            if was_recorded:
+                bot.logger.log(MODULE_NAME, 
+                              f"Recorded {emoji} vote from user {payload.user_id} on {submission.project_id}")
+            
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "Failed to process reaction", e)
+    
+    @bot.listen('on_raw_reaction_remove')
+    async def on_community_reaction_remove(payload: discord.RawReactionActionEvent):
+        """Update vote counts when reactions are removed - exclude bot reactions"""
+        try:
+            # Exclude bot reactions
+            user = await bot.fetch_user(payload.user_id)
+            if user.bot:
+                return
+            
+            submission = db.get_submission(str(payload.message_id))
+            if not submission:
+                return
+            
+            emoji = str(payload.emoji)
+            
+            if emoji not in XP_VALUES:
+                return
+            
+            channel = bot.get_channel(payload.channel_id)
+            if not channel:
+                return
+            
+            message = await channel.fetch_message(payload.message_id)
+            
+            for reaction in message.reactions:
+                if str(reaction.emoji) == emoji:
+                    # Count only non-bot users
+                    users = [user async for user in reaction.users() if not user.bot]
+                    db.update_vote_count(str(message.id), emoji, len(users))
+                    break
+            
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "Failed to process reaction removal", e)
+    
+    @bot.listen('on_message')
+    async def on_thread_message(message: discord.Message):
+        """Award XP for messages in submission threads"""
+        try:
             if message.author.bot:
                 return
             
-            if not message.guild:
+            if not isinstance(message.channel, discord.Thread):
                 return
             
-            channel_name = message.channel.name.lower()
+            parent_message_id = str(message.channel.id)
             
-            if channel_name == PROJECTS_CHANNEL_NAME:
-                await manager.process_submission(message, "project")
-            elif channel_name == ARTWORK_CHANNEL_NAME:
-                await manager.process_submission(message, "artwork")
-        
-        @bot.listen('on_message_edit')
-        async def on_community_edit(before: discord.Message, after: discord.Message):
-            """Detect submission edits and update database"""
-            if after.author.bot:
-                return
-            
-            if not after.guild:
-                return
-            
-            channel_name = after.channel.name.lower()
-            
-            if channel_name in [PROJECTS_CHANNEL_NAME, ARTWORK_CHANNEL_NAME]:
-                await manager.process_edit(before, after)
-        
-        @bot.listen('on_raw_reaction_add')
-        async def on_community_reaction_add(payload: discord.RawReactionActionEvent):
-            """Centralized vote handling with spam protection"""
-            try:
-                # Ignore bot reactions
-                if payload.user_id == bot.user.id:
-                    return
-                
-                submission = db.get_submission(str(payload.message_id))
-                if not submission:
-                    return
-                
-                emoji = str(payload.emoji)
-                
-                if emoji not in XP_VALUES:
-                    return
-                
-                channel = bot.get_channel(payload.channel_id)
-                if not channel:
-                    return
-                
-                message = await channel.fetch_message(payload.message_id)
-                
-                # Count reactions excluding the bot's reactions
-                count = 0
-                for reaction in message.reactions:
-                    if str(reaction.emoji) == emoji:
-                        # Get all users who reacted
-                        users = [user async for user in reaction.users()]
-                        # Count only non-bot reactions
-                        count = sum(1 for user in users if not user.bot)
-                        break
-                
-                was_recorded = db.handle_vote(str(message.id), str(payload.user_id), emoji, count)
-                
-                if was_recorded:
-                    bot.logger.log(MODULE_NAME, 
-                                f"Recorded {emoji} vote from user {payload.user_id} on {submission.project_id}")
-                
-            except Exception as e:
-                bot.logger.error(MODULE_NAME, "Failed to process reaction", e)
-        
-        @bot.listen('on_raw_reaction_remove')
-        async def on_community_reaction_remove(payload: discord.RawReactionActionEvent):
-            """Update vote counts when reactions are removed"""
-            try:
-                submission = db.get_submission(str(payload.message_id))
-                if not submission:
-                    return
-                
-                emoji = str(payload.emoji)
-                
-                if emoji not in XP_VALUES:
-                    return
-                
-                channel = bot.get_channel(payload.channel_id)
-                if not channel:
-                    return
-                
-                message = await channel.fetch_message(payload.message_id)
-                
-                # Count reactions excluding the bot's reactions
-                for reaction in message.reactions:
-                    if str(reaction.emoji) == emoji:
-                        # Get all users who reacted
-                        users = [user async for user in reaction.users()]
-                        # Count only non-bot reactions
-                        count = sum(1 for user in users if not user.bot)
-                        db.update_vote_count(str(message.id), emoji, count)
-                        break
-                
-            except Exception as e:
-                bot.logger.error(MODULE_NAME, "Failed to process reaction removal", e)
-        
-        @bot.listen('on_message')
-        async def on_thread_message(message: discord.Message):
-            """Award XP for messages in submission threads"""
-            try:
-                if message.author.bot:
-                    return
-                
-                if not isinstance(message.channel, discord.Thread):
-                    return
-                
-                parent_message_id = str(message.channel.id)
-                
-                if message.channel.parent:
-                    try:
-                        parent_channel = message.channel.parent
-                        if parent_channel.name.lower() not in [PROJECTS_CHANNEL_NAME, ARTWORK_CHANNEL_NAME]:
-                            return
-                        
-                        starter_message = message.channel.starter_message
-                        if not starter_message:
-                            starter_message = await message.channel.parent.fetch_message(message.channel.id)
-                        
-                        submission = db.get_submission(str(starter_message.id))
-                        if submission and not submission.is_deleted:
-                            db.add_thread_message_xp(str(starter_message.id))
-                            
-                    except (discord.NotFound, discord.HTTPException):
-                        pass
-                        
-            except Exception as e:
-                bot.logger.error(MODULE_NAME, "Failed to process thread message", e)
-        
-        @bot.tree.command(name="update_sticky", description="[Admin] Update the sticky dashboard message")
-        @app_commands.checks.has_permissions(administrator=True)
-        async def update_sticky(interaction: discord.Interaction):
-            """Manually update sticky message"""
-            try:
-                channel_name = interaction.channel.name.lower()
-                
-                if channel_name not in [PROJECTS_CHANNEL_NAME, ARTWORK_CHANNEL_NAME]:
-                    await interaction.response.send_message(
-                        "❌ This command can only be used in #projects or #artwork",
-                        ephemeral=True
-                    )
-                    return
-                
-                if not db.is_sticky_enabled():
-                    await interaction.response.send_message(
-                        "❌ Sticky messages are currently disabled in settings.",
-                        ephemeral=True
-                    )
-                    return
-
-                await interaction.response.defer(ephemeral=True)
-                await manager.update_sticky_message(interaction.channel)
-                
-                await interaction.followup.send("✅ Sticky message updated!", ephemeral=True)
-                
-            except Exception as e:
-                bot.logger.error(MODULE_NAME, "Failed to update sticky via command", e)
-                await interaction.followup.send("❌ Failed to update sticky message", ephemeral=True)
-        
-        @bot.tree.command(name="community_stats", description="View community submission statistics")
-        async def community_stats(interaction: discord.Interaction):
-            """Show community statistics"""
-            try:
-                stats = db.get_stats()
-                leaderboard = await db.get_leaderboard(bot, limit=5)
-                
-                embed = discord.Embed(
-                    title="📊 Community Statistics",
-                    color=discord.Color.blue()
-                )
-                
-                embed.add_field(
-                    name="📈 Overall Stats",
-                    value=(
-                        f"**Total Submissions:** {stats['total_submissions']}\n"
-                        f"**Projects:** {stats['total_projects']}\n"
-                        f"**Artwork:** {stats['total_artwork']}\n"
-                        f"**Contributors:** {stats['total_users']}\n"
-                        f"**Total Votes:** {stats['total_votes']}"
-                    ),
-                    inline=False
-                )
-                
-                if leaderboard:
-                    medals = ["🥇", "🥈", "🥉", "4.", "5."]
-                    leaderboard_text = ""
-                    for i, (user_id, xp) in enumerate(leaderboard):
-                        medal = medals[i]
-                        leaderboard_text += f"{medal} <@{user_id}> - **{xp} XP**\n"
+            if message.channel.parent:
+                try:
+                    parent_channel = message.channel.parent
+                    if parent_channel.name.lower() not in [PROJECTS_CHANNEL_NAME, ARTWORK_CHANNEL_NAME]:
+                        return
                     
-                    embed.add_field(name="🏆 Top Contributors", value=leaderboard_text, inline=False)
-                
-                user_xp = db.get_user_xp(str(interaction.user.id))
-                user_submissions = db.data["user_projects"].get(str(interaction.user.id), [])
-                
-                embed.add_field(
-                    name="Your Stats",
-                    value=f"**XP:** {user_xp}\n**Submissions:** {len(user_submissions)}",
-                    inline=False
+                    starter_message = message.channel.starter_message
+                    if not starter_message:
+                        starter_message = await message.channel.parent.fetch_message(message.channel.id)
+                    
+                    submission = db.get_submission(str(starter_message.id))
+                    if submission and not submission.is_deleted:
+                        db.add_thread_message_xp(str(starter_message.id))
+                        
+                except (discord.NotFound, discord.HTTPException):
+                    pass
+                    
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "Failed to process thread message", e)
+    
+    @bot.tree.command(name="update_sticky", description="[Admin] Update the sticky dashboard message")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def update_sticky(interaction: discord.Interaction):
+        """Manually update sticky message"""
+        try:
+            channel_name = interaction.channel.name.lower()
+            
+            if channel_name not in [PROJECTS_CHANNEL_NAME, ARTWORK_CHANNEL_NAME]:
+                await interaction.response.send_message(
+                    "❌ This command can only be used in #projects or #artwork",
+                    ephemeral=True
                 )
+                return
+            
+            if not db.is_sticky_enabled():
+                await interaction.response.send_message(
+                    "❌ Sticky messages are currently disabled in settings.",
+                    ephemeral=True
+                )
+                return
+
+            await interaction.response.defer(ephemeral=True)
+            await manager.update_sticky_message(interaction.channel)
+            
+            await interaction.followup.send("✅ Sticky message updated!", ephemeral=True)
+            
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "Failed to update sticky via command", e)
+            await interaction.followup.send("❌ Failed to update sticky message", ephemeral=True)
+    
+    @bot.tree.command(name="community_stats", description="View community submission statistics")
+    async def community_stats(interaction: discord.Interaction):
+        """Show community statistics"""
+        try:
+            stats = db.get_stats()
+            leaderboard = await db.get_leaderboard(bot, limit=5)
+            
+            embed = discord.Embed(
+                title="📊 Community Statistics",
+                color=discord.Color.blue()
+            )
+            
+            embed.add_field(
+                name="📈 Overall Stats",
+                value=(
+                    f"**Total Submissions:** {stats['total_submissions']}\n"
+                    f"**Projects:** {stats['total_projects']}\n"
+                    f"**Artwork:** {stats['total_artwork']}\n"
+                    f"**Contributors:** {stats['total_users']}\n"
+                    f"**Total Votes:** {stats['total_votes']}"
+                ),
+                inline=False
+            )
+            
+            if leaderboard:
+                medals = ["🥇", "🥈", "🥉", "4.", "5."]
+                leaderboard_text = ""
+                for i, (user_id, xp) in enumerate(leaderboard):
+                    medal = medals[i]
+                    leaderboard_text += f"{medal} <@{user_id}> - **{xp} XP**\n"
                 
-                await interaction.response.send_message(embed=embed, ephemeral=True)
-                
-            except Exception as e:
-                bot.logger.error(MODULE_NAME, "Failed to show stats", e)
-                await interaction.response.send_message("❌ Failed to load statistics", ephemeral=True)
-        
-        bot.logger.log(MODULE_NAME, "Community module setup complete")
+                embed.add_field(name="🏆 Top Contributors", value=leaderboard_text, inline=False)
+            
+            user_xp = db.get_user_xp(str(interaction.user.id))
+            user_submissions = db.data["user_projects"].get(str(interaction.user.id), [])
+            
+            embed.add_field(
+                name="Your Stats",
+                value=f"**XP:** {user_xp}\n**Submissions:** {len(user_submissions)}",
+                inline=False
+            )
+            
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "Failed to show stats", e)
+            await interaction.response.send_message("❌ Failed to load statistics", ephemeral=True)
+    
+    bot.logger.log(MODULE_NAME, "Community module setup complete")

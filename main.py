@@ -208,6 +208,9 @@ async def on_ready():
         # Load modules
         load_modules()
         
+        # Wait a moment for modules to initialize
+        await asyncio.sleep(2)
+        
         # Try to sync commands but don't let failures stop the bot
         try:
             await bot.tree.sync()

@@ -493,7 +493,7 @@ class SubmissionDatabase:
     async def get_leaderboard(self, bot, limit: int = 10) -> List[tuple]:
         """Get top users by XP with optimized deletion checking"""
         user_xp = {}
-        cutoff_date = datetime.now() - timedelta(days=7)
+        cutoff_date = datetime.now().replace(tzinfo=None) - timedelta(days=7)  # Make timezone-naive
         
         for user_id in self.data["user_projects"].keys():
             if str(user_id) == EMBALL_USER_ID:
@@ -515,7 +515,11 @@ class SubmissionDatabase:
                     
                     if submission.project_id == project_id and not submission.is_deleted:
                         # Only check recent submissions for deletion
-                        submission_date = datetime.fromisoformat(submission.created_at)
+                        try:
+                            submission_date = datetime.fromisoformat(submission.created_at).replace(tzinfo=None)
+                        except:
+                            submission_date = datetime.now().replace(tzinfo=None)
+                        
                         if submission_date > cutoff_date and submission.channel_id:
                             try:
                                 channel = bot.get_channel(int(submission.channel_id))
@@ -1287,12 +1291,8 @@ class CommunityDashboardView(discord.ui.View):
         try:
             await interaction.response.defer(ephemeral=True)
             
-            # Run in executor to avoid blocking
-            loop = asyncio.get_event_loop()
-            leaderboard = await loop.run_in_executor(
-                None,
-                lambda: asyncio.run(self.db.get_leaderboard(self.bot, limit=10))
-            )
+            # Get leaderboard directly (it's already async)
+            leaderboard = await self.db.get_leaderboard(self.bot, limit=10)
             
             embed = discord.Embed(
                 color=THEME_COLORS["gold"]

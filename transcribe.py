@@ -11,8 +11,8 @@ import threading
 
 MODULE_NAME = "TRANSCRIBE"
 
-# Configuration - Reduced models to prevent memory issues
-PROGRESSIVE_MODELS = ["base", "small"]
+# Configuration
+WHISPER_MODEL = "base"  # Single model for simplicity
 MAX_CONCURRENT_TRANSCRIPTIONS = 2
 TEMP_DIR = Path("data/transcribe_temp")
 TEMP_FILE_MAX_AGE = 3600
@@ -27,15 +27,14 @@ class TranscriptionManager:
     def __init__(self, bot):
         self.bot = bot
         self._setup_directories()
-        self.whisper_models = {}
+        self.whisper_model = None
         self.active_transcriptions = 0
         self.transcription_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TRANSCRIPTIONS)
-        self.model_loading = {}
+        self.model_loading = False
         
         # Metrics tracking
         self.total_transcriptions = 0
         self.total_transcription_time = 0.0
-        self.model_usage_count = {}
         
         self._check_dependencies()
         self._cleanup_old_temp_files()
@@ -84,22 +83,22 @@ class TranscriptionManager:
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to load Whisper", e)
 
-    async def load_model(self, model_name):
-        """Load a Whisper model with proper async handling and locking"""
-        if model_name in self.whisper_models:
-            return self.whisper_models[model_name]
+    async def load_model(self):
+        """Load the Whisper model with proper async handling and locking"""
+        if self.whisper_model is not None:
+            return self.whisper_model
         
-        if model_name in self.model_loading:
-            self.bot.logger.log(MODULE_NAME, f"Waiting for {model_name} model to finish loading...")
-            while model_name in self.model_loading:
+        if self.model_loading:
+            self.bot.logger.log(MODULE_NAME, f"Waiting for {WHISPER_MODEL} model to finish loading...")
+            while self.model_loading:
                 await asyncio.sleep(0.1)
-            return self.whisper_models.get(model_name)
+            return self.whisper_model
         
         async with MODEL_LOAD_LOCK:
-            if model_name in self.whisper_models:
-                return self.whisper_models[model_name]
+            if self.whisper_model is not None:
+                return self.whisper_model
             
-            self.model_loading[model_name] = True
+            self.model_loading = True
             
             try:
                 import whisper
@@ -109,9 +108,9 @@ class TranscriptionManager:
                 
                 def _load_model():
                     device = "cuda" if torch.cuda.is_available() else "cpu"
-                    self.bot.logger.log(MODULE_NAME, f"Loading Whisper model: {model_name} on {device.upper()}")
+                    self.bot.logger.log(MODULE_NAME, f"Loading Whisper model: {WHISPER_MODEL} on {device.upper()}")
                     
-                    model = whisper.load_model(model_name, device=device)
+                    model = whisper.load_model(WHISPER_MODEL, device=device)
                     
                     if device == "cuda":
                         self.bot.logger.log(MODULE_NAME, f"GPU acceleration enabled: {torch.cuda.get_device_name(0)}")
@@ -121,21 +120,15 @@ class TranscriptionManager:
                     return model
                 
                 model = await loop.run_in_executor(None, _load_model)
-                self.whisper_models[model_name] = model
+                self.whisper_model = model
                 
                 return model
                 
             except Exception as e:
-                self.bot.logger.error(MODULE_NAME, f"Failed to load model {model_name}", e)
-                if model_name == "large":
-                    self.bot.logger.log(MODULE_NAME, "Falling back to medium model")
-                    return await self.load_model("medium")
-                elif model_name == "medium":
-                    self.bot.logger.log(MODULE_NAME, "Falling back to small model")
-                    return await self.load_model("small")
+                self.bot.logger.error(MODULE_NAME, f"Failed to load model {WHISPER_MODEL}", e)
                 return None
             finally:
-                self.model_loading.pop(model_name, None)
+                self.model_loading = False
     
     def is_voice_message(self, message):
         """Check if a message is a voice message"""
@@ -178,9 +171,9 @@ class TranscriptionManager:
             self.bot.logger.error(MODULE_NAME, "Audio conversion error", e)
             return False
     
-    async def transcribe_audio(self, audio_path, model_name):
+    async def transcribe_audio(self, audio_path):
         """Transcribe audio file using Whisper with error handling"""
-        model = await self.load_model(model_name)
+        model = await self.load_model()
         if not model:
             return None
         
@@ -193,7 +186,7 @@ class TranscriptionManager:
                 try:
                     return model.transcribe(str(audio_path))
                 except Exception as e:
-                    self.bot.logger.error(MODULE_NAME, f"Transcription failed for {model_name}", e)
+                    self.bot.logger.error(MODULE_NAME, f"Transcription failed for {WHISPER_MODEL}", e)
                     return None
             
             result = await loop.run_in_executor(None, _transcribe)
@@ -210,15 +203,13 @@ class TranscriptionManager:
             
             language = result.get('language', 'unknown')
             
-            self.model_usage_count[model_name] = self.model_usage_count.get(model_name, 0) + 1
-            
             self.bot.logger.log(MODULE_NAME, 
-                f"Transcribed with {model_name} in {elapsed:.2f}s | Language: {language} | Length: {len(text)} chars")
+                f"Transcribed with {WHISPER_MODEL} in {elapsed:.2f}s | Language: {language} | Length: {len(text)} chars")
             
             return {
                 'text': text,
                 'language': language,
-                'model': model_name,
+                'model': WHISPER_MODEL,
                 'elapsed_time': elapsed
             }
             
@@ -256,59 +247,14 @@ class TranscriptionManager:
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Download/convert error", e)
             return None
-        
-    async def use_cached_vm(self, vm_cache_path):
-        """Use a cached VM file from VMS system instead of downloading"""
-        try:
-            # Check if file exists and is accessible
-            if not vm_cache_path.exists():
-                self.bot.logger.log(MODULE_NAME, f"Cached VM not found: {vm_cache_path}", "WARNING")
-                return None
-            
-            # Check file extension - if already .wav, use directly
-            if vm_cache_path.suffix.lower() == '.wav':
-                self.bot.logger.log(MODULE_NAME, f"Using cached WAV directly: {vm_cache_path.name}")
-                return vm_cache_path
-            
-            # Convert to WAV
-            temp_wav = TEMP_DIR / f"vm_cached_{vm_cache_path.stem}.wav"
-            
-            conversion_success = await self.convert_to_wav(vm_cache_path, temp_wav)
-            
-            if not conversion_success:
-                if temp_wav.exists():
-                    temp_wav.unlink()
-                return None
-            
-            self.bot.logger.log(MODULE_NAME, f"Converted cached VM to WAV: {vm_cache_path.name}")
-            return temp_wav
-            
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, f"Error using cached VM: {vm_cache_path}", e)
-            return None
     
     def format_transcription(self, result):
         """Format transcription as plain quoted text"""
         text = result['text']
         return f"> {text}"
     
-    def _get_audio_duration(self, audio_path):
-        """Get audio duration in seconds using ffprobe"""
-        try:
-            result = subprocess.run(
-                ['ffprobe', '-v', 'error', '-show_entries', 
-                 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', 
-                 str(audio_path)],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            return float(result.stdout.strip())
-        except:
-            return 0.0
-    
-    async def progressive_transcription(self, message, skip_bot_vms=True):
-        """Progressively transcribe with base -> small, editing the message each time"""
+    async def transcribe_and_save(self, message, skip_bot_vms=True):
+        """Transcribe a voice message and save both audio and transcript to VMS cache"""
         # Skip bot's own voice messages if requested
         if skip_bot_vms and message.author.id == self.bot.user.id:
             self.bot.logger.log(MODULE_NAME, "Skipping bot's own VM")
@@ -319,9 +265,9 @@ class TranscriptionManager:
             
             try:
                 self.bot.logger.log(MODULE_NAME, 
-                    f"Starting progressive transcription ({self.active_transcriptions}/{MAX_CONCURRENT_TRANSCRIPTIONS} active)")
+                    f"Starting transcription and save ({self.active_transcriptions}/{MAX_CONCURRENT_TRANSCRIPTIONS} active)")
                 
-                temp_files = []
+                temp_wav = None
                 reply_message = None
                 
                 try:
@@ -330,72 +276,55 @@ class TranscriptionManager:
                         self.bot.logger.log(MODULE_NAME, 
                             f"Processing VM from {message.author.display_name} in #{channel_name}")
                         
-                        wav_path = await self.download_and_convert(message)
-                        if not wav_path:
-                            self.bot.logger.log(MODULE_NAME, "Failed to prepare audio", "WARNING")
+                        # First, let VMS save the original audio file
+                        if hasattr(self.bot, 'vms_manager'):
+                            vm_cache_path = await self.bot.vms_manager.save_voice_message(message)
+                            if not vm_cache_path:
+                                self.bot.logger.log(MODULE_NAME, "Failed to save VM to cache", "WARNING")
+                                return
+                        else:
+                            self.bot.logger.log(MODULE_NAME, "VMS manager not available", "ERROR")
                             return
                         
-                        temp_files.append(wav_path)
+                        # Convert to WAV for transcription
+                        temp_wav = TEMP_DIR / f"vm_{message.id}.wav"
+                        conversion_success = await self.convert_to_wav(vm_cache_path, temp_wav)
                         
-                        try:
-                            duration = self._get_audio_duration(wav_path)
-                            self.bot.logger.log(MODULE_NAME, f"Audio duration: {duration:.1f}s")
-                        except:
-                            duration = None
+                        if not conversion_success:
+                            self.bot.logger.log(MODULE_NAME, "Failed to convert audio", "WARNING")
+                            return
                         
-                        for i, model_name in enumerate(PROGRESSIVE_MODELS):
-                            self.bot.logger.log(MODULE_NAME, 
-                                f"[{i+1}/{len(PROGRESSIVE_MODELS)}] Transcribing with {model_name} model...")
-                            
-                            # Check if file still exists before transcribing
-                            if not wav_path.exists():
-                                self.bot.logger.log(MODULE_NAME, 
-                                    f"WAV file missing before {model_name} transcription", "WARNING")
-                                break
-                            
-                            result = await self.transcribe_audio(wav_path, model_name)
-                            
-                            if not result:
-                                self.bot.logger.log(MODULE_NAME, 
-                                    f"{model_name} transcription failed", "WARNING")
-                                continue
-                            
-                            formatted_text = self.format_transcription(result)
-                            
-                            if reply_message is None:
-                                reply_message = await message.reply(formatted_text, mention_author=False)
-                                self.bot.logger.log(MODULE_NAME, 
-                                    f"✓ Posted {model_name} transcription")
-                            else:
-                                try:
-                                    await reply_message.edit(content=formatted_text)
-                                    self.bot.logger.log(MODULE_NAME, 
-                                        f"✓ Updated to {model_name} transcription")
-                                except discord.NotFound:
-                                    self.bot.logger.log(MODULE_NAME, 
-                                        f"Reply message was deleted, cannot update", "WARNING")
-                                    break
-                                except Exception as e:
-                                    self.bot.logger.error(MODULE_NAME, 
-                                        f"Failed to update message to {model_name}", e)
-                    
-                    self.total_transcriptions += 1
-                    self.bot.logger.log(MODULE_NAME, 
-                        f"✓ Complete for {message.author.display_name}")
+                        # Transcribe
+                        result = await self.transcribe_audio(temp_wav)
+                        
+                        if not result:
+                            self.bot.logger.log(MODULE_NAME, "Transcription failed", "WARNING")
+                            return
+                        
+                        # Save transcript alongside the VM
+                        if hasattr(self.bot, 'vms_manager'):
+                            self.bot.vms_manager.save_transcript(vm_cache_path, result)
+                        
+                        # Post transcription to Discord
+                        formatted_text = self.format_transcription(result)
+                        reply_message = await message.reply(formatted_text, mention_author=False)
+                        
+                        self.total_transcriptions += 1
+                        self.bot.logger.log(MODULE_NAME, 
+                            f"✓ Complete for {message.author.display_name}")
                 
                 except Exception as e:
                     self.bot.logger.error(MODULE_NAME, 
-                        f"Error in progressive transcription", e)
+                        f"Error in transcription and save", e)
                 
                 finally:
-                    # Only delete temp files AFTER all models have processed
-                    for temp_file in temp_files:
+                    # Clean up temp WAV file
+                    if temp_wav and temp_wav.exists():
                         try:
-                            if temp_file.exists():
-                                temp_file.unlink()
+                            temp_wav.unlink()
                         except Exception as e:
                             self.bot.logger.log(MODULE_NAME, 
-                                f"Failed to delete temp file: {temp_file}", "WARNING")
+                                f"Failed to delete temp file: {temp_wav}", "WARNING")
                 
             finally:
                 self.active_transcriptions -= 1
@@ -420,7 +349,7 @@ def setup(bot):
     
     @bot.listen('on_message')
     async def on_voice_message_transcribe(message):
-        """Listen for voice messages and progressively transcribe them"""
+        """Listen for voice messages and transcribe them"""
         if message.author.bot:
             return
         
@@ -435,8 +364,8 @@ def setup(bot):
         bot.logger.log(MODULE_NAME, 
             f"Detected VM from {message.author} in #{channel_name}")
         
-        # Start progressive transcription in background (skip bot's own VMs)
-        asyncio.create_task(transcribe_manager.progressive_transcription(message, skip_bot_vms=True))
+        # Start transcription and save in background (skip bot's own VMs)
+        asyncio.create_task(transcribe_manager.transcribe_and_save(message, skip_bot_vms=True))
     
     @bot.tree.context_menu(name="Transcribe Voice Message")
     async def transcribe_context(interaction: discord.Interaction, message: discord.Message):
@@ -454,20 +383,18 @@ def setup(bot):
             bot.logger.log(MODULE_NAME, 
                 f"Context menu transcription requested by {interaction.user} for message from {message.author}")
             
-            temp_files = []
+            temp_wav = None
             
             try:
-                wav_path = await transcribe_manager.download_and_convert(message)
-                if not wav_path:
+                temp_wav = await transcribe_manager.download_and_convert(message)
+                if not temp_wav:
                     await interaction.followup.send(
                         "❌ Failed to process voice message",
                         ephemeral=True
                     )
                     return
                 
-                temp_files.append(wav_path)
-                
-                result = await transcribe_manager.transcribe_audio(wav_path, "base")
+                result = await transcribe_manager.transcribe_audio(temp_wav)
                 
                 if result:
                     formatted_text = transcribe_manager.format_transcription(result)
@@ -479,10 +406,9 @@ def setup(bot):
                     )
                 
             finally:
-                for temp_file in temp_files:
+                if temp_wav and temp_wav.exists():
                     try:
-                        if temp_file.exists():
-                            temp_file.unlink()
+                        temp_wav.unlink()
                     except:
                         pass
             

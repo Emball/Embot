@@ -130,10 +130,8 @@ def load_modules():
     loaded_count = 0
     failed_count = 0
     
-    # Don't clear commands every time - this causes rate limits
-    # Only clear if we're doing a full reload in development mode
-    if args.development and hasattr(bot, '_commands_cleared'):
-        bot.tree.clear_commands(guild=None)
+    # NEVER clear commands here - only do it once at startup if needed
+    # Commands persist across reloads
     
     # Discover and load all Python modules in the current directory
     for file in os.listdir(modules_dir):
@@ -179,7 +177,6 @@ def load_modules():
             failed_count += 1
     
     bot.logger.log("MAIN", f"Successfully loaded {loaded_count} module(s), {failed_count} failed")
-    bot._commands_cleared = True
 
 def start_console_thread():
     """Start the console thread - call this separately from on_ready"""
@@ -211,10 +208,10 @@ async def on_ready():
         # Wait a moment for modules to initialize
         await asyncio.sleep(2)
         
-        # Try to sync commands but don't let failures stop the bot
+        # ONLY sync commands ONCE on initial startup
         try:
-            await bot.tree.sync()
-            bot.logger.log("MAIN", "Commands synced successfully")
+            synced = await bot.tree.sync()
+            bot.logger.log("MAIN", f"Commands synced successfully: {len(synced)} commands")
         except HTTPException as e:
             if e.status == 429 and e.code == 30034:
                 bot.logger.log("MAIN", "⚠️ Daily command sync limit reached (200/200). Commands will sync tomorrow.", "WARNING")
@@ -395,8 +392,8 @@ def setup_console_commands():
                 module = importlib.import_module(module_name)
             
             if hasattr(module, 'setup'):
-                # Clear existing commands for this module
-                bot.tree.clear_commands(guild=None)
+                # DON'T clear commands - just re-setup
+                # Commands will be overwritten, not duplicated
                 
                 # Re-setup the module - only pass register_console_command to dev module
                 if module_name == 'dev':
@@ -404,20 +401,16 @@ def setup_console_commands():
                 else:
                     module.setup(bot)
                 
-                # Try to sync but don't fail if rate limited
-                try:
-                    await bot.tree.sync()
-                    print(f"✅ Module '{module_name}' reloaded and synced successfully!")
-                except HTTPException as e:
-                    if e.status == 429 and e.code == 30034:
-                        print(f"✅ Module '{module_name}' reloaded but command sync rate limited (daily limit reached)")
-                    else:
-                        raise
+                # DON'T sync here - commands are already registered from initial startup
+                # They'll be available without syncing
+                print(f"✅ Module '{module_name}' reloaded successfully (no sync needed)")
             else:
                 print(f"✅ Module '{module_name}' reloaded (no setup function)")
                 
         except Exception as e:
             print(f"❌ Failed to reload {module_name}: {e}")
+            import traceback
+            traceback.print_exc()
     
     async def handle_modules(args):
         """List loaded modules command"""

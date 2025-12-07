@@ -2,6 +2,7 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 import re
+import time
 import json
 import hashlib
 import asyncio
@@ -166,9 +167,8 @@ class Submission:
         """Check if user has already voted"""
         return user_id in self.user_votes
 
-
 class SubmissionDatabase:
-    """Manages submission data persistence"""
+    """Manages submission data persistence with optimizations for large datasets"""
     
     def __init__(self, bot):
         self.bot = bot
@@ -181,9 +181,13 @@ class SubmissionDatabase:
             "project_versions": {},
             "settings": {
                 "sticky_enabled": True,
-                "last_spotlight_week": None # Stores "YYYY-WW" string
+                "last_spotlight_week": None
             }
         }
+        # Add caching for frequently accessed data
+        self._user_xp_cache = {}
+        self._cache_timestamp = {}
+        self._cache_ttl = 300  # 5 minutes cache
         self._load()
     
     def _load(self):
@@ -193,10 +197,8 @@ class SubmissionDatabase:
             if DB_FILE.exists():
                 with open(DB_FILE, 'r', encoding='utf-8') as f:
                     loaded_data = json.load(f)
-                    # Merge loaded data with structure to ensure new fields exist
                     for key, value in loaded_data.items():
                         if key == "settings":
-                            # Deep merge settings
                             for setting_key, setting_val in value.items():
                                 self.data["settings"][setting_key] = setting_val
                         else:
@@ -212,8 +214,11 @@ class SubmissionDatabase:
     def _save(self):
         """Save database to file"""
         try:
-            with open(DB_FILE, 'w', encoding='utf-8') as f:
+            # Use atomic write to prevent corruption
+            temp_file = DB_FILE.with_suffix('.tmp')
+            with open(temp_file, 'w', encoding='utf-8') as f:
                 json.dump(self.data, f, indent=2, ensure_ascii=False)
+            temp_file.replace(DB_FILE)
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to save database", e)
     
@@ -244,20 +249,17 @@ class SubmissionDatabase:
         if not sub1 or not sub2:
             return
         
-        # Add to each other's linked list
         if msg_id_2 not in sub1.linked_submissions:
             sub1.linked_submissions.append(msg_id_2)
         if msg_id_1 not in sub2.linked_submissions:
             sub2.linked_submissions.append(msg_id_1)
         
-        # Merge votes and user_votes
         merged_votes = sub1.votes.copy()
         for emoji, count in sub2.votes.items():
             merged_votes[emoji] = merged_votes.get(emoji, 0) + count
         
         merged_user_votes = {**sub1.user_votes, **sub2.user_votes}
         
-        # Apply merged votes to both
         sub1.votes = merged_votes
         sub2.votes = merged_votes
         sub1.user_votes = merged_user_votes
@@ -272,31 +274,24 @@ class SubmissionDatabase:
                       title: Optional[str], description: Optional[str], 
                       media_links: List[str], thumbnail: Optional[str],
                       file_hashes: List[str], channel_id: Optional[str] = None) -> Tuple[Submission, bool, Optional[str]]:
-        """
-        Add a new submission to the database
-        Returns: (Submission object, is_new_version, linked_message_id)
-        """
+        """Add a new submission to the database"""
         is_new_version = False
         version = "1.0"
         existing_submission = None
         linked_message_id = None
         
-        # Smart Version Detection from Title/Description
         detected_version = None
         if title:
-            # Look for vX.X or Version X.X patterns
             combined_text = title + " " + (description if description else "")
             version_match = re.search(r'(?:v|ver|version)\.?\s*?(\d+(?:\.\d+)+)', combined_text, re.IGNORECASE)
             if version_match:
                 detected_version = version_match.group(1)
 
-        # Generate compact project ID
         if submission_type == SubmissionType.PROJECT and title:
             title_hash = self._get_title_hash(title)
             project_id = f"p-{user_id[-6:]}-{title_hash}"
             version_key = f"{user_id}:{title_hash}"
             
-            # Check for existing versions
             if version_key in self.data["project_versions"]:
                 is_new_version = True
                 existing_message_ids = self.data["project_versions"][version_key]
@@ -316,7 +311,7 @@ class SubmissionDatabase:
                         major, minor = map(int, latest_version.split('.'))
                         version = f"{major + 1}.0"
                     except:
-                         version = "2.0" # Fallback
+                         version = "2.0"
                          
                 self.data["project_versions"][version_key].append(message_id)
             else:
@@ -326,7 +321,6 @@ class SubmissionDatabase:
         else:
             project_id = f"a-{user_id[-6:]}-{message_id[-8:]}"
         
-        # Check if any file hashes match existing artwork from same user
         for file_hash in file_hashes:
             if file_hash in self.data["file_hashes"]:
                 existing_user_id, existing_msg_id, existing_proj_id = self.data["file_hashes"][file_hash]
@@ -374,9 +368,11 @@ class SubmissionDatabase:
         for link in media_links:
             self.data["link_registry"][link] = (user_id, message_id, project_id)
         
-        # Link submissions if artwork was reused
         if linked_message_id:
             self.link_submissions(message_id, linked_message_id)
+        
+        # Invalidate cache for this user
+        self._user_xp_cache.pop(user_id, None)
         
         self._save()
         return submission, is_new_version, linked_message_id
@@ -384,7 +380,13 @@ class SubmissionDatabase:
     def get_submission(self, message_id: str) -> Optional[Submission]:
         """Get submission by message ID"""
         data = self.data["submissions"].get(message_id)
-        return Submission.from_dict(data) if data else None
+        if not data:
+            return None
+        try:
+            return Submission.from_dict(data)
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, f"Failed to parse submission {message_id}", e)
+            return None
     
     def update_submission(self, submission: Submission):
         """Update an existing submission"""
@@ -396,29 +398,26 @@ class SubmissionDatabase:
         for link in submission.media_links:
             self.data["link_registry"][link] = (submission.user_id, submission.message_id, submission.project_id)
         
+        # Invalidate cache for this user
+        self._user_xp_cache.pop(submission.user_id, None)
+        
         self._save()
     
     def handle_vote(self, message_id: str, user_id: str, emoji: str, count: int) -> bool:
-        """
-        Centralized vote handling with linked submission support
-        Returns: True if vote was recorded, False if spam detected
-        """
+        """Centralized vote handling with linked submission support"""
         submission = self.get_submission(message_id)
         if not submission:
             return False
         
-        # Check if user has already voted
         if submission.has_voted(user_id):
             self.bot.logger.log(MODULE_NAME, 
                               f"Vote spam detected: {user_id} tried to vote again on {message_id}", 
                               "WARNING")
             return False
         
-        # Record vote
         submission.record_vote(user_id, emoji)
         submission.votes[emoji] = count
         
-        # Update linked submissions with same votes
         for linked_msg_id in submission.linked_submissions:
             linked_sub = self.get_submission(linked_msg_id)
             if linked_sub:
@@ -436,7 +435,6 @@ class SubmissionDatabase:
             submission.votes[emoji] = count
             submission.last_voted_at = datetime.now().isoformat()
             
-            # Update linked submissions
             for linked_msg_id in submission.linked_submissions:
                 linked_sub = self.get_submission(linked_msg_id)
                 if linked_sub:
@@ -456,7 +454,14 @@ class SubmissionDatabase:
                               f"Added {THREAD_MESSAGE_XP} XP for thread message on {submission.project_id}")
     
     def get_user_xp(self, user_id: str) -> int:
-        """Calculate total XP for a user"""
+        """Calculate total XP for a user with caching"""
+        # Check cache
+        cache_key = user_id
+        if cache_key in self._user_xp_cache:
+            cache_time = self._cache_timestamp.get(cache_key, 0)
+            if time.time() - cache_time < self._cache_ttl:
+                return self._user_xp_cache[cache_key]
+        
         # Emball exclusion
         if str(user_id) == EMBALL_USER_ID:
             return 0
@@ -479,14 +484,18 @@ class SubmissionDatabase:
                 total_xp += latest_submission.calculate_xp()
                 counted_projects.add(project_id)
         
+        # Cache the result
+        self._user_xp_cache[cache_key] = total_xp
+        self._cache_timestamp[cache_key] = time.time()
+        
         return total_xp
     
     async def get_leaderboard(self, bot, limit: int = 10) -> List[tuple]:
-        """Get top users by XP"""
+        """Get top users by XP with optimized deletion checking"""
         user_xp = {}
+        cutoff_date = datetime.now() - timedelta(days=7)
         
         for user_id in self.data["user_projects"].keys():
-            # Exclude Emball from leaderboard
             if str(user_id) == EMBALL_USER_ID:
                 continue
 
@@ -498,20 +507,35 @@ class SubmissionDatabase:
                 
                 latest_submission = None
                 for msg_id, submission_data in list(self.data["submissions"].items()):
-                    submission = Submission.from_dict(submission_data)
+                    try:
+                        submission = Submission.from_dict(submission_data)
+                    except Exception as e:
+                        self.bot.logger.error(MODULE_NAME, f"Skipping malformed submission {msg_id}", e)
+                        continue
                     
                     if submission.project_id == project_id and not submission.is_deleted:
-                        if submission.channel_id:
+                        # Only check recent submissions for deletion
+                        submission_date = datetime.fromisoformat(submission.created_at)
+                        if submission_date > cutoff_date and submission.channel_id:
                             try:
                                 channel = bot.get_channel(int(submission.channel_id))
                                 if channel:
-                                    await channel.fetch_message(int(msg_id))
+                                    # Use asyncio.wait_for to add timeout
+                                    await asyncio.wait_for(
+                                        channel.fetch_message(int(msg_id)),
+                                        timeout=2.0
+                                    )
+                            except asyncio.TimeoutError:
+                                self.bot.logger.log(MODULE_NAME, 
+                                                  f"Timeout checking submission: {msg_id}", "WARNING")
                             except (discord.NotFound, discord.HTTPException, AttributeError):
                                 self.bot.logger.log(MODULE_NAME, 
                                                   f"Detected deleted submission: {msg_id}", "WARNING")
                                 submission.mark_deleted()
                                 self.update_submission(submission)
                                 continue
+                            except Exception as e:
+                                self.bot.logger.error(MODULE_NAME, f"Error checking submission {msg_id}", e)
                         
                         if latest_submission is None or submission.version > latest_submission.version:
                             latest_submission = submission
@@ -567,6 +591,29 @@ class SubmissionDatabase:
     def get_sticky_message(self, channel_id: str) -> Optional[str]:
         """Get the sticky message ID for a channel"""
         return self.data["sticky_messages"].get(channel_id)
+    
+    def cleanup_old_deleted_submissions(self, days: int = 30):
+        """Remove old deleted submissions to keep database size manageable"""
+        cutoff = datetime.now() - timedelta(days=days)
+        removed_count = 0
+        
+        for msg_id in list(self.data["submissions"].keys()):
+            submission_data = self.data["submissions"][msg_id]
+            try:
+                submission = Submission.from_dict(submission_data)
+                if submission.is_deleted:
+                    deleted_date = datetime.fromisoformat(submission.updated_at)
+                    if deleted_date < cutoff:
+                        del self.data["submissions"][msg_id]
+                        removed_count += 1
+            except Exception as e:
+                self.bot.logger.error(MODULE_NAME, f"Error during cleanup of {msg_id}", e)
+        
+        if removed_count > 0:
+            self._save()
+            self.bot.logger.log(MODULE_NAME, f"Cleaned up {removed_count} old deleted submissions")
+        
+        return removed_count
 
 
 class SubmissionValidator:
@@ -1240,7 +1287,12 @@ class CommunityDashboardView(discord.ui.View):
         try:
             await interaction.response.defer(ephemeral=True)
             
-            leaderboard = await self.db.get_leaderboard(self.bot, limit=10)
+            # Run in executor to avoid blocking
+            loop = asyncio.get_event_loop()
+            leaderboard = await loop.run_in_executor(
+                None,
+                lambda: asyncio.run(self.db.get_leaderboard(self.bot, limit=10))
+            )
             
             embed = discord.Embed(
                 color=THEME_COLORS["gold"]
@@ -1252,7 +1304,6 @@ class CommunityDashboardView(discord.ui.View):
                     "No submissions yet! Be the first to contribute and claim the top spot."
                 )
             else:
-                # Build leaderboard display
                 leaderboard_lines = []
                 medals = {0: "🥇", 1: "🥈", 2: "🥉"}
                 
@@ -1263,13 +1314,11 @@ class CommunityDashboardView(discord.ui.View):
                     except:
                         username = f"User {user_id[-6:]}"
                     
-                    # Medal for top 3, number for others
                     if i in medals:
                         prefix = medals[i]
                     else:
                         prefix = f"`#{i+1}`"
                     
-                    # Create rank line
                     leaderboard_lines.append(f"{prefix} **{username}** · `{xp:.1f} XP`")
                 
                 embed.description = (
@@ -1278,7 +1327,6 @@ class CommunityDashboardView(discord.ui.View):
                     + "\n".join(leaderboard_lines)
                 )
             
-            # Add user's stats in footer
             user_xp = self.db.get_user_xp(str(interaction.user.id))
             user_submissions = len(self.db.data["user_projects"].get(str(interaction.user.id), []))
             embed.set_footer(
@@ -1320,10 +1368,27 @@ class CommunityDashboardView(discord.ui.View):
             # Collect user's submissions (grouped by project_id, showing latest version)
             user_submissions = {}
             for msg_id, sub_data in self.db.data["submissions"].items():
-                sub = Submission.from_dict(sub_data)
-                if sub.user_id == user_id and not sub.is_deleted:
-                    if sub.project_id not in user_submissions or sub.version > user_submissions[sub.project_id].version:
-                        user_submissions[sub.project_id] = sub
+                try:
+                    sub = Submission.from_dict(sub_data)
+                    if sub.user_id == user_id and not sub.is_deleted:
+                        if sub.project_id not in user_submissions or sub.version > user_submissions[sub.project_id].version:
+                            user_submissions[sub.project_id] = sub
+                except Exception as e:
+                    self.bot.logger.error(MODULE_NAME, f"Error parsing submission {msg_id} in My Projects", e)
+                    continue
+            
+            if not user_submissions:
+                embed = discord.Embed(
+                    color=THEME_COLORS["dark"]
+                )
+                embed.description = (
+                    "# 📂 Your Portfolio\n\n"
+                    "Your submissions may have been deleted or are being processed.\n\n"
+                    "> Submit a project or artwork to start building your portfolio and earning XP."
+                )
+                embed.set_footer(text="Get started in #projects or #artwork")
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
             
             total_xp = self.db.get_user_xp(user_id)
             total_votes = sum(sum(sub.votes.values()) for sub in user_submissions.values())
@@ -1353,7 +1418,6 @@ class CommunityDashboardView(discord.ui.View):
                 
                 # Calculate XP breakdown
                 xp = sub.calculate_xp()
-                vote_xp = sum(count * XP_VALUES.get(emoji, 0) for emoji, count in sub.votes.items())
                 thread_xp = sub.thread_message_xp
                 
                 # Vote summary (only show non-zero)
@@ -1373,7 +1437,12 @@ class CommunityDashboardView(discord.ui.View):
                     projects_section += f" · 💬 `+{thread_xp:.1f}` from {sub.thread_message_count} replies"
                 
                 projects_section += f"\n{votes_display}\n"
-                projects_section += f"> Updated <t:{int(datetime.fromisoformat(sub.updated_at).timestamp())}:R>\n"
+                
+                try:
+                    timestamp = int(datetime.fromisoformat(sub.updated_at).timestamp())
+                    projects_section += f"> Updated <t:{timestamp}:R>\n"
+                except:
+                    projects_section += f"> Updated recently\n"
             
             embed.description += projects_section
             
@@ -1433,13 +1502,10 @@ def setup(bot):
     async def spotlight_checker():
         """Check time for Spotlight Friday (Friday 3PM CST)"""
         try:
-            # CST is UTC-6
             cst_tz = timezone(timedelta(hours=-6))
             now = datetime.now(cst_tz)
             
-            # Weekday 4 is Friday. 3 PM is 15:00.
             if now.weekday() == 4 and now.hour == 15:
-                # Get current Week Identifier (Year-Week)
                 current_week = now.strftime("%Y-%W")
                 last_run = db.get_last_spotlight_week()
                 
@@ -1450,14 +1516,32 @@ def setup(bot):
         except Exception as e:
             bot.logger.error(MODULE_NAME, "Error in spotlight checker", e)
 
-    # Start task (wait until bot is ready)
     @spotlight_checker.before_loop
     async def before_spotlight():
         await bot.wait_until_ready()
 
     spotlight_checker.start()
     
-    # --- Console Command Handler ---
+    # --- Database Cleanup Task ---
+    @tasks.loop(hours=24)
+    async def database_cleanup():
+        """Clean up old deleted submissions daily"""
+        try:
+            removed = db.cleanup_old_deleted_submissions(days=30)
+            if removed > 0:
+                bot.logger.log(MODULE_NAME, f"Daily cleanup removed {removed} old deleted submissions")
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "Error in database cleanup", e)
+
+    @database_cleanup.before_loop
+    async def before_cleanup():
+        await bot.wait_until_ready()
+        # Wait 1 hour after startup before first cleanup
+        await asyncio.sleep(3600)
+
+    database_cleanup.start()
+    
+    # --- Console Command Handlers ---
     async def handle_toggle_sticky(args):
         """Toggle sticky messages on/off"""
         current_state = db.is_sticky_enabled()
@@ -1467,7 +1551,6 @@ def setup(bot):
         status_text = "ENABLED" if new_state else "DISABLED"
         print(f"✅ Sticky messages are now {status_text}")
         
-        # If disabled, try to clear existing stickies
         if not new_state:
             for channel_id, msg_id in db.data["sticky_messages"].items():
                 try:
@@ -1479,13 +1562,64 @@ def setup(bot):
                     pass
             print("Cleaned up existing sticky messages.")
 
+    async def handle_db_cleanup(args):
+        """Manually trigger database cleanup"""
+        days = 30
+        if args.strip():
+            try:
+                days = int(args.strip())
+            except ValueError:
+                print("⚠️ Invalid number of days, using default (30)")
+        
+        print(f"🔄 Cleaning up submissions deleted more than {days} days ago...")
+        removed = db.cleanup_old_deleted_submissions(days)
+        
+        # Calculate database size
+        import os
+        db_size = os.path.getsize(DB_FILE) / (1024 * 1024)  # MB
+        
+        print(f"✅ Removed {removed} old submissions")
+        print(f"📊 Database size: {db_size:.2f} MB")
+        print(f"📦 Active submissions: {len([s for s in db.data['submissions'].values() if not Submission.from_dict(s).is_deleted])}")
+    
+    async def handle_db_stats(args):
+        """Show detailed database statistics"""
+        stats = db.get_stats()
+        
+        import os
+        db_size = os.path.getsize(DB_FILE) / (1024 * 1024)  # MB
+        
+        deleted_count = len([s for s in db.data['submissions'].values() if Submission.from_dict(s).is_deleted])
+        
+        print("\n┌─────────────────────────────────────────────────────────────────┐")
+        print("│                      DATABASE STATISTICS                        │")
+        print("├─────────────────────────────────────────────────────────────────┤")
+        print(f"│ File Size: {db_size:.2f} MB{' ' * (49 - len(f'{db_size:.2f} MB'))}│")
+        print(f"│ Active Submissions: {stats['total_submissions']}{' ' * (44 - len(str(stats['total_submissions'])))}│")
+        print(f"│ Deleted Submissions: {deleted_count}{' ' * (43 - len(str(deleted_count)))}│")
+        print(f"│ Projects: {stats['total_projects']}{' ' * (50 - len(str(stats['total_projects'])))}│")
+        print(f"│ Artwork: {stats['total_artwork']}{' ' * (51 - len(str(stats['total_artwork'])))}│")
+        print(f"│ Users: {stats['total_users']}{' ' * (53 - len(str(stats['total_users'])))}│")
+        print(f"│ Total Votes: {stats['total_votes']}{' ' * (47 - len(str(stats['total_votes'])))}│")
+        print(f"│ File Hashes: {len(db.data['file_hashes'])}{' ' * (47 - len(str(len(db.data['file_hashes']))))}│")
+        print(f"│ Link Registry: {len(db.data['link_registry'])}{' ' * (45 - len(str(len(db.data['link_registry']))))}│")
+        print("└─────────────────────────────────────────────────────────────────┘\n")
+
     if hasattr(bot, 'console_commands'):
         bot.console_commands['toggle_sticky'] = {
             'description': 'Toggle dashboard sticky messages on/off',
             'handler': handle_toggle_sticky
         }
-
+        bot.console_commands['db_cleanup'] = {
+            'description': 'Clean up old deleted submissions [days]',
+            'handler': handle_db_cleanup
+        }
+        bot.console_commands['db_stats'] = {
+            'description': 'Show detailed database statistics',
+            'handler': handle_db_stats
+        }
     
+    # [Rest of the event listeners remain the same]
     @bot.listen('on_message')
     async def on_community_message(message: discord.Message):
         """Listen for messages in projects and artwork channels"""
@@ -1584,40 +1718,29 @@ def setup(bot):
     async def on_thread_message(message: discord.Message):
         """Award XP for messages in submission threads"""
         try:
-            # Skip bot messages
             if message.author.bot:
                 return
             
-            # Check if message is in a thread
             if not isinstance(message.channel, discord.Thread):
                 return
             
-            # Check if thread belongs to a submission
             parent_message_id = str(message.channel.id)
             
-            # Try to find submission by checking if the thread's starter message is a submission
             if message.channel.parent:
-                # Get the starter message (the message that created the thread)
                 try:
-                    # The thread ID is NOT the same as the message ID
-                    # We need to check if this thread's parent channel is projects/artwork
                     parent_channel = message.channel.parent
                     if parent_channel.name.lower() not in [PROJECTS_CHANNEL_NAME, ARTWORK_CHANNEL_NAME]:
                         return
                     
-                    # Try to get the thread's starter message
                     starter_message = message.channel.starter_message
                     if not starter_message:
-                        # If starter_message is not cached, fetch it
                         starter_message = await message.channel.parent.fetch_message(message.channel.id)
                     
                     submission = db.get_submission(str(starter_message.id))
                     if submission and not submission.is_deleted:
-                        # Award XP to submission owner
                         db.add_thread_message_xp(str(starter_message.id))
                         
                 except (discord.NotFound, discord.HTTPException):
-                    # Thread starter message not found or other error
                     pass
                     
         except Exception as e:

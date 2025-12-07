@@ -260,6 +260,11 @@ class TranscriptionManager:
             self.bot.logger.log(MODULE_NAME, "Skipping bot's own VM")
             return
         
+        # Quick check if model is loaded
+        if not self.whisper_model:
+            # For real-time, we can load model on demand
+            await self.load_model()
+        
         async with self.transcription_semaphore:
             self.active_transcriptions += 1
             

@@ -691,7 +691,7 @@ class VMSManager:
                 return False
     
     async def background_transcribe_all(self):
-        """Background task to transcribe all untranscribed VMs"""
+        """Background task to transcribe all untranscribed VMs - ADMIN ONLY"""
         self.bot.logger.log(MODULE_NAME, "Starting background transcription of all VMs")
         self.background_transcription_active = True
         
@@ -726,6 +726,9 @@ class VMSManager:
                 return
             
             transcribe_mgr = self.bot.transcribe_manager
+            
+            # Process newest first
+            untranscribed.sort(key=lambda x: self._get_file_creation_time(x), reverse=True)
             
             for vm_path in untranscribed:
                 try:
@@ -817,10 +820,6 @@ class VMSManager:
         await self.bot.wait_until_ready()
         self.bot.logger.log(MODULE_NAME, "VM manager initialized")
         await self.cleanup_and_archive()
-        
-        # Start background transcription after a delay
-        await asyncio.sleep(10)
-        asyncio.create_task(self.background_transcribe_all())
 
 
 def setup(bot):
@@ -1061,5 +1060,48 @@ def setup(bot):
         )
         
         asyncio.create_task(vms_manager.background_transcribe_all())
+    
+    @bot.tree.command(name="vmbulktranscribe", description="[Admin] Instructions for bulk transcription")
+    async def vmbulktranscribe(interaction: discord.Interaction):
+        """Show instructions for using the bulk transcription script"""
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message(
+                "❌ You need administrator permissions to use this command.",
+                ephemeral=True
+            )
+            return
+        
+        instructions = """
+        **🔊 BULK TRANSCRIPTION INSTRUCTIONS**
+        
+        For large amounts of untranscribed VMs, use the separate bulk transcription script:
+        
+        1. **Stop the bot** (or run on a separate machine)
+        2. **Run**: `python bulk_transcribe.py`
+        3. **The script will**:
+           - Process VMs from newest to oldest
+           - Use parallel processing for maximum speed
+           - Save transcripts incrementally
+           - Monitor for new VMs while running
+           - Show real-time progress
+        
+        **Features:**
+        - ✅ Independent process (won't interrupt bot)
+        - ✅ Newest VMs first
+        - ✅ Parallel processing (4 at a time)
+        - ✅ Real-time progress with ETA
+        - ✅ Automatically detects new VMs
+        - ✅ Uses GPU acceleration if available
+        
+        **Note:** After bulk transcription, the bot will automatically use all transcripts for contextual VM selection.
+        """
+        
+        embed = discord.Embed(
+            title="Bulk Transcription Instructions",
+            description=instructions,
+            color=0x3498db
+        )
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
     
     bot.logger.log(MODULE_NAME, "VMS module setup complete")

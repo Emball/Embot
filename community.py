@@ -936,16 +936,9 @@ class CommunityManager:
                 thread_name = f"{thread_name} v{submission.version}"
             thread = await message.create_thread(name=thread_name, auto_archive_duration=10080)
             
-            # Add reactions and immediately clean up any bot reactions
             await message.add_reaction(REACTION_FIRE)
             await message.add_reaction(REACTION_NEUTRAL)
             await message.add_reaction(REACTION_TRASH)
-            
-            # Clean up bot reactions immediately
-            for reaction in message.reactions:
-                async for user in reaction.users():
-                    if user.bot:
-                        await message.remove_reaction(reaction.emoji, user)
             
             # Special handling for Emball in projects channel
             if str(message.author.id) == EMBALL_USER_ID and channel_type == "project":
@@ -1052,8 +1045,14 @@ class CommunityManager:
             
             view = CommunityDashboardView(self.bot, self.db)
             
-            # Send new sticky message - DO NOT add reactions
+            # Send new sticky message
             new_sticky = await channel.send(embed=embed, view=view)
+            
+            # Immediately remove any reactions that might be added to the sticky embed
+            for reaction in new_sticky.reactions:
+                async for user in reaction.users():
+                    await new_sticky.remove_reaction(reaction.emoji, user)
+            
             self.db.set_sticky_message(str(channel.id), str(new_sticky.id))
             
             self.bot.logger.log(MODULE_NAME, f"Updated sticky message in #{channel.name}")
@@ -1631,6 +1630,38 @@ def setup(bot):
     
     database_cleanup.start()
     
+    # --- Sticky Message Reaction Cleanup Task ---
+    @tasks.loop(minutes=1)
+    async def sticky_reaction_cleanup():
+        """Clean up reactions from sticky messages"""
+        try:
+            for channel_id, message_id in db.data["sticky_messages"].items():
+                try:
+                    channel = bot.get_channel(int(channel_id))
+                    if channel:
+                        message = await channel.fetch_message(int(message_id))
+                        
+                        # Remove any reactions on the sticky message
+                        for reaction in message.reactions:
+                            async for user in reaction.users():
+                                await message.remove_reaction(reaction.emoji, user)
+                                await asyncio.sleep(0.1)  # Rate limit protection
+                                
+                        bot.logger.log(MODULE_NAME, f"Cleaned reactions from sticky message in #{channel.name}")
+                except (discord.NotFound, discord.HTTPException):
+                    # Message might be deleted
+                    continue
+                except Exception as e:
+                    bot.logger.log(MODULE_NAME, f"Error cleaning sticky reactions: {e}", "WARNING")
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "Error in sticky reaction cleanup", e)
+    
+    @sticky_reaction_cleanup.before_loop
+    async def before_sticky_cleanup():
+        await bot.wait_until_ready()
+    
+    sticky_reaction_cleanup.start()
+    
     # --- Console Command Handlers ---
     async def handle_toggle_sticky(args):
         """Toggle sticky messages on/off"""
@@ -1743,18 +1774,9 @@ def setup(bot):
     async def on_community_reaction_add(payload: discord.RawReactionActionEvent):
         """Centralized vote handling with spam protection and bot exclusion"""
         try:
-            # Get user and check if bot
+            # Exclude bot reactions from vote counts
             user = await bot.fetch_user(payload.user_id)
             if user.bot:
-                # Immediately remove bot's reaction
-                try:
-                    channel = bot.get_channel(payload.channel_id)
-                    if channel:
-                        message = await channel.fetch_message(payload.message_id)
-                        await message.remove_reaction(payload.emoji, user)
-                        bot.logger.log(MODULE_NAME, f"Removed bot reaction from {payload.message_id}")
-                except Exception as e:
-                    bot.logger.log(MODULE_NAME, f"Failed to remove bot reaction: {e}", "WARNING")
                 return
             
             submission = db.get_submission(str(payload.message_id))

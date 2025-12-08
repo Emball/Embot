@@ -24,6 +24,3 @@ desktop.ini
 
 # Bot token and secrets
 config.ini
-
-#dev
-import_history.py

@@ -13,6 +13,7 @@ import subprocess
 import json
 from collections import Counter
 import re
+import math
 
 MODULE_NAME = "VMS"
 
@@ -21,6 +22,7 @@ VMS_ROOT = Path("data/voice_messages")
 CACHE_DIR = VMS_ROOT / "cache"
 ARCHIVE_DIR = VMS_ROOT / "archived"
 TRANSCRIPTS_FILE = VMS_ROOT / "transcripts.json"
+VM_TRACKING_FILE = VMS_ROOT / "vm_tracking.json"  # NEW: Track VM usage
 GENERAL_CHANNEL_NAME = "general"
 
 # Message-based thresholds
@@ -42,6 +44,14 @@ RELEVANT_VM_CHANCE = 0.5  # 50% chance to use relevant VM
 MESSAGE_CONTEXT_COUNT = 20  # Look at last 20 messages for context
 MIN_KEYWORD_MATCHES = 2  # Minimum keyword matches to consider relevant
 
+# NEW: VM Selection Configuration
+VM_COOLDOWN_DAYS = 7  # Don't repeat same VM within 7 days
+LONG_VM_THRESHOLD_SECONDS = 60  # VMs longer than 1 minute are "long"
+LONG_VM_REDUCTION_FACTOR = 0.3  # Reduce selection chance by 70% for long VMs
+MAX_SCORE_WEIGHT = 0.6  # Maximum weight for keyword score vs recency/cooldown
+KEYWORD_SCORE_NORMALIZATION = True  # Normalize keyword scores by transcript length
+MIN_TRANSCRIPT_LENGTH_CHARS = 10  # Minimum transcript length to consider
+
 
 class VMSManager:
     """Manages voice message caching, archiving, and intelligent playback"""
@@ -60,8 +70,12 @@ class VMSManager:
         self.transcription_queue = asyncio.Queue()
         self.background_transcription_active = False
         
+        # NEW: VM usage tracking
+        self.vm_tracking = {}  # {file_path: [last_used_timestamp1, last_used_timestamp2, ...]}
+        
         self._setup_directories()
         self._load_transcripts()
+        self._load_vm_tracking()  # NEW: Load tracking data
         self._schedule_next_post()
     
     def _setup_directories(self):
@@ -83,6 +97,81 @@ class VMSManager:
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Error loading transcripts", e)
             self.transcripts = {}
+    
+    # NEW: Load VM tracking data
+    def _load_vm_tracking(self):
+        """Load VM usage tracking data from JSON file"""
+        try:
+            if VM_TRACKING_FILE.exists():
+                with open(VM_TRACKING_FILE, 'r', encoding='utf-8') as f:
+                    self.vm_tracking = json.load(f)
+                self.bot.logger.log(MODULE_NAME, f"Loaded tracking data for {len(self.vm_tracking)} VMs")
+            else:
+                self.vm_tracking = {}
+                self.bot.logger.log(MODULE_NAME, "No existing VM tracking data found")
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "Error loading VM tracking data", e)
+            self.vm_tracking = {}
+    
+    # NEW: Save VM tracking data
+    def _save_vm_tracking(self):
+        """Save VM usage tracking to JSON file"""
+        try:
+            with open(VM_TRACKING_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.vm_tracking, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "Error saving VM tracking data", e)
+    
+    # NEW: Record VM usage
+    def record_vm_usage(self, vm_path):
+        """Record when a VM was played"""
+        try:
+            vm_key = str(vm_path)
+            now = datetime.now(timezone.utc).isoformat()
+            
+            if vm_key not in self.vm_tracking:
+                self.vm_tracking[vm_key] = []
+            
+            self.vm_tracking[vm_key].append(now)
+            
+            # Keep only last 10 usages to avoid file bloat
+            if len(self.vm_tracking[vm_key]) > 10:
+                self.vm_tracking[vm_key] = self.vm_tracking[vm_key][-10:]
+            
+            self._save_vm_tracking()
+            
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, f"Error recording VM usage for {vm_path}", e)
+    
+    # NEW: Check if VM is in cooldown
+    def is_vm_in_cooldown(self, vm_path):
+        """Check if a VM was used recently (within cooldown period)"""
+        try:
+            vm_key = str(vm_path)
+            
+            if vm_key not in self.vm_tracking or not self.vm_tracking[vm_key]:
+                return False
+            
+            # Get most recent usage
+            last_used_str = self.vm_tracking[vm_key][-1]
+            last_used = datetime.fromisoformat(last_used_str.replace('Z', '+00:00'))
+            
+            time_since = datetime.now(timezone.utc) - last_used
+            return time_since.days < VM_COOLDOWN_DAYS
+            
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, f"Error checking VM cooldown for {vm_path}", e)
+            return False
+    
+    # NEW: Check if VM is too long
+    def is_vm_too_long(self, vm_path):
+        """Check if a VM exceeds the length threshold"""
+        try:
+            duration = self._get_audio_duration(vm_path)
+            return duration > LONG_VM_THRESHOLD_SECONDS
+        except Exception as e:
+            self.bot.logger.log(MODULE_NAME, f"Could not check duration for {vm_path.name}, assuming normal length", "WARNING")
+            return False
     
     def _save_transcripts(self):
         """Save transcripts to JSON file"""
@@ -271,6 +360,9 @@ class VMSManager:
                     
                     message_data = await resp.json()
                 
+                # NEW: Record VM usage after successful send
+                self.record_vm_usage(file_path)
+                
                 self.bot.logger.log(MODULE_NAME, f"Successfully sent voice message: {file_path.name}")
                 return message_data
                 
@@ -352,6 +444,9 @@ class VMSManager:
                     
                     reply_data = await resp.json()
                 
+                # NEW: Record VM usage after successful send
+                self.record_vm_usage(file_path)
+                
                 self.bot.logger.log(MODULE_NAME, f"Successfully sent voice message reply: {file_path.name}")
                 return reply_data
                 
@@ -387,6 +482,10 @@ class VMSManager:
                     if old_key in self.transcripts:
                         self.transcripts[new_key] = self.transcripts.pop(old_key)
                     
+                    # Move tracking data
+                    if old_key in self.vm_tracking:
+                        self.vm_tracking[new_key] = self.vm_tracking.pop(old_key)
+                    
                     file_path.unlink()
                     
                     moved_count += 1
@@ -403,6 +502,10 @@ class VMSManager:
                     if vm_key in self.transcripts:
                         del self.transcripts[vm_key]
                     
+                    # Remove tracking data
+                    if vm_key in self.vm_tracking:
+                        del self.vm_tracking[vm_key]
+                    
                     file_path.unlink()
                     
                     deleted_count += 1
@@ -411,6 +514,7 @@ class VMSManager:
             
             if moved_count > 0 or deleted_count > 0:
                 self._save_transcripts()
+                self._save_vm_tracking()
                 self.bot.logger.log(MODULE_NAME, 
                     f"Cleanup complete: {moved_count} archived, {deleted_count} deleted")
             
@@ -471,8 +575,9 @@ class VMSManager:
             self.bot.logger.error(MODULE_NAME, "Error getting message context", e)
             return []
     
+    # UPDATED: Improved relevant VM selection with normalization and cooldowns
     def select_relevant_vm(self, context_messages):
-        """Select a VM that's relevant to recent conversation context"""
+        """Select a VM that's relevant to recent conversation context with fairness improvements"""
         try:
             # Extract keywords from context
             context_text = " ".join(context_messages)
@@ -484,47 +589,141 @@ class VMSManager:
             
             # Count keyword frequency in context
             context_word_freq = Counter(context_keywords)
+            total_context_words = len(context_keywords)
             
-            # Score all VMs based on keyword matches
-            vm_scores = []
+            if total_context_words == 0:
+                self.bot.logger.log(MODULE_NAME, "No valid context keywords, falling back to random")
+                return None
+            
+            # NEW: Collect all eligible VMs with their scores
+            eligible_vms = []
             
             # Check cache files
             cache_files = self.get_vm_files(CACHE_DIR)
-            for file_path, _ in cache_files:
+            for file_path, creation_time in cache_files:
+                # Skip VMs in cooldown
+                if self.is_vm_in_cooldown(file_path):
+                    continue
+                
+                # Skip excessively long VMs (reduce chance instead of skipping entirely)
+                is_long = self.is_vm_too_long(file_path)
+                
                 transcript = self.get_transcript(file_path)
                 if transcript and 'keywords' in transcript:
-                    # Calculate match score
-                    matches = sum(
+                    # NEW: Calculate normalized match score
+                    vm_keywords = transcript['keywords']
+                    
+                    if not vm_keywords or len(vm_keywords) < MIN_TRANSCRIPT_LENGTH_CHARS:
+                        continue
+                    
+                    # Calculate raw match count
+                    raw_matches = sum(
                         context_word_freq.get(keyword, 0) 
-                        for keyword in transcript['keywords']
+                        for keyword in vm_keywords
                     )
-                    if matches >= MIN_KEYWORD_MATCHES:
-                        vm_scores.append((file_path, matches))
+                    
+                    if raw_matches < MIN_KEYWORD_MATCHES:
+                        continue
+                    
+                    # NEW: Normalize by transcript length to prevent long VMs from dominating
+                    if KEYWORD_SCORE_NORMALIZATION:
+                        # Use log normalization to reduce bias from long transcripts
+                        keyword_count = len(vm_keywords)
+                        normalized_matches = raw_matches / math.log(keyword_count + 1)
+                        
+                        # Also normalize by context length
+                        normalized_score = normalized_matches / math.log(total_context_words + 1)
+                    else:
+                        normalized_score = raw_matches / total_context_words
+                    
+                    # Apply penalty for long VMs
+                    final_score = normalized_score
+                    if is_long:
+                        final_score *= LONG_VM_REDUCTION_FACTOR
+                    
+                    # NEW: Apply recency bonus (newer VMs get slight preference)
+                    age_days = (datetime.now(timezone.utc) - creation_time).days
+                    recency_factor = max(0.5, 1.0 - (age_days / 365))  # VMs up to 1 year old
+                    
+                    # Combine scores with weights
+                    combined_score = (
+                        final_score * MAX_SCORE_WEIGHT + 
+                        recency_factor * (1 - MAX_SCORE_WEIGHT)
+                    )
+                    
+                    eligible_vms.append((file_path, combined_score, is_long, raw_matches))
             
             # Check archive files (with archive chance)
             if random.random() < ARCHIVE_CHANCE:
                 archive_files = self.get_vm_files(ARCHIVE_DIR)
-                for file_path, _ in archive_files:
+                for file_path, creation_time in archive_files:
+                    if self.is_vm_in_cooldown(file_path):
+                        continue
+                    
+                    is_long = self.is_vm_too_long(file_path)
+                    
                     transcript = self.get_transcript(file_path)
                     if transcript and 'keywords' in transcript:
-                        matches = sum(
+                        vm_keywords = transcript['keywords']
+                        
+                        if not vm_keywords or len(vm_keywords) < MIN_TRANSCRIPT_LENGTH_CHARS:
+                            continue
+                        
+                        raw_matches = sum(
                             context_word_freq.get(keyword, 0) 
-                            for keyword in transcript['keywords']
+                            for keyword in vm_keywords
                         )
-                        if matches >= MIN_KEYWORD_MATCHES:
-                            vm_scores.append((file_path, matches))
+                        
+                        if raw_matches < MIN_KEYWORD_MATCHES:
+                            continue
+                        
+                        if KEYWORD_SCORE_NORMALIZATION:
+                            keyword_count = len(vm_keywords)
+                            normalized_matches = raw_matches / math.log(keyword_count + 1)
+                            normalized_score = normalized_matches / math.log(total_context_words + 1)
+                        else:
+                            normalized_score = raw_matches / total_context_words
+                        
+                        final_score = normalized_score
+                        if is_long:
+                            final_score *= LONG_VM_REDUCTION_FACTOR
+                        
+                        # Archive penalty (slight reduction)
+                        final_score *= 0.8
+                        
+                        age_days = (datetime.now(timezone.utc) - creation_time).days
+                        recency_factor = max(0.3, 1.0 - (age_days / 730))  # VMs up to 2 years old
+                        
+                        combined_score = (
+                            final_score * MAX_SCORE_WEIGHT + 
+                            recency_factor * (1 - MAX_SCORE_WEIGHT)
+                        )
+                        
+                        eligible_vms.append((file_path, combined_score, is_long, raw_matches))
             
-            if not vm_scores:
+            if not eligible_vms:
                 self.bot.logger.log(MODULE_NAME, "No relevant VMs found, falling back to random")
                 return None
             
-            # Sort by score and pick from top matches (add some randomness)
-            vm_scores.sort(key=lambda x: x[1], reverse=True)
-            top_matches = vm_scores[:5] if len(vm_scores) > 5 else vm_scores
-            selected, score = random.choice(top_matches)
+            # NEW: Sort by score and use weighted random selection from top candidates
+            eligible_vms.sort(key=lambda x: x[1], reverse=True)
             
+            # Take top candidates (more for better randomness, but not too many)
+            top_candidates = eligible_vms[:10] if len(eligible_vms) > 10 else eligible_vms
+            
+            # Apply weights for random selection (higher score = higher chance)
+            weights = [score ** 2 for _, score, _, _ in top_candidates]  # Square to emphasize differences
+            
+            # Select weighted random
+            selected_index = random.choices(range(len(top_candidates)), weights=weights, k=1)[0]
+            selected, score, is_long, raw_matches = top_candidates[selected_index]
+            
+            # Log selection details
+            duration = self._get_audio_duration(selected)
             self.bot.logger.log(MODULE_NAME, 
-                f"Selected relevant VM: {selected.name} (score: {score})")
+                f"Selected relevant VM: {selected.name} "
+                f"(score: {score:.3f}, matches: {raw_matches}, "
+                f"duration: {duration:.1f}s, long: {is_long})")
             
             return selected
             
@@ -532,32 +731,83 @@ class VMSManager:
             self.bot.logger.error(MODULE_NAME, "Error selecting relevant VM", e)
             return None
     
+    # UPDATED: Improved random VM selection with cooldowns and length consideration
     def select_random_vm(self):
-        """Select a random voice message, with small chance from archive"""
+        """Select a random voice message, with consideration for cooldowns and length"""
         try:
             use_archive = random.random() < ARCHIVE_CHANCE
             
+            # Collect eligible VMs
+            eligible_vms = []
+            
             if use_archive:
                 archive_files = self.get_vm_files(ARCHIVE_DIR)
-                if archive_files:
-                    selected, creation_time = random.choice(archive_files)
+                for file_path, creation_time in archive_files:
+                    # Skip VMs in cooldown
+                    if self.is_vm_in_cooldown(file_path):
+                        continue
+                    
+                    # Apply length penalty
+                    is_long = self.is_vm_too_long(file_path)
                     age_days = (datetime.now(timezone.utc) - creation_time).days
+                    
+                    # Calculate weight: newer VMs have higher chance
+                    weight = max(0.3, 1.0 - (age_days / 730))  # Up to 2 years
+                    if is_long:
+                        weight *= LONG_VM_REDUCTION_FACTOR
+                    
+                    eligible_vms.append((file_path, weight, is_long))
+            
+            # Always include cache files (if no eligible archive files or as fallback)
+            cache_files = self.get_vm_files(CACHE_DIR)
+            for file_path, creation_time in cache_files:
+                if self.is_vm_in_cooldown(file_path):
+                    continue
+                
+                is_long = self.is_vm_too_long(file_path)
+                age_days = (datetime.now(timezone.utc) - creation_time).days
+                
+                weight = max(0.5, 1.0 - (age_days / 365))  # Up to 1 year
+                if is_long:
+                    weight *= LONG_VM_REDUCTION_FACTOR
+                
+                eligible_vms.append((file_path, weight, is_long))
+            
+            if not eligible_vms:
+                self.bot.logger.log(MODULE_NAME, "No eligible VMs available (all in cooldown?)", "WARNING")
+                
+                # Emergency fallback: allow VMs in cooldown
+                all_files = self.get_vm_files(CACHE_DIR)
+                if use_archive:
+                    all_files.extend(self.get_vm_files(ARCHIVE_DIR))
+                
+                if all_files:
+                    selected, creation_time = random.choice(all_files)
+                    age_days = (datetime.now(timezone.utc) - creation_time).days
+                    duration = self._get_audio_duration(selected)
                     self.bot.logger.log(MODULE_NAME, 
-                        f"Selected from archive: {selected.name} (age: {age_days} days)")
+                        f"Emergency fallback: {selected.name} (age: {age_days} days, duration: {duration:.1f}s)")
                     return selected
                 else:
-                    self.bot.logger.log(MODULE_NAME, "No archive files available, using cache")
+                    self.bot.logger.log(MODULE_NAME, "No voice messages available at all", "WARNING")
+                    return None
             
-            cache_files = self.get_vm_files(CACHE_DIR)
-            if cache_files:
-                selected, creation_time = random.choice(cache_files)
-                age_days = (datetime.now(timezone.utc) - creation_time).days
-                self.bot.logger.log(MODULE_NAME, 
-                    f"Selected from cache: {selected.name} (age: {age_days} days)")
-                return selected
+            # Weighted random selection
+            weights = [weight for _, weight, _ in eligible_vms]
+            selected_index = random.choices(range(len(eligible_vms)), weights=weights, k=1)[0]
+            selected, weight, is_long = eligible_vms[selected_index]
             
-            self.bot.logger.log(MODULE_NAME, "No voice messages available", "WARNING")
-            return None
+            creation_time = self._get_file_creation_time(selected)
+            age_days = (datetime.now(timezone.utc) - creation_time).days
+            duration = self._get_audio_duration(selected)
+            
+            source = "archive" if use_archive and selected.parent == ARCHIVE_DIR else "cache"
+            self.bot.logger.log(MODULE_NAME, 
+                f"Selected from {source}: {selected.name} "
+                f"(age: {age_days} days, duration: {duration:.1f}s, "
+                f"long: {is_long}, weight: {weight:.3f})")
+            
+            return selected
             
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Error selecting VM", e)
@@ -788,9 +1038,23 @@ class VMSManager:
         
         # Count transcribed VMs
         transcribed_count = 0
+        # Count long VMs
+        long_vm_count = 0
+        # Count VMs in cooldown
+        vms_in_cooldown = 0
+        
         for file_path, _ in cache_files + archive_files:
             if self.get_transcript(file_path):
                 transcribed_count += 1
+            
+            if self.is_vm_too_long(file_path):
+                long_vm_count += 1
+            
+            if self.is_vm_in_cooldown(file_path):
+                vms_in_cooldown += 1
+        
+        total_vms = len(cache_files) + len(archive_files)
+        available_vms = total_vms - vms_in_cooldown
         
         stats = {
             'cache_count': len(cache_files),
@@ -803,7 +1067,13 @@ class VMSManager:
             'last_post': self.last_post_time,
             'last_message': self.last_message_time,
             'transcribed_count': transcribed_count,
-            'total_vms': len(cache_files) + len(archive_files)
+            'total_vms': total_vms,
+            # NEW: Additional stats
+            'long_vm_count': long_vm_count,
+            'long_vm_percentage': (long_vm_count / total_vms * 100) if total_vms > 0 else 0,
+            'vms_in_cooldown': vms_in_cooldown,
+            'available_vms': available_vms,
+            'transcription_percentage': (transcribed_count / total_vms * 100) if total_vms > 0 else 0
         }
         
         return stats
@@ -899,11 +1169,26 @@ def setup(bot):
                 inline=True
             )
             
+            # NEW: VM availability stats
+            embed.add_field(
+                name="📊 Availability",
+                value=f"**{stats['available_vms']}/{stats['total_vms']}** available\n"
+                      f"{stats['vms_in_cooldown']} in cooldown",
+                inline=True
+            )
+            
             # Transcription status
-            transcription_pct = (stats['transcribed_count'] / stats['total_vms'] * 100) if stats['total_vms'] > 0 else 0
             embed.add_field(
                 name="📝 Transcriptions",
-                value=f"{stats['transcribed_count']}/{stats['total_vms']} ({transcription_pct:.1f}%)",
+                value=f"{stats['transcribed_count']}/{stats['total_vms']} ({stats['transcription_percentage']:.1f}%)",
+                inline=True
+            )
+            
+            # NEW: Long VM stats
+            embed.add_field(
+                name="⏰ Long VMs",
+                value=f"{stats['long_vm_count']} ({stats['long_vm_percentage']:.1f}%)\n"
+                      f">1min reduction: {LONG_VM_REDUCTION_FACTOR*100:.0f}%",
                 inline=True
             )
             
@@ -931,7 +1216,7 @@ def setup(bot):
                 progress_info.append(f"Last message: {minutes:.0f}m ago")
             
             embed.add_field(
-                name="📊 Progress",
+                name="📈 Progress",
                 value="\n".join(progress_info),
                 inline=False
             )
@@ -959,6 +1244,21 @@ def setup(bot):
                     inline=True
                 )
             
+            # NEW: Selection configuration
+            selection_config = [
+                f"VM cooldown: {VM_COOLDOWN_DAYS} days",
+                f"Relevant VM chance: {RELEVANT_VM_CHANCE*100:.0f}%",
+                f"Keyword score weight: {MAX_SCORE_WEIGHT*100:.0f}%",
+                f"Keyword normalization: {'ON' if KEYWORD_SCORE_NORMALIZATION else 'OFF'}"
+            ]
+            
+            embed.add_field(
+                name="⚙️ Selection",
+                value="\n".join(selection_config),
+                inline=True
+            )
+            
+            # Existing configuration
             embed.add_field(
                 name="📋 Configuration",
                 value=f"Message interval: {MIN_MESSAGES_BETWEEN}-{MAX_MESSAGES_BETWEEN}\n"
@@ -966,7 +1266,6 @@ def setup(bot):
                       f"Cache threshold: {CACHE_DAYS} days\n"
                       f"Archive threshold: {ARCHIVE_DAYS} days\n"
                       f"Archive play chance: {ARCHIVE_CHANCE*100:.0f}%\n"
-                      f"Relevant VM chance: {RELEVANT_VM_CHANCE*100:.0f}%\n"
                       f"Ping cooldown: {PING_COOLDOWN_SECONDS}s\n"
                       f"Random VM cooldown: {RANDOM_VM_COOLDOWN_SECONDS}s",
                 inline=False
@@ -1103,5 +1402,37 @@ def setup(bot):
         )
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    # NEW: Admin command to reset VM cooldowns
+    @bot.tree.command(name="vmresetcooldowns", description="[Admin] Reset cooldowns for all VMs")
+    async def vmresetcooldowns(interaction: discord.Interaction):
+        """Reset cooldowns for all VMs (admin only)"""
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message(
+                "❌ You need administrator permissions to use this command.",
+                ephemeral=True
+            )
+            return
+        
+        bot.logger.log(MODULE_NAME, f"VM cooldown reset requested by {interaction.user}")
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            old_count = len(vms_manager.vm_tracking)
+            vms_manager.vm_tracking = {}
+            vms_manager._save_vm_tracking()
+            
+            await interaction.followup.send(
+                f"✅ Reset cooldowns for {old_count} VMs!",
+                ephemeral=True
+            )
+            
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "Error resetting VM cooldowns", e)
+            await interaction.followup.send(
+                "❌ Error resetting VM cooldowns",
+                ephemeral=True
+            )
     
     bot.logger.log(MODULE_NAME, "VMS module setup complete")

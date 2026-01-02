@@ -20,6 +20,11 @@ parser.add_argument('-dev', '--development', action='store_true',
                     help='Enable development mode (hot-reload, versioning, git integration)')
 args = parser.parse_args()
 
+# Get script directory and create data folder
+script_dir = Path(__file__).parent.absolute()
+data_dir = script_dir / "data"
+data_dir.mkdir(exist_ok=True)
+
 # Initialize bot with intents
 intents = discord.Intents.default()
 intents.message_content = True
@@ -28,11 +33,33 @@ intents.guilds = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 class Logger:
-    """Centralized logging system for all modules with persistent prompt"""
+    """Centralized logging system for all modules with persistent prompt and file logging"""
     
     def __init__(self):
         self.prompt_active = False
         self.lock = threading.Lock()
+        self.session_id = self._generate_session_id()
+        self.log_file = None
+        self._init_log_file()
+    
+    def _generate_session_id(self) -> str:
+        """Generate a unique session ID based on timestamp"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"session_{timestamp}"
+    
+    def _init_log_file(self):
+        """Initialize the log file for this session"""
+        # Create session-specific log file
+        log_filename = f"{self.session_id}.log"
+        self.log_file = data_dir / log_filename
+        
+        # Write initial log entry
+        with open(self.log_file, 'w', encoding='utf-8') as f:
+            f.write(f"=== Embot Session Log - {self.session_id} ===\n")
+            f.write(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("=" * 50 + "\n\n")
+        
+        print(f"[LOGGER] Session log started: {self.log_file.name}")
     
     def _clear_line(self):
         """Clear the current line"""
@@ -45,9 +72,18 @@ class Logger:
             sys.stdout.write('> ')
             sys.stdout.flush()
     
+    def _write_to_file(self, message: str):
+        """Write a message to the log file"""
+        try:
+            with open(self.log_file, 'a', encoding='utf-8') as f:
+                f.write(message + '\n')
+        except Exception as e:
+            # If file writing fails, just print to console
+            sys.stderr.write(f"[LOGGER ERROR] Failed to write to log file: {e}\n")
+    
     def log(self, module_name: str, message: str, level: str = "INFO"):
         """
-        Log a message with module name tag
+        Log a message with module name tag to both console and file
         
         Args:
             module_name: Name of the module logging the message
@@ -56,13 +92,19 @@ class Logger:
         """
         with self.lock:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            log_message = f"[{timestamp}] [{module_name}] [{level}] {message}"
+            
+            # Write to console
             self._clear_line()
-            print(f"[{timestamp}] [{module_name}] [{level}] {message}")
+            print(log_message)
             self._restore_prompt()
+            
+            # Write to file
+            self._write_to_file(log_message)
 
     def error(self, module_name: str, message: str, exception: Exception = None):
         """
-        Log an error with optional exception details
+        Log an error with optional exception details to both console and file
         
         Args:
             module_name: Name of the module logging the error
@@ -71,15 +113,29 @@ class Logger:
         """
         with self.lock:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            log_message = f"[{timestamp}] [{module_name}] [ERROR] {message}"
+            
+            # Write to console
             self._clear_line()
-            print(f"[{timestamp}] [{module_name}] [ERROR] {message}")
+            print(log_message)
+            
+            # Prepare error details for file
+            file_message = log_message
             
             if exception:
-                print(f"[{timestamp}] [{module_name}] [ERROR] Exception: {type(exception).__name__}: {str(exception)}")
+                error_details = f"[{timestamp}] [{module_name}] [ERROR] Exception: {type(exception).__name__}: {str(exception)}"
+                print(error_details)
+                file_message += f"\n{error_details}"
+                
                 tb = ''.join(traceback.format_exception(type(exception), exception, exception.__traceback__))
-                print(f"[{timestamp}] [{module_name}] [ERROR] Traceback:\n{tb}")
+                tb_message = f"[{timestamp}] [{module_name}] [ERROR] Traceback:\n{tb}"
+                print(tb_message)
+                file_message += f"\n{tb_message}"
             
             self._restore_prompt()
+            
+            # Write to file
+            self._write_to_file(file_message)
 
 # Make logger available globally
 bot.logger = Logger()
@@ -359,6 +415,11 @@ def show_status():
     # Console commands info
     print(f"│ Console commands: {len(bot.console_commands)}{' ' * (42 - len(str(len(bot.console_commands))))} │")
     
+    # Log file info
+    if hasattr(bot.logger, 'log_file'):
+        log_file_name = bot.logger.log_file.name
+        print(f"│ Log file: {log_file_name:<46} │")
+    
     print("└─────────────────────────────────────────────────────────────────────┘\n")
 
 def show_version():
@@ -428,8 +489,30 @@ def setup_console_commands():
             print(f"  • {module}")
         print()
     
+    async def handle_logs(args):
+        """Show log file information"""
+        if hasattr(bot.logger, 'log_file') and bot.logger.log_file.exists():
+            file_size = bot.logger.log_file.stat().st_size
+            print(f"\n📋 Current log file: {bot.logger.log_file.name}")
+            print(f"   Size: {file_size:,} bytes")
+            print(f"   Location: {bot.logger.log_file}")
+            
+            # List other log files in data directory
+            log_files = list(data_dir.glob("session_*.log"))
+            if len(log_files) > 1:
+                print(f"\n📁 Other log files in {data_dir}:")
+                for log_file in sorted(log_files, key=lambda x: x.stat().st_mtime, reverse=True)[:5]:
+                    if log_file != bot.logger.log_file:
+                        size = log_file.stat().st_size
+                        mtime = datetime.fromtimestamp(log_file.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+                        print(f"   • {log_file.name} ({size:,} bytes, {mtime})")
+        else:
+            print("❌ No log file found")
+        print()
+    
     register_console_command("reload", "Reload a specific module", handle_reload)
     register_console_command("modules", "List loaded modules", handle_modules)
+    register_console_command("logs", "Show log file information", handle_logs)
 
 @bot.event
 async def on_error(event, *args, **kwargs):
@@ -478,6 +561,7 @@ if __name__ == "__main__":
         
         mode_str = " with development mode" if args.development else ""
         bot.logger.log("MAIN", f"Starting Embot v{load_version()}{mode_str}...")
+        bot.logger.log("MAIN", f"Log files will be saved to: {data_dir}")
         bot.run(TOKEN)
     except Exception as e:
         bot.logger.error("MAIN", "Failed to start bot", e)

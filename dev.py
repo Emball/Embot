@@ -10,10 +10,11 @@ import discord
 from discord import app_commands
 import re
 import asyncio
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
+import time  # ADDED THIS IMPORT
 import traceback
 import difflib
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 MODULE_NAME = "DEV"
 
@@ -27,7 +28,12 @@ EXCLUDE_FILES = [
     'song_index.json',       # Archive index
     'cache_index.json',      # Archive cache
     'moderation_strikes.json',  # Moderation data
-    'member_roles.json'      # Role persistence
+    'member_roles.json',     # Role persistence
+    '.gitignore',            # Git ignore file
+    '.gitattributes',        # Git attributes
+    '*.pyc',                 # Python bytecode
+    '*.pyo',
+    '*.pyd'
 ]
 EXCLUDE_DIRS = ['Winpython64', 'python-3', 'venv', 'env', '.git', '__pycache__', 'data', 'icons']
 
@@ -39,13 +45,16 @@ PATCH_THRESHOLD = 1         # Bug fixes (micro version bump)
 
 
 class FileChangeHandler(FileSystemEventHandler):
-    """Handles file system events for hot-reloading"""
+    """Handles file system events for hot-reloading with improved filtering"""
     
     def __init__(self, dev_manager, loop):
         self.dev_manager = dev_manager
         self.loop = loop
         self.last_reload_time = {}
-        self.reload_cooldown = 2  # seconds
+        self.reload_cooldown = 5  # Increased to 5 seconds
+        self.file_states = {}  # Track file size and mtime to detect real changes
+        self.last_event_time = 0
+        self.event_cooldown = 1  # Minimum 1 second between events for same file
     
     def should_ignore_file(self, file_path):
         """Check if file should be ignored for hot-reload"""
@@ -53,17 +62,22 @@ class FileChangeHandler(FileSystemEventHandler):
         
         # Ignore all excluded files
         for exclude in EXCLUDE_FILES:
-            if file_name == exclude:
+            if exclude.startswith('*'):
+                if file_name.endswith(exclude[1:]):
+                    return True
+            elif file_name == exclude:
                 return True
         
         # Ignore directories
+        path_str = str(file_path)
         for exclude_dir in EXCLUDE_DIRS:
-            if exclude_dir in str(file_path):
+            if exclude_dir in path_str:
                 return True
         
         return False
     
     def on_modified(self, event):
+        """Handle file modification events with better filtering"""
         if event.is_directory:
             return
         
@@ -77,16 +91,42 @@ class FileChangeHandler(FileSystemEventHandler):
         if self.should_ignore_file(file_path):
             return
         
-        # Cooldown to prevent multiple rapid reloads
-        now = datetime.now().timestamp()
-        last_reload = self.last_reload_time.get(str(file_path), 0)
+        # Check if file actually changed (size or mtime)
+        try:
+            current_stat = file_path.stat()
+            current_size = current_stat.st_size
+            current_mtime = current_stat.st_mtime
+            
+            # Get previous state
+            prev_state = self.file_states.get(str(file_path))
+            
+            # If we have a previous state and nothing changed, ignore
+            if prev_state and prev_state[0] == current_size and prev_state[1] == current_mtime:
+                return
+            
+            # Update state
+            self.file_states[str(file_path)] = (current_size, current_mtime)
+            
+        except Exception as e:
+            self.dev_manager.bot.logger.log(MODULE_NAME, 
+                f"Could not check file state for {file_path.name}", "WARNING")
+        
+        # Global cooldown to prevent rapid-fire events
+        now = time.time()
+        if now - self.last_event_time < self.event_cooldown:
+            return
+        self.last_event_time = now
+        
+        # Per-file cooldown
+        file_key = str(file_path)
+        last_reload = self.last_reload_time.get(file_key, 0)
         
         if now - last_reload < self.reload_cooldown:
             return
         
-        self.last_reload_time[str(file_path)] = now
+        self.last_reload_time[file_key] = now
         
-        # Schedule reload using the event loop from the main thread
+        # Schedule reload
         asyncio.run_coroutine_threadsafe(
             self.dev_manager.reload_module(file_path),
             self.loop
@@ -105,8 +145,10 @@ class DevManager:
         self.git_enabled = False
         self.file_observer = None
         self.watched_modules = {}
-        self.auto_commit_enabled = False  # Default to disabled
+        self.auto_commit_enabled = True  # DEFAULT TO ENABLED as requested
         self.auto_versioning_enabled = True  # Default to enabled
+        self.is_reloading = False  # Prevent reload cycles
+        self.file_states = {}  # Track file states to prevent false positives
         
         # Check Git availability
         self._check_git()
@@ -427,7 +469,10 @@ icons/
         
         # Exclude specific files by exact name match
         for exclude in EXCLUDE_FILES:
-            if file_name == exclude:
+            if exclude.startswith('*'):
+                if file_name.endswith(exclude[1:]):
+                    return True
+            elif file_name == exclude:
                 return True
         
         # Exclude by directory
@@ -637,9 +682,15 @@ icons/
             self.bot.logger.log(MODULE_NAME, 
                 f"Version updated: v{old_version} → v{new_version} ({change_type})")
             
-            # Auto-commit if enabled
-            if auto_commit and self.auto_commit_enabled and self.git_enabled:
-                await self.git_commit_and_push(commit_message, history_entry)
+            # Auto-commit if enabled (AND REQUESTED BY USER - IMPORTANT!)
+            should_auto_commit = auto_commit and self.auto_commit_enabled and self.git_enabled
+            if should_auto_commit:
+                self.bot.logger.log(MODULE_NAME, "Auto-committing changes...")
+                success = await self.git_commit_and_push(commit_message, history_entry)
+                if success:
+                    self.bot.logger.log(MODULE_NAME, "✅ Auto-commit successful")
+                else:
+                    self.bot.logger.log(MODULE_NAME, "⚠️ Auto-commit completed with warnings", "WARNING")
             
             return history_entry
             
@@ -711,7 +762,15 @@ icons/
             return False
     
     async def reload_module(self, file_path):
-        """Hot-reload a module when its file changes"""
+        """Hot-reload a module when its file changes with cycle prevention"""
+        # PREVENT RELOAD CYCLES
+        if self.is_reloading:
+            self.bot.logger.log(MODULE_NAME, 
+                f"Already reloading, skipping {file_path.name}", "WARNING")
+            return
+            
+        self.is_reloading = True
+        
         try:
             module_name = file_path.stem
             
@@ -723,7 +782,8 @@ icons/
             
             # Check if module exists in sys.modules
             if module_name not in sys.modules:
-                self.bot.logger.log(MODULE_NAME, f"Module {module_name} not loaded yet", "WARNING")
+                self.bot.logger.log(MODULE_NAME, 
+                    f"Module {module_name} not loaded yet", "WARNING")
                 return
             
             try:
@@ -732,8 +792,8 @@ icons/
                 
                 # Re-run setup if it exists
                 if hasattr(module, 'setup'):
-                    # Clear existing commands for this module
-                    self.bot.tree.clear_commands(guild=None)
+                    # Clear existing commands for this module ONLY
+                    # Don't clear all commands to avoid rate limits
                     
                     # Re-setup the module - only pass register_console_command to dev module
                     if module_name == 'dev':
@@ -744,10 +804,11 @@ icons/
                     else:
                         module.setup(self.bot)
                     
-                    # Sync commands
-                    await self.bot.tree.sync()
+                    # DO NOT SYNC COMMANDS HERE - that's what's causing rate limits
+                    # Commands will be available without syncing (they're already registered)
                     
-                    self.bot.logger.log(MODULE_NAME, f"✅ Reloaded and synced: {module_name}")
+                    self.bot.logger.log(MODULE_NAME, 
+                        f"✅ Reloaded and re-setup: {module_name} (no sync)")
                 else:
                     self.bot.logger.log(MODULE_NAME, f"✅ Reloaded: {module_name} (no setup)")
                 
@@ -761,6 +822,9 @@ icons/
                 
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, f"Error in reload_module for {file_path}", e)
+        finally:
+            # CRITICAL: Reset the reloading flag
+            self.is_reloading = False
     
     def start_file_watcher(self):
         """Start watching files for changes (only in dev mode)"""
@@ -825,26 +889,24 @@ def setup(bot, register_console_command):
     # Start file watcher for hot-reloading (only in dev mode)
     dev_manager.start_file_watcher()
     
-    # Initial version check and auto-commit
+    # Initial version check - WITH AUTO-COMMIT AS REQUESTED
     async def initial_version_check():
         await bot.wait_until_ready()
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)  # Give everything time to settle
         
         bot.logger.log(MODULE_NAME, "Starting initial version check...")
-        version_entry = await dev_manager.check_and_update_version(auto_commit=False)
+        
+        # Check for changes WITH auto-commit enabled
+        version_entry = await dev_manager.check_and_update_version(auto_commit=True)
         bot.version = dev_manager._get_version_from_file()
         
         if version_entry:
             bot.logger.log(MODULE_NAME, f"✅ Version updated to v{version_entry['version']}")
             
-            # Auto-commit on startup if git is enabled
-            if dev_manager.git_enabled:
-                bot.logger.log(MODULE_NAME, "Auto-committing changes on startup...")
-                success = await dev_manager.git_commit_and_push(None, version_entry)
-                if success:
-                    bot.logger.log(MODULE_NAME, f"✅ Auto-committed v{bot.version} on startup")
-                else:
-                    bot.logger.log(MODULE_NAME, "Auto-commit completed with warnings", "WARNING")
+            if dev_manager.auto_commit_enabled and dev_manager.git_enabled:
+                bot.logger.log(MODULE_NAME, f"✅ Auto-committed v{bot.version} on startup")
+            else:
+                bot.logger.log(MODULE_NAME, "ℹ️ Auto-commit not enabled or Git not available")
         else:
             bot.logger.log(MODULE_NAME, f"✅ Version check complete - v{bot.version} (no changes)")
     

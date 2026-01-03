@@ -163,15 +163,20 @@ class VMSManager:
             self.bot.logger.error(MODULE_NAME, f"Error checking VM cooldown for {vm_path}", e)
             return False
     
-    # NEW: Check if VM is too long
-    def is_vm_too_long(self, vm_path):
-        """Check if a VM exceeds the length threshold"""
+    # NEW: Async version to check if VM is too long
+    async def _async_is_vm_too_long(self, vm_path):
+        """Async check if a VM exceeds the length threshold"""
         try:
-            duration = self._get_audio_duration(vm_path)
+            duration = await self._get_audio_duration(vm_path)
             return duration > LONG_VM_THRESHOLD_SECONDS
         except Exception as e:
             self.bot.logger.log(MODULE_NAME, f"Could not check duration for {vm_path.name}, assuming normal length", "WARNING")
             return False
+    
+    # NEW: Sync version for use in sync contexts
+    def is_vm_too_long_sync(self, vm_path):
+        """Sync version - returns False for now, actual check will be done in async context"""
+        return False
     
     def _save_transcripts(self):
         """Save transcripts to JSON file"""
@@ -268,20 +273,39 @@ class VMSManager:
                 files.append((file, creation_time))
         return files
     
-    def _get_audio_duration(self, file_path):
-        """Get audio duration using ffprobe"""
+    async def _get_audio_duration(self, file_path):
+        """Get audio duration using ffprobe asynchronously"""
         try:
-            result = subprocess.run(
-                ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', 
-                 '-of', 'default=noprint_wrappers=1:nokey=1', str(file_path)],
-                capture_output=True,
-                text=True,
-                timeout=10
+            # Create subprocess asynchronously
+            process = await asyncio.create_subprocess_exec(
+                'ffprobe', '-v', 'error', '-show_entries', 'format=duration', 
+                '-of', 'default=noprint_wrappers=1:nokey=1', str(file_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
             )
-            duration = float(result.stdout.strip())
-            return duration
+            
+            # Wait for process to complete with timeout
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+            except asyncio.TimeoutError:
+                # Kill the process if it times out
+                try:
+                    process.kill()
+                    await process.wait()
+                except:
+                    pass
+                self.bot.logger.log(MODULE_NAME, f"Duration check timed out for {file_path.name}, using default", "WARNING")
+                return 1.0
+            
+            if process.returncode == 0:
+                duration = float(stdout.decode().strip())
+                return duration
+            else:
+                self.bot.logger.log(MODULE_NAME, f"Could not get duration for {file_path.name}, using default", "WARNING")
+                return 1.0
+                
         except Exception as e:
-            self.bot.logger.log(MODULE_NAME, f"Could not get duration for {file_path.name}, using default", "WARNING")
+            self.bot.logger.log(MODULE_NAME, f"Could not get duration for {file_path.name}, using default: {e}", "WARNING")
             return 1.0
     
     def _generate_waveform(self):
@@ -293,7 +317,7 @@ class VMSManager:
         """Send a file as a Discord voice message using the API"""
         try:
             file_size = file_path.stat().st_size
-            duration = self._get_audio_duration(file_path)
+            duration = await self._get_audio_duration(file_path)
             
             async with aiohttp.ClientSession() as session:
                 upload_request_url = f"https://discord.com/api/v10/channels/{channel.id}/attachments"
@@ -374,7 +398,7 @@ class VMSManager:
         """Send a file as a Discord voice message reply using the API"""
         try:
             file_size = file_path.stat().st_size
-            duration = self._get_audio_duration(file_path)
+            duration = await self._get_audio_duration(file_path)
             
             async with aiohttp.ClientSession() as session:
                 upload_request_url = f"https://discord.com/api/v10/channels/{message.channel.id}/attachments"
@@ -576,7 +600,7 @@ class VMSManager:
             return []
     
     # UPDATED: Improved relevant VM selection with normalization and cooldowns
-    def select_relevant_vm(self, context_messages):
+    async def select_relevant_vm(self, context_messages):
         """Select a VM that's relevant to recent conversation context with fairness improvements"""
         try:
             # Extract keywords from context
@@ -605,8 +629,8 @@ class VMSManager:
                 if self.is_vm_in_cooldown(file_path):
                     continue
                 
-                # Skip excessively long VMs (reduce chance instead of skipping entirely)
-                is_long = self.is_vm_too_long(file_path)
+                # Use async version for duration check
+                is_long = await self._async_is_vm_too_long(file_path)
                 
                 transcript = self.get_transcript(file_path)
                 if transcript and 'keywords' in transcript:
@@ -660,7 +684,7 @@ class VMSManager:
                     if self.is_vm_in_cooldown(file_path):
                         continue
                     
-                    is_long = self.is_vm_too_long(file_path)
+                    is_long = await self._async_is_vm_too_long(file_path)
                     
                     transcript = self.get_transcript(file_path)
                     if transcript and 'keywords' in transcript:
@@ -719,7 +743,7 @@ class VMSManager:
             selected, score, is_long, raw_matches = top_candidates[selected_index]
             
             # Log selection details
-            duration = self._get_audio_duration(selected)
+            duration = await self._get_audio_duration(selected)
             self.bot.logger.log(MODULE_NAME, 
                 f"Selected relevant VM: {selected.name} "
                 f"(score: {score:.3f}, matches: {raw_matches}, "
@@ -732,7 +756,7 @@ class VMSManager:
             return None
     
     # UPDATED: Improved random VM selection with cooldowns and length consideration
-    def select_random_vm(self):
+    async def select_random_vm(self):
         """Select a random voice message, with consideration for cooldowns and length"""
         try:
             use_archive = random.random() < ARCHIVE_CHANCE
@@ -748,7 +772,7 @@ class VMSManager:
                         continue
                     
                     # Apply length penalty
-                    is_long = self.is_vm_too_long(file_path)
+                    is_long = await self._async_is_vm_too_long(file_path)
                     age_days = (datetime.now(timezone.utc) - creation_time).days
                     
                     # Calculate weight: newer VMs have higher chance
@@ -764,7 +788,7 @@ class VMSManager:
                 if self.is_vm_in_cooldown(file_path):
                     continue
                 
-                is_long = self.is_vm_too_long(file_path)
+                is_long = await self._async_is_vm_too_long(file_path)
                 age_days = (datetime.now(timezone.utc) - creation_time).days
                 
                 weight = max(0.5, 1.0 - (age_days / 365))  # Up to 1 year
@@ -784,7 +808,7 @@ class VMSManager:
                 if all_files:
                     selected, creation_time = random.choice(all_files)
                     age_days = (datetime.now(timezone.utc) - creation_time).days
-                    duration = self._get_audio_duration(selected)
+                    duration = await self._get_audio_duration(selected)
                     self.bot.logger.log(MODULE_NAME, 
                         f"Emergency fallback: {selected.name} (age: {age_days} days, duration: {duration:.1f}s)")
                     return selected
@@ -799,7 +823,7 @@ class VMSManager:
             
             creation_time = self._get_file_creation_time(selected)
             age_days = (datetime.now(timezone.utc) - creation_time).days
-            duration = self._get_audio_duration(selected)
+            duration = await self._get_audio_duration(selected)
             
             source = "archive" if use_archive and selected.parent == ARCHIVE_DIR else "cache"
             self.bot.logger.log(MODULE_NAME, 
@@ -908,12 +932,12 @@ class VMSManager:
                     self.bot.logger.log(MODULE_NAME, "Attempting to select relevant VM")
                     context_messages = await self.get_recent_messages_context(target_channel)
                     if context_messages:
-                        vm_file = self.select_relevant_vm(context_messages)
+                        vm_file = await self.select_relevant_vm(context_messages)
                 
                 # Fall back to random if relevant selection failed
                 if not vm_file:
                     self.bot.logger.log(MODULE_NAME, "Selecting random VM")
-                    vm_file = self.select_random_vm()
+                    vm_file = await self.select_random_vm()
                 
                 if not vm_file:
                     self.bot.logger.log(MODULE_NAME, "No VM to post", "WARNING")
@@ -1038,7 +1062,7 @@ class VMSManager:
         
         # Count transcribed VMs
         transcribed_count = 0
-        # Count long VMs
+        # Count long VMs (using sync version for stats)
         long_vm_count = 0
         # Count VMs in cooldown
         vms_in_cooldown = 0
@@ -1047,7 +1071,10 @@ class VMSManager:
             if self.get_transcript(file_path):
                 transcribed_count += 1
             
-            if self.is_vm_too_long(file_path):
+            # Note: We can't do async checks in sync stats method
+            # We'll just count based on file size as a rough estimate
+            file_size = file_path.stat().st_size
+            if file_size > 1024 * 1024 * 2:  # Rough guess: >2MB might be long
                 long_vm_count += 1
             
             if self.is_vm_in_cooldown(file_path):

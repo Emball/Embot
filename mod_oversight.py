@@ -13,40 +13,34 @@ from pathlib import Path
 
 MODULE_NAME = "MOD_OVERSIGHT"
 
-# Load configuration
-def load_config():
-    """Load bot configuration from file"""
-    config_file = Path("bot_config.json")
-    if config_file.exists():
-        try:
-            with open(config_file, 'r') as f:
-                return json.load(f)
-        except Exception:
-            pass
-    # Default config if file doesn't exist
-    return {
-        "owner_id": None,
-        "oversight": {
-            "context_message_count": 30,
-            "invite_cleanup_days": 7
-        },
-        "channels": {
-            "bot_logs_channel_id": None
-        }
+# ==================== HARDCODED CONFIGURATION ====================
+# Edit these values directly — bot_config.json is no longer used.
+
+OWNER_ID = 1328822521084117033
+
+CONFIG = {
+    "owner_id": OWNER_ID,
+    "channels": {
+        "join_logs_channel_id": 1229868495307669608,
+        "bot_logs_channel_id": 1229871835978666115
+    },
+    "elevated_roles": ["Moderator", "Admin", "Owner"],
+    "moderation": {
+        "min_reason_length": 10,
+        "muted_role_name": "Muted"
+    },
+    "oversight": {
+        "report_time_cst": "00:00",
+        "context_message_count": 30,
+        "invite_cleanup_days": 7
     }
-
-CONFIG = load_config()
-
-# Owner ID
-OWNER_ID = CONFIG.get("owner_id")
-if not OWNER_ID:
-    print("[MOD_OVERSIGHT] WARNING: owner_id not set in bot_config.json!")
+}
 
 # Minimum reason length (in characters)
-MIN_REASON_LENGTH = CONFIG.get("moderation", {}).get("min_reason_length", 10)
+MIN_REASON_LENGTH = CONFIG["moderation"]["min_reason_length"]
 
 # Context message count
-CONTEXT_MESSAGE_COUNT = CONFIG.get("oversight", {}).get("context_message_count", 30)
+CONTEXT_MESSAGE_COUNT = CONFIG["oversight"]["context_message_count"]
 
 class ModOversightSystem:
     """
@@ -56,9 +50,11 @@ class ModOversightSystem:
     
     def __init__(self, bot):
         self.bot = bot
-        self.data_file = "mod_oversight_data.json"
-        self.appeals_file = "ban_appeals.json"
-        self.invites_file = "ban_reversal_invites.json"
+        data_dir = Path(__file__).parent / "data"
+        data_dir.mkdir(exist_ok=True)
+        self.data_file = str(data_dir / "mod_oversight_data.json")
+        self.appeals_file = str(data_dir / "ban_appeals.json")
+        self.invites_file = str(data_dir / "ban_reversal_invites.json")
         
         # Load data
         self.pending_actions = self.load_data(self.data_file, {})
@@ -533,7 +529,7 @@ class ModOversightSystem:
     async def cleanup_old_invites(self):
         """Clean up invites that haven't been used after configured days"""
         try:
-            cleanup_days = CONFIG.get("oversight", {}).get("invite_cleanup_days", 7)
+            cleanup_days = CONFIG["oversight"]["invite_cleanup_days"]
             cutoff = datetime.utcnow() - timedelta(days=cleanup_days)
             to_delete = []
             
@@ -566,7 +562,7 @@ class ModOversightSystem:
     
     def get_bot_logs_channel(self, guild: discord.Guild) -> Optional[discord.TextChannel]:
         """Get the bot logs channel from config"""
-        bot_logs_id = CONFIG.get("channels", {}).get("bot_logs_channel_id")
+        bot_logs_id = CONFIG["channels"]["bot_logs_channel_id"]
         if bot_logs_id:
             return guild.get_channel(bot_logs_id)
         
@@ -997,5 +993,20 @@ def setup(bot):
     async def on_message_delete(message):
         """Track when moderation embeds are deleted"""
         await oversight.handle_embed_deletion(message.id)
+    
+    # /report command — owner can DM the bot to trigger the report early
+    @bot.tree.command(name="report", description="[Owner only] Trigger the moderation report immediately")
+    async def report_command(interaction: discord.Interaction):
+        """Manually trigger the daily moderation report (owner only, usable in DMs)"""
+        if interaction.user.id != OWNER_ID:
+            await interaction.response.send_message("❌ This command is restricted to the bot owner.", ephemeral=True)
+            return
+        
+        await interaction.response.send_message("📊 Generating report...", ephemeral=True)
+        
+        try:
+            await oversight.generate_daily_report()
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "Manual report generation failed", e)
     
     bot.logger.log(MODULE_NAME, "Mod oversight module setup complete")

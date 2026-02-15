@@ -12,7 +12,10 @@ class EventLogger:
     
     def __init__(self, bot):
         self.bot = bot
-        self.config_file = "logger_config.json"
+        from pathlib import Path
+        data_dir = Path(__file__).parent / "data"
+        data_dir.mkdir(exist_ok=True)
+        self.config_file = str(data_dir / "logger_config.json")
         self.config = self.load_config()
         
     def load_config(self):
@@ -66,16 +69,18 @@ class EventLogger:
             return None
         return guild.get_channel(self.config["bot_logs_channel_id"])
     
-    async def log_to_channel(self, channel, embed):
-        """Send log embed to channel"""
+    async def log_to_channel(self, channel, embed) -> Optional[int]:
+        """Send log embed to channel, returns message ID or None"""
         if not channel:
-            return
+            return None
         try:
-            await channel.send(embed=embed)
+            msg = await channel.send(embed=embed)
+            return msg.id
         except discord.Forbidden:
             self.bot.logger.error(MODULE_NAME, f"No permission to send logs to {channel.name}")
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, f"Failed to send log to {channel.name}", e)
+        return None
     
     # ====================
     # MESSAGE EVENTS
@@ -271,69 +276,9 @@ class EventLogger:
         
         await self.log_to_channel(channel, embed)
     
-    async def log_member_ban(self, guild, user):
-        """Log when a member is banned"""
-        if not self.config.get("log_bans"):
-            return
-        
-        channel = self.get_bot_logs_channel(guild)
-        if not channel:
-            return
-        
-        # Try to get ban reason
-        try:
-            ban_entry = await guild.fetch_ban(user)
-            reason = ban_entry.reason or "No reason provided"
-        except:
-            reason = "Could not fetch ban reason"
-        
-        description = (
-            f"**{user.mention} was banned from the server**\n\n"
-            f"**User:** {user.name}\n"
-            f"**ID:** {user.id}\n"
-            f"**Reason:** {reason}"
-        )
-        
-        embed = discord.Embed(
-            description=description,
-            color=0x992d22,
-            timestamp=datetime.utcnow()
-        )
-        
-        embed.set_author(
-            name=str(user),
-            icon_url=user.display_avatar.url
-        )
-        
-        embed.set_footer(text=f"User ID: {user.id}")
-        
-        await self.log_to_channel(channel, embed)
-    
     async def log_member_unban(self, guild, user):
-        """Log when a member is unbanned"""
-        if not self.config.get("log_unbans"):
-            return
-        
-        channel = self.get_bot_logs_channel(guild)
-        if not channel:
-            return
-        
-        description = f"**{user.mention} was unbanned from the server**\n\n**User:** {user.name}\n**ID:** {user.id}"
-        
-        embed = discord.Embed(
-            description=description,
-            color=0x2ecc71,
-            timestamp=datetime.utcnow()
-        )
-        
-        embed.set_author(
-            name=str(user),
-            icon_url=user.display_avatar.url
-        )
-        
-        embed.set_footer(text=f"User ID: {user.id}")
-        
-        await self.log_to_channel(channel, embed)
+        """Log when a member is unbanned — handled by moderation.py for bot actions"""
+        pass  # Unban logging is handled by moderation.py's explicit botlog embeds
     
     async def log_member_update(self, before, after):
         """Log when a member is updated (roles, nickname)"""
@@ -648,78 +593,6 @@ class EventLogger:
             await self.log_to_channel(channel, embed)
     
     # ====================
-    # MODERATION ACTIONS (from moderation.py)
-    # ====================
-    
-    async def log_moderation_action(self, guild, action_type, moderator, target_user, reason, **kwargs):
-        """Log moderation actions to bot logs channel"""
-        channel = self.get_bot_logs_channel(guild)
-        if not channel:
-            return
-        
-        # Action type mapping
-        action_names = {
-            'ban': 'Member Banned',
-            'unban': 'Member Unbanned',
-            'kick': 'Member Kicked',
-            'mute': 'Member Muted',
-            'unmute': 'Member Unmuted',
-            'warn': 'Member Warned',
-            'timeout': 'Member Timed Out',
-            'untimeout': 'Timeout Removed',
-            'softban': 'Member Softbanned',
-            'lock': 'Channel Locked',
-            'unlock': 'Channel Unlocked',
-            'slowmode': 'Slowmode Set',
-            'purge': 'Messages Purged',
-            'clear_strikes': 'Strikes Cleared'
-        }
-        
-        action_colors = {
-            'ban': 0x992d22,
-            'unban': 0x2ecc71,
-            'kick': 0xe67e22,
-            'mute': 0xf39c12,
-            'unmute': 0x2ecc71,
-            'warn': 0xfaa61a,
-            'timeout': 0xe74c3c,
-            'untimeout': 0x2ecc71,
-            'softban': 0x992d22,
-            'lock': 0x95a5a6,
-            'unlock': 0x2ecc71,
-            'slowmode': 0x3498db,
-            'purge': 0xe74c3c,
-            'clear_strikes': 0x3498db
-        }
-        
-        # Build description with target user
-        description = f"**User:** {target_user.mention}\n**Moderator:** {moderator.mention}\n**Reason:** {reason}"
-        
-        # Add extra info
-        if 'duration' in kwargs:
-            description += f"\n**Duration:** {kwargs['duration']}"
-        if 'channel' in kwargs:
-            description += f"\n**Channel:** {kwargs['channel']}"
-        if 'amount' in kwargs:
-            description += f"\n**Amount:** {kwargs['amount']}"
-        
-        embed = discord.Embed(
-            description=description,
-            color=action_colors.get(action_type, 0x5865f2),
-            timestamp=datetime.utcnow()
-        )
-        
-        # Set author to show action type
-        embed.set_author(name=action_names.get(action_type, 'Moderation Action'))
-        
-        if target_user:
-            embed.set_footer(text=f"User ID: {target_user.id} | Moderator ID: {moderator.id}")
-        else:
-            embed.set_footer(text=f"Moderator ID: {moderator.id}")
-        
-        await self.log_to_channel(channel, embed)
-    
-    # ====================
     # INVITE EVENTS
     # ====================
     
@@ -766,7 +639,6 @@ class EventLogger:
             embed.set_footer(text=f"Code: {invite.code}")
         
         await self.log_to_channel(channel, embed)
-        await self.log_to_channel(channel, embed)
     
     async def log_invite_delete(self, invite):
         """Log when an invite is deleted"""
@@ -791,6 +663,206 @@ class EventLogger:
             timestamp=datetime.utcnow()
         )
         
+        await self.log_to_channel(channel, embed)
+
+    # ====================
+    # MODERATION ACTION LOGGING
+    # ====================
+
+    async def log_ban(self, guild: discord.Guild, user: discord.User,
+                      moderator: discord.Member, reason: str,
+                      delete_days: int, action_channel: discord.TextChannel) -> Optional[int]:
+        """Log a ban action to bot-logs. Returns message ID."""
+        channel = self.get_bot_logs_channel(guild)
+        embed = discord.Embed(
+            title="User Banned",
+            description=f"{user.mention} was banned from the server.",
+            color=0x992d22,
+            timestamp=datetime.utcnow()
+        )
+        embed.set_thumbnail(url=user.display_avatar.url)
+        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.add_field(name="Messages Deleted", value=f"{delete_days} day{'s' if delete_days != 1 else ''}", inline=True)
+        embed.add_field(name="Channel", value=action_channel.mention, inline=True)
+        return await self.log_to_channel(channel, embed)
+
+    async def log_unban(self, guild: discord.Guild, user: discord.User,
+                        moderator: discord.Member, reason: str) -> Optional[int]:
+        """Log an unban action to bot-logs. Returns message ID."""
+        channel = self.get_bot_logs_channel(guild)
+        embed = discord.Embed(
+            title="User Unbanned",
+            description=f"{user.mention} was unbanned from the server.",
+            color=0x2ecc71,
+            timestamp=datetime.utcnow()
+        )
+        embed.set_thumbnail(url=user.display_avatar.url)
+        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        return await self.log_to_channel(channel, embed)
+
+    async def log_kick(self, guild: discord.Guild, member: discord.Member,
+                       moderator: discord.Member, reason: str,
+                       action_channel: discord.TextChannel) -> Optional[int]:
+        """Log a kick action to bot-logs. Returns message ID."""
+        channel = self.get_bot_logs_channel(guild)
+        embed = discord.Embed(
+            title="Member Kicked",
+            description=f"{member.mention} was kicked from the server.",
+            color=0xe67e22,
+            timestamp=datetime.utcnow()
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.add_field(name="Channel", value=action_channel.mention, inline=True)
+        return await self.log_to_channel(channel, embed)
+
+    async def log_timeout(self, guild: discord.Guild, member: discord.Member,
+                          moderator: discord.Member, reason: str,
+                          duration_str: str, action_channel: discord.TextChannel) -> Optional[int]:
+        """Log a timeout action to bot-logs. Returns message ID."""
+        channel = self.get_bot_logs_channel(guild)
+        embed = discord.Embed(
+            title="Member Timed Out",
+            description=f"{member.mention} was timed out.",
+            color=0xe74c3c,
+            timestamp=datetime.utcnow()
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.add_field(name="Duration", value=duration_str, inline=True)
+        embed.add_field(name="Channel", value=action_channel.mention, inline=True)
+        return await self.log_to_channel(channel, embed)
+
+    async def log_mute(self, guild: discord.Guild, member: discord.Member,
+                       moderator: discord.Member, reason: str,
+                       duration_str: str, action_channel: discord.TextChannel) -> Optional[int]:
+        """Log a mute action to bot-logs. Returns message ID."""
+        channel = self.get_bot_logs_channel(guild)
+        embed = discord.Embed(
+            title="Member Muted",
+            description=f"{member.mention} was muted.",
+            color=0xf39c12,
+            timestamp=datetime.utcnow()
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.add_field(name="Duration", value=duration_str, inline=True)
+        embed.add_field(name="Channel", value=action_channel.mention, inline=True)
+        return await self.log_to_channel(channel, embed)
+
+    async def log_softban(self, guild: discord.Guild, member: discord.Member,
+                          moderator: discord.Member, reason: str,
+                          delete_days: int, action_channel: discord.TextChannel) -> Optional[int]:
+        """Log a softban action to bot-logs. Returns message ID."""
+        channel = self.get_bot_logs_channel(guild)
+        embed = discord.Embed(
+            title="Member Softbanned",
+            description=f"{member.mention} was softbanned (messages deleted, can rejoin).",
+            color=0x992d22,
+            timestamp=datetime.utcnow()
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.add_field(name="Messages Deleted", value=f"{delete_days} day{'s' if delete_days != 1 else ''}", inline=True)
+        embed.add_field(name="Channel", value=action_channel.mention, inline=True)
+        return await self.log_to_channel(channel, embed)
+
+    async def log_purge(self, guild: discord.Guild, moderator: discord.Member,
+                        count: int, action_channel: discord.TextChannel,
+                        target_user: Optional[discord.Member] = None) -> Optional[int]:
+        """Log a purge action to bot-logs. Returns message ID."""
+        channel = self.get_bot_logs_channel(guild)
+        desc = f"**{count}** message{'s' if count != 1 else ''} deleted"
+        desc += f" from {target_user.mention}" if target_user else f" in {action_channel.mention}"
+        embed = discord.Embed(
+            title="Messages Purged",
+            description=desc,
+            color=0x2ecc71,
+            timestamp=datetime.utcnow()
+        )
+        if target_user:
+            embed.set_thumbnail(url=target_user.display_avatar.url)
+        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
+        embed.add_field(name="Channel", value=action_channel.mention, inline=True)
+        embed.add_field(name="Amount", value=str(count), inline=True)
+        return await self.log_to_channel(channel, embed)
+
+    async def log_warn(self, guild: discord.Guild, member: discord.Member,
+                       moderator: discord.Member, reason: str,
+                       strike_count: int, action_channel: discord.TextChannel) -> Optional[int]:
+        """Log a warn action to bot-logs. Returns message ID."""
+        channel = self.get_bot_logs_channel(guild)
+        embed = discord.Embed(
+            title="Member Warned",
+            description=f"{member.mention} was warned.",
+            color=0xf39c12,
+            timestamp=datetime.utcnow()
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.add_field(name="Total Warnings", value=str(strike_count), inline=True)
+        embed.add_field(name="Channel", value=action_channel.mention, inline=True)
+        return await self.log_to_channel(channel, embed)
+
+    async def log_lock(self, guild: discord.Guild, moderator: discord.Member,
+                       reason: str, locked_channel: discord.TextChannel) -> Optional[int]:
+        """Log a channel lock to bot-logs. Returns message ID."""
+        channel = self.get_bot_logs_channel(guild)
+        embed = discord.Embed(
+            title="Channel Locked",
+            description=f"{locked_channel.mention} was locked.",
+            color=0xe74c3c,
+            timestamp=datetime.utcnow()
+        )
+        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.add_field(name="Channel", value=locked_channel.mention, inline=True)
+        return await self.log_to_channel(channel, embed)
+
+    async def log_autoban(self, guild: discord.Guild, user: discord.User,
+                          reason: str, trigger_channel: discord.TextChannel) -> None:
+        """Log an auto-mod ban to bot-logs."""
+        channel = self.get_bot_logs_channel(guild)
+        embed = discord.Embed(
+            title="AUTO-BAN",
+            description=f"{user.mention} was automatically banned.",
+            color=0xdc143c,
+            timestamp=datetime.utcnow()
+        )
+        embed.set_thumbnail(url=user.display_avatar.url)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.add_field(name="Channel", value=trigger_channel.mention, inline=True)
+        await self.log_to_channel(channel, embed)
+
+    async def log_autoban_strike(self, guild: discord.Guild, user: discord.User,
+                                 strike_count: int, reason: str,
+                                 trigger_channel: discord.TextChannel) -> None:
+        """Log an auto-mod strike (or strike-triggered ban) to bot-logs."""
+        channel = self.get_bot_logs_channel(guild)
+        if strike_count >= 2:
+            embed = discord.Embed(
+                title="AUTO-BAN: Repeated Violation",
+                description=f"{user.mention} was automatically banned after {strike_count} strikes.",
+                color=0xdc143c,
+                timestamp=datetime.utcnow()
+            )
+        else:
+            embed = discord.Embed(
+                title=f"Auto-Mod Strike {strike_count}/2",
+                description=f"{user.mention} received a strike.",
+                color=0xf39c12,
+                timestamp=datetime.utcnow()
+            )
+        embed.set_thumbnail(url=user.display_avatar.url)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.add_field(name="Channel", value=trigger_channel.mention, inline=True)
         await self.log_to_channel(channel, embed)
 
 

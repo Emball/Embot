@@ -146,9 +146,9 @@ class EventLogger:
             after_content = after_content[:797] + "..."
         
         description = (
-            f"**Message sent by {after.author.mention} edited in {after.channel.mention}**\n\n"
-            f"**Before**\n{before_content}\n\n"
-            f"**After**\n{after_content}\n\n"
+            f"**Message sent by {after.author.mention} edited in {after.channel.mention}**\n"
+            f"**Before**\n{before_content}\n"
+            f"**After**\n{after_content}\n"
             f"[Jump to Message]({after.jump_url})"
         )
         
@@ -692,8 +692,8 @@ class EventLogger:
             'clear_strikes': 0x3498db
         }
         
-        # Build description
-        description = f"**Moderator:** {moderator.mention}\n**Reason:** {reason}"
+        # Build description with target user
+        description = f"**User:** {target_user.mention}\n**Moderator:** {moderator.mention}\n**Reason:** {reason}"
         
         # Add extra info
         if 'duration' in kwargs:
@@ -709,15 +709,12 @@ class EventLogger:
             timestamp=datetime.utcnow()
         )
         
-        # Set author (target user) with avatar
+        # Set author to show action type
+        embed.set_author(name=action_names.get(action_type, 'Moderation Action'))
+        
         if target_user:
-            embed.set_author(
-                name=str(target_user),
-                icon_url=target_user.display_avatar.url if hasattr(target_user, 'display_avatar') else None
-            )
             embed.set_footer(text=f"User ID: {target_user.id} | Moderator ID: {moderator.id}")
         else:
-            embed.set_author(name=action_names.get(action_type, 'Moderation Action'))
             embed.set_footer(text=f"Moderator ID: {moderator.id}")
         
         await self.log_to_channel(channel, embed)

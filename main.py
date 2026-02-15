@@ -13,6 +13,7 @@ import threading
 from pathlib import Path
 import json 
 import re
+import signal
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='Embot Discord Bot')
@@ -32,8 +33,8 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-class Logger:
-    """Centralized logging system for all modules with persistent prompt and file logging"""
+class ConsoleLogger:
+    """Centralized console and file logging system for all modules"""
     
     def __init__(self):
         self.prompt_active = False
@@ -137,8 +138,8 @@ class Logger:
             # Write to file
             self._write_to_file(file_message)
 
-# Make logger available globally
-bot.logger = Logger()
+# Make console logger available globally
+bot.logger = ConsoleLogger()
 
 # Console command registry - available to all modules
 bot.console_commands = {}
@@ -584,6 +585,29 @@ async def on_command_error(ctx, error):
         bot.logger.error("MAIN", f"Command error in {ctx.command}", error)
         await ctx.send(f"An error occurred: {str(error)}")
 
+# ==================== GRACEFUL SHUTDOWN HANDLER ====================
+
+async def shutdown_bot(signame):
+    """Gracefully shutdown the bot"""
+    bot.logger.log("MAIN", f"Received signal {signame}, shutting down gracefully...")
+    
+    # Save any in-memory state that needs flushing
+    # (Most modules already save atomically on changes, but this provides a safety net)
+    
+    try:
+        await bot.close()
+        bot.logger.log("MAIN", "Bot closed successfully")
+    except Exception as e:
+        bot.logger.error("MAIN", "Error during shutdown", e)
+
+def handle_signal(signum, frame):
+    """Handle termination signals"""
+    signame = signal.Signals(signum).name
+    
+    # Create task to shutdown gracefully
+    loop = asyncio.get_event_loop()
+    loop.create_task(shutdown_bot(signame))
+
 if __name__ == "__main__":
     # Get token from environment variable
     TOKEN = os.getenv('DISCORD_BOT_TOKEN')
@@ -595,12 +619,17 @@ if __name__ == "__main__":
         sys.exit(1)
     
     try:
+        # Register signal handlers for graceful shutdown
+        signal.signal(signal.SIGTERM, handle_signal)
+        signal.signal(signal.SIGINT, handle_signal)
+        
         # Setup console commands before starting
         setup_console_commands()
         
         mode_str = " with development mode" if args.development else ""
         bot.logger.log("MAIN", f"Starting Embot v{load_version()}{mode_str}...")
         bot.logger.log("MAIN", f"Log files will be saved to: {data_dir}")
+        bot.logger.log("MAIN", "Signal handlers registered for graceful shutdown")
         bot.run(TOKEN)
     except Exception as e:
         bot.logger.error("MAIN", "Failed to start bot", e)

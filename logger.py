@@ -4,6 +4,7 @@ from discord import app_commands
 from datetime import datetime
 from typing import Optional
 import json
+import os
 
 MODULE_NAME = "LOGGER"
 
@@ -48,12 +49,25 @@ class EventLogger:
             return {}
     
     def save_config(self, config=None):
-        """Save logger configuration"""
+        """Save logger configuration atomically"""
         if config is None:
             config = self.config
         try:
-            with open(self.config_file, 'w') as f:
-                json.dump(config, f, indent=2)
+            import tempfile
+            # Write to temporary file first
+            temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(self.config_file), suffix='.tmp')
+            try:
+                with os.fdopen(temp_fd, 'w') as f:
+                    json.dump(config, f, indent=2)
+                # Atomic replace
+                os.replace(temp_path, self.config_file)
+            except:
+                # Clean up temp file if something fails
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+                raise
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to save logger config", e)
     
@@ -875,90 +889,90 @@ def setup(bot):
     bot._logger_event_logger = event_logger
     
     # Register all event listeners
-    @bot.event
+    @bot.listen()
     async def on_message_delete(message):
         """Called when a message is deleted"""
         if message.guild:
             await event_logger.log_message_delete(message)
     
-    @bot.event
+    @bot.listen()
     async def on_message_edit(before, after):
         """Called when a message is edited"""
         if before.guild:
             await event_logger.log_message_edit(before, after)
     
-    @bot.event
+    @bot.listen()
     async def on_bulk_message_delete(messages):
         """Called when messages are bulk deleted"""
         if messages and messages[0].guild:
             await event_logger.log_bulk_message_delete(messages)
     
-    @bot.event
+    @bot.listen()
     async def on_member_join(member):
         """Called when a member joins"""
         await event_logger.log_member_join(member)
     
-    @bot.event
+    @bot.listen()
     async def on_member_remove(member):
         """Called when a member leaves"""
         await event_logger.log_member_leave(member)
     
-    @bot.event
+    @bot.listen()
     async def on_member_ban(guild, user):
         """Called when a member is banned"""
         await event_logger.log_member_ban(guild, user)
     
-    @bot.event
+    @bot.listen()
     async def on_member_unban(guild, user):
         """Called when a member is unbanned"""
         await event_logger.log_member_unban(guild, user)
     
-    @bot.event
+    @bot.listen()
     async def on_member_update(before, after):
         """Called when a member is updated"""
         await event_logger.log_member_update(before, after)
     
-    @bot.event
+    @bot.listen()
     async def on_guild_role_create(role):
         """Called when a role is created"""
         await event_logger.log_role_create(role)
     
-    @bot.event
+    @bot.listen()
     async def on_guild_role_delete(role):
         """Called when a role is deleted"""
         await event_logger.log_role_delete(role)
     
-    @bot.event
+    @bot.listen()
     async def on_guild_role_update(before, after):
         """Called when a role is updated"""
         await event_logger.log_role_update(before, after)
     
-    @bot.event
+    @bot.listen()
     async def on_guild_channel_create(channel):
         """Called when a channel is created"""
         await event_logger.log_channel_create(channel)
     
-    @bot.event
+    @bot.listen()
     async def on_guild_channel_delete(channel):
         """Called when a channel is deleted"""
         await event_logger.log_channel_delete(channel)
     
-    @bot.event
+    @bot.listen()
     async def on_guild_channel_update(before, after):
         """Called when a channel is updated"""
         await event_logger.log_channel_update(before, after)
     
-    @bot.event
+    @bot.listen()
     async def on_voice_state_update(member, before, after):
         """Called when a voice state changes"""
         await event_logger.log_voice_state_update(member, before, after)
     
-    @bot.event
+    @bot.listen()
     async def on_invite_create(invite):
         """Called when an invite is created"""
         await event_logger.log_invite_create(invite)
     
-    @bot.event
+    @bot.listen()
     async def on_invite_delete(invite):
         """Called when an invite is deleted"""
         await event_logger.log_invite_delete(invite)
@@ -969,10 +983,6 @@ def setup(bot):
     @app_commands.default_permissions(administrator=True)
     async def set_join_logs(interaction: discord.Interaction, channel: discord.TextChannel):
         """Set the join logs channel"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ You need Administrator permission to use this command.", ephemeral=True)
-            return
-        
         event_logger.config["join_logs_channel_id"] = channel.id
         event_logger.save_config()
         
@@ -990,10 +1000,6 @@ def setup(bot):
     @app_commands.default_permissions(administrator=True)
     async def set_bot_logs(interaction: discord.Interaction, channel: discord.TextChannel):
         """Set the bot logs channel"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ You need Administrator permission to use this command.", ephemeral=True)
-            return
-        
         event_logger.config["bot_logs_channel_id"] = channel.id
         event_logger.save_config()
         
@@ -1010,10 +1016,6 @@ def setup(bot):
     @app_commands.default_permissions(administrator=True)
     async def log_config(interaction: discord.Interaction):
         """View logging configuration"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ You need Administrator permission to use this command.", ephemeral=True)
-            return
-        
         join_channel = event_logger.get_join_logs_channel(interaction.guild)
         bot_channel = event_logger.get_bot_logs_channel(interaction.guild)
         

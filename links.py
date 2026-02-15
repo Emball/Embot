@@ -4,6 +4,7 @@ from discord.ext import commands
 from discord import app_commands
 from typing import Optional
 import json
+import os
 
 MODULE_NAME = "LINKS"
 
@@ -92,12 +93,25 @@ class LinkManager:
             return {}
     
     def save_links(self, links=None):
-        """Save links to configuration file"""
+        """Save links to configuration file atomically"""
         if links is None:
             links = self.links
         try:
-            with open(self.config_file, 'w') as f:
-                json.dump(links, f, indent=2)
+            import tempfile
+            # Write to temporary file first
+            temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(self.config_file), suffix='.tmp')
+            try:
+                with os.fdopen(temp_fd, 'w') as f:
+                    json.dump(links, f, indent=2)
+                # Atomic replace
+                os.replace(temp_path, self.config_file)
+            except:
+                # Clean up temp file if something fails
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+                raise
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to save links config", e)
     
@@ -149,7 +163,7 @@ def setup(bot):
     link_manager = LinkManager(bot)
     
     # Message listener for link commands
-    @bot.event
+    @bot.listen()
     async def on_message(message):
         """Listen for link commands"""
         if message.author.bot:
@@ -177,10 +191,6 @@ def setup(bot):
         description: Optional[str] = None
     ):
         """Set or update a link command"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ You need Administrator permission to use this command.", ephemeral=True)
-            return
-        
         # Sanitize name (remove ? if present)
         name = name.lower().replace("?", "")
         
@@ -222,10 +232,6 @@ def setup(bot):
     @app_commands.default_permissions(administrator=True)
     async def link_remove(interaction: discord.Interaction, name: str):
         """Remove a link command"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ You need Administrator permission to use this command.", ephemeral=True)
-            return
-        
         # Sanitize name
         name = name.lower().replace("?", "")
         
@@ -253,10 +259,6 @@ def setup(bot):
     @app_commands.default_permissions(administrator=True)
     async def link_toggle(interaction: discord.Interaction, name: str):
         """Toggle a link command on/off"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ You need Administrator permission to use this command.", ephemeral=True)
-            return
-        
         # Sanitize name
         name = name.lower().replace("?", "")
         

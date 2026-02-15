@@ -207,42 +207,54 @@ class DevManager:
             self.bot.logger.log(MODULE_NAME, "Git not available", "WARNING")
     
     def setup_github_with_token(self, token):
-        """Simple GitHub token setup - no SSH bullshit"""
+        """Setup GitHub token using git credential helper (secure)"""
         try:
             # Get repo owner/name
             repo_path = self.get_repo_owner_and_name()
             if repo_path == "owner/repo":
                 self.bot.logger.log(MODULE_NAME, "Could not detect repository, using current directory", "WARNING")
-                # Try to get from current directory
                 current_dir = Path.cwd().name
                 repo_path = f"{self.get_github_username()}/{current_dir}"
             
-            # Set the remote URL with token
-            repo_url = f"https://{token}@github.com/{repo_path}.git"
+            # Set remote URL WITHOUT token (use HTTPS)
+            repo_url = f"https://github.com/{repo_path}.git"
             
-            self.bot.logger.log(MODULE_NAME, f"Setting remote URL: https://token@github.com/{repo_path}.git")
+            self.bot.logger.log(MODULE_NAME, f"Setting remote URL: {repo_url}")
             
             result = subprocess.run(
                 ['git', 'remote', 'set-url', 'origin', repo_url],
                 capture_output=True, text=True, timeout=10
             )
             
-            if result.returncode == 0:
-                self.bot.logger.log(MODULE_NAME, "✅ GitHub token configured successfully!")
-                self.git_enabled = True
-                return True
-            else:
-                self.bot.logger.error(MODULE_NAME, f"Failed to set remote: {result.stderr}")
+            if result.returncode != 0:
                 # Try adding remote if it doesn't exist
                 result = subprocess.run(
                     ['git', 'remote', 'add', 'origin', repo_url],
                     capture_output=True, text=True, timeout=10
                 )
-                if result.returncode == 0:
-                    self.bot.logger.log(MODULE_NAME, "✅ Added origin remote with token!")
-                    self.git_enabled = True
-                    return True
-                return False
+                if result.returncode != 0:
+                    self.bot.logger.error(MODULE_NAME, f"Failed to set remote: {result.stderr}")
+                    return False
+            
+            # Configure git credential helper to store token securely
+            subprocess.run(
+                ['git', 'config', 'credential.helper', 'store'],
+                capture_output=True, text=True, timeout=10
+            )
+            
+            # Store credentials using git credential helper
+            credential_input = f"protocol=https\nhost=github.com\nusername=git\npassword={token}\n\n"
+            subprocess.run(
+                ['git', 'credential', 'approve'],
+                input=credential_input,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            self.bot.logger.log(MODULE_NAME, "✅ GitHub token configured securely using credential helper!")
+            self.git_enabled = True
+            return True
                 
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "GitHub token setup failed", e)
@@ -426,7 +438,7 @@ icons/
             self.bot.logger.error(MODULE_NAME, "Failed to load version data", e)
     
     def _save_version_data(self):
-        """Save version data to file (without version number)"""
+        """Save version data to file atomically (without version number)"""
         try:
             data = {
                 'history': self.version_history,
@@ -435,8 +447,21 @@ icons/
                 'last_check_time': datetime.utcnow().isoformat()
             }
             
-            with open(VERSION_DATA_FILE, 'w') as f:
-                json.dump(data, f, indent=2)
+            import tempfile
+            # Write to temporary file first
+            temp_fd, temp_path = tempfile.mkstemp(dir='.', suffix='.tmp')
+            try:
+                with os.fdopen(temp_fd, 'w') as f:
+                    json.dump(data, f, indent=2)
+                # Atomic replace
+                os.replace(temp_path, VERSION_DATA_FILE)
+            except:
+                # Clean up temp file if something fails
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+                raise
             
             self.bot.logger.log(MODULE_NAME, "Saved version data")
         except Exception as e:

@@ -23,3 +23,13 @@ lyricsgenius
 ffmpeg-python
 watchdog
 pydub
+
+
+moviepy==1.0.3
+Pillow>=10.0.0
+numpy>=1.21.0
+imageio>=2.25.0
+imageio-ffmpeg>=0.4.8
+decorator>=4.4.2
+proglog>=0.1.10
+tqdm>=4.64.0

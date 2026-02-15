@@ -13,7 +13,7 @@ MODULE_NAME = "MODERATION"
 CHILD_SAFETY = ["child porn", "Teen leaks"]  # Most severe
 RACIAL_SLURS = ["chink", "beaner", "n i g g e r", "nigger", "nigger'", "Nigger", 
                 "niggers", "niiger", "niigger"]  # Severe
-TOS_VIOLATIONS = ["deepfakes", "deep fakes", "deepfake", "deep fake"]  # Severe
+TOS_VIOLATIONS = []
 BANNED_WORDS = [
     "embis", "embis'", "Embis", "embis!", "Embis!", "embis's", "embiss", "embiz",
     "https://www.youtube.com/watch?v=fXvOrWWB3Vg", "https://youtu.be/fXvOrWWB3Vg",
@@ -179,6 +179,108 @@ class StrikeSystem:
         return False
 
 
+class MuteManager:
+    """Manages muted users"""
+    
+    def __init__(self, bot):
+        self.bot = bot
+        self.mutes_file = "muted_users.json"
+        self.muted_role_name = "Muted"
+        self.mutes = self.load_mutes()
+    
+    def load_mutes(self):
+        """Load muted users from file"""
+        try:
+            with open(self.mutes_file, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "Failed to load mutes", e)
+            return {}
+    
+    def save_mutes(self):
+        """Save mutes to file"""
+        try:
+            with open(self.mutes_file, 'w') as f:
+                json.dump(self.mutes, f, indent=2)
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "Failed to save mutes", e)
+    
+    async def get_or_create_mute_role(self, guild):
+        """Get or create the Muted role"""
+        # Look for existing Muted role
+        mute_role = discord.utils.get(guild.roles, name=self.muted_role_name)
+        
+        if not mute_role:
+            # Create Muted role
+            try:
+                mute_role = await guild.create_role(
+                    name=self.muted_role_name,
+                    color=discord.Color.dark_gray(),
+                    reason="Auto-created mute role"
+                )
+                
+                # Set permissions for all channels
+                for channel in guild.channels:
+                    try:
+                        await channel.set_permissions(
+                            mute_role,
+                            send_messages=False,
+                            add_reactions=False,
+                            speak=False,
+                            reason="Mute role setup"
+                        )
+                    except:
+                        pass
+                
+                self.bot.logger.log(MODULE_NAME, f"Created Muted role in {guild.name}")
+            except Exception as e:
+                self.bot.logger.error(MODULE_NAME, "Failed to create Muted role", e)
+                return None
+        
+        return mute_role
+    
+    def add_mute(self, guild_id, user_id, reason, duration=None, moderator=None):
+        """Add a mute record"""
+        guild_key = str(guild_id)
+        user_key = str(user_id)
+        
+        if guild_key not in self.mutes:
+            self.mutes[guild_key] = {}
+        
+        mute_data = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'reason': reason,
+            'moderator': str(moderator) if moderator else "Unknown",
+            'duration': duration
+        }
+        
+        if duration:
+            mute_data['expires_at'] = (datetime.utcnow() + timedelta(seconds=duration)).isoformat()
+        
+        self.mutes[guild_key][user_key] = mute_data
+        self.save_mutes()
+    
+    def remove_mute(self, guild_id, user_id):
+        """Remove a mute record"""
+        guild_key = str(guild_id)
+        user_key = str(user_id)
+        
+        if guild_key in self.mutes and user_key in self.mutes[guild_key]:
+            del self.mutes[guild_key][user_key]
+            self.save_mutes()
+            return True
+        return False
+    
+    def is_muted(self, guild_id, user_id):
+        """Check if a user is muted"""
+        guild_key = str(guild_id)
+        user_key = str(user_id)
+        
+        return guild_key in self.mutes and user_key in self.mutes[guild_key]
+
+
 class ModerationManager:
     """Main moderation manager handling auto-mod and commands"""
     
@@ -186,542 +288,391 @@ class ModerationManager:
         self.bot = bot
         self.strike_system = StrikeSystem(bot)
         self.role_persistence = RolePersistenceManager(bot)
+        self.mute_manager = MuteManager(bot)
         self.banned_patterns = self.compile_patterns()
-        # Track bot command invocations to attribute violations
-        self.command_cache = {}  # message_id -> user_id mapping
-        
+        self.bot_command_tracking = {}
+        self.mod_log_channel_id = None
+        self.load_config()
+    
+    def load_config(self):
+        """Load moderation configuration"""
+        try:
+            with open("moderation_config.json", 'r') as f:
+                config = json.load(f)
+                self.mod_log_channel_id = config.get("mod_log_channel_id")
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "Failed to load moderation config", e)
+    
+    def save_config(self):
+        """Save moderation configuration"""
+        try:
+            config = {"mod_log_channel_id": self.mod_log_channel_id}
+            with open("moderation_config.json", 'w') as f:
+                json.dump(config, f, indent=2)
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "Failed to save moderation config", e)
+    
     def compile_patterns(self):
-        """Compile regex patterns for banned words - FIXED to match whole words only"""
+        """Compile regex patterns for banned words"""
         patterns = {}
         
-        for category, words in [
-            ('child_safety', CHILD_SAFETY),
-            ('racial_slur', RACIAL_SLURS),
-            ('tos_violation', TOS_VIOLATIONS),
-            ('banned_word', BANNED_WORDS)
-        ]:
-            patterns[category] = []
-            for word in words:
-                # Use word boundaries to match whole words only
-                # For phrases with spaces, we need special handling
-                if ' ' in word:
-                    # For phrases, escape and use word boundaries around the whole phrase
-                    pattern = r'\b' + re.escape(word) + r'\b'
-                else:
-                    # For single words, use word boundaries
-                    pattern = r'\b' + re.escape(word) + r'\b'
-                patterns[category].append(re.compile(pattern, re.IGNORECASE))
+        # Child safety patterns (highest priority)
+        patterns['child_safety'] = [re.compile(r'\b' + re.escape(word) + r'\b', re.IGNORECASE) 
+                                    for word in CHILD_SAFETY]
+        
+        # Racial slurs patterns
+        patterns['racial_slurs'] = [re.compile(r'\b' + re.escape(word) + r'\b', re.IGNORECASE) 
+                                    for word in RACIAL_SLURS]
+        
+        # TOS violations patterns
+        patterns['tos_violations'] = [re.compile(r'\b' + re.escape(word) + r'\b', re.IGNORECASE) 
+                                      for word in TOS_VIOLATIONS]
+        
+        # Regular banned words patterns
+        patterns['banned_words'] = [re.compile(r'\b' + re.escape(word) + r'\b', re.IGNORECASE) 
+                                    for word in BANNED_WORDS]
         
         return patterns
     
-    def extract_all_text(self, message):
-        """Extract all text from message including forwarded messages and embeds"""
-        text_parts = []
+    async def check_content(self, content):
+        """Check content against banned patterns"""
+        if not content:
+            return None, None
         
-        # Main message content
-        if message.content:
-            text_parts.append(message.content)
+        # Check child safety (most severe)
+        for pattern in self.banned_patterns.get('child_safety', []):
+            if pattern.search(content):
+                return 'child_safety', pattern.pattern
         
-        # Check embeds for text (including forwarded messages)
-        for embed in message.embeds:
-            if embed.description:
-                text_parts.append(embed.description)
-            if embed.title:
-                text_parts.append(embed.title)
-            for field in embed.fields:
-                if field.name:
-                    text_parts.append(field.name)
-                if field.value:
-                    text_parts.append(field.value)
-            if embed.footer and embed.footer.text:
-                text_parts.append(embed.footer.text)
-            if embed.author and embed.author.name:
-                text_parts.append(embed.author.name)
+        # Check racial slurs
+        for pattern in self.banned_patterns.get('racial_slurs', []):
+            if pattern.search(content):
+                return 'racial_slurs', pattern.pattern
         
-        return ' '.join(text_parts)
-    
-    def censor_text(self, text, category):
-        """Censor offensive content in logs showing first two letters"""
-        if category == 'banned_word':
-            # Don't censor regular banned words
-            return text
+        # Check TOS violations
+        for pattern in self.banned_patterns.get('tos_violations', []):
+            if pattern.search(content):
+                return 'tos_violations', pattern.pattern
         
-        censored = text
-        for cat in ['child_safety', 'racial_slur', 'tos_violation']:
-            for pattern in self.banned_patterns.get(cat, []):
-                def replace_with_partial_stars(match):
-                    word = match.group(0)
-                    if len(word) <= 2:
-                        return '*' * len(word)
-                    return word[:2] + '*' * (len(word) - 2)
-                censored = pattern.sub(replace_with_partial_stars, censored)
+        # Check regular banned words
+        for pattern in self.banned_patterns.get('banned_words', []):
+            if pattern.search(content):
+                return 'banned_words', pattern.pattern
         
-        return censored
-    
-    def get_offense_category(self, text):
-        """Determine the category and severity of offense"""
-        for category in ['child_safety', 'racial_slur', 'tos_violation', 'banned_word']:
-            for pattern in self.banned_patterns[category]:
-                if pattern.search(text):
-                    return category
-        return None
-    
-    def contains_banned_content(self, text):
-        """Check if text contains any banned content"""
-        for category in self.banned_patterns.values():
-            for pattern in category:
-                if pattern.search(text):
-                    return True
-        return False
-    
-    def has_elevated_permissions(self, member):
-        """Check if member has elevated permissions"""
-        return (member.guild_permissions.kick_members or 
-                member.guild_permissions.ban_members or 
-                member.guild_permissions.manage_messages or
-                member.guild_permissions.moderate_members or
-                member.guild_permissions.administrator)
-    
-    def format_category(self, category):
-        """Format category name for display"""
-        category_names = {
-            'child_safety': 'Child Safety Violation',
-            'racial_slur': 'Racial Slur',
-            'tos_violation': 'Terms of Service Violation',
-            'banned_word': 'Banned Content'
-        }
-        return category_names.get(category, category)
+        return None, None
     
     async def log_mod_action(self, action_data):
-        """Send moderation logs to bot-logs channel"""
-        try:
-            channel = None
-            for guild in self.bot.guilds:
-                channel = discord.utils.get(guild.text_channels, name="bot-logs")
-                if channel:
-                    break
-            
-            if not channel:
-                return
-            
-            # Get user object for avatar
-            user = action_data.get('user_obj')
-            user_display = action_data['user']
-            user_id = action_data['user_id']
-            
-            # Determine embed color and icon
-            colors = {
-                'ban': 0x992d22,
-                'timeout': 0xf04747,
-                'kick': 0xff9800,
-                'warn': 0xfaa61a,
-                'delete': 0x95a5a6,
-                'purge': 0x5865f2,
-                'clear_strikes': 0x57f287,
-                'permission_failed': 0xfee75c
-            }
-            
-            color = colors.get(action_data.get('action'), 0x95a5a6)
-            
-            embed = discord.Embed(color=color, timestamp=datetime.utcnow())
-            
-            # Set author with user avatar
-            if user:
-                embed.set_author(
-                    name=f"{user_display}",
-                    icon_url=user.display_avatar.url
+        """Log moderation actions using the logger module"""
+        # This now coordinates with logger.py instead of doing its own thing
+        action = action_data.get('action')
+        moderator = action_data.get('moderator_obj')
+        user_obj = action_data.get('user_obj')
+        reason = action_data.get('reason', 'No reason provided')
+        
+        # Get the logger event system if available
+        for guild in self.bot.guilds:
+            # Try to get logger from event handlers
+            # The logger module will handle the actual embed creation
+            if hasattr(self.bot, '_logger_event_logger'):
+                await self.bot._logger_event_logger.log_moderation_action(
+                    guild,
+                    action,
+                    moderator,
+                    user_obj,
+                    reason,
+                    **{k: v for k, v in action_data.items() if k not in ['action', 'moderator_obj', 'user_obj', 'reason', 'user', 'user_id', 'moderator']}
                 )
-            else:
-                embed.set_author(name=f"{user_display}")
-            
-            # Add action field with icon
-            action_icons = {
-                'ban': '🔨',
-                'timeout': '⏰',
-                'kick': '👢',
-                'warn': '⚠️',
-                'delete': '🗑️',
-                'purge': '🧹',
-                'clear_strikes': '✅',
-                'permission_failed': '⚠️'
-            }
-            
-            action_name = action_data['action'].replace('_', ' ').title()
-            action_icon = action_icons.get(action_data['action'], '📋')
-            
-            # Build description
-            description_parts = [f"{action_icon} **{action_name}** | {user_display}"]
-            
-            if action_data.get('action') == 'permission_failed':
-                description_parts.append(f"\n⚠️ **Failed to execute action - Missing Permissions**")
-            
-            # Add bot output trigger indicator
-            if action_data.get('triggered_by_bot'):
-                description_parts.append(f"\n🤖 **Triggered by bot command output**")
-            
-            embed.description = '\n'.join(description_parts)
-            
-            # Add fields
-            if 'moderator' in action_data:
-                embed.add_field(name="Moderator", value=action_data['moderator'], inline=True)
-            
-            if 'reason' in action_data:
-                reason = action_data['reason']
-                if len(reason) > 1024:
-                    reason = reason[:1021] + "..."
-                embed.add_field(name="Reason", value=reason, inline=False)
-            
-            if 'duration' in action_data:
-                embed.add_field(name="Duration", value=action_data['duration'], inline=True)
-            
-            if 'strikes' in action_data:
-                embed.add_field(name="Strikes", value=action_data['strikes'], inline=True)
-            
-            if 'category' in action_data:
-                category_display = {
-                    'child_safety': '🔴 Child Safety',
-                    'racial_slur': '🔴 Racial Slur',
-                    'tos_violation': '🔴 TOS Violation',
-                    'banned_word': '⚪ Banned Content'
-                }
-                embed.add_field(
-                    name="Category", 
-                    value=category_display.get(action_data['category'], action_data['category']),
-                    inline=True
-                )
-            
-            if 'message_content' in action_data:
-                censored = self.censor_text(action_data['message_content'], action_data.get('category', 'banned_word'))
-                if len(censored) > 1000:
-                    censored = censored[:1000] + "..."
-                embed.add_field(name="Message Content", value=f"```{censored}```", inline=False)
-            
-            if action_data.get('action') == 'purge':
-                if 'messages_deleted' in action_data:
-                    embed.add_field(name="Messages Deleted", value=str(action_data['messages_deleted']), inline=True)
-                if 'channel' in action_data:
-                    embed.add_field(name="Channel", value=action_data['channel'], inline=True)
-                if 'target_user' in action_data:
-                    embed.add_field(name="Target User", value=action_data['target_user'], inline=True)
-            
-            # Footer with user ID
-            embed.set_footer(text=f"User ID: {user_id}")
-            
-            await channel.send(embed=embed)
-            
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Failed to send mod log", e)
+                break
     
-    async def handle_auto_mod_violation(self, message, triggered_by_user=None):
-        """Handle auto-mod violations with category-based enforcement
-        
-        Args:
-            message: The message containing the violation
-            triggered_by_user: If this is a bot message, the user who triggered it
-        """
-        # Determine who to punish
-        if triggered_by_user:
-            # Bot output - punish the user who triggered it
-            target_user = triggered_by_user
-            is_bot_output = True
-        else:
-            # User message - punish the author
-            target_user = message.author
-            is_bot_output = False
-        
-        if target_user.bot or not message.guild:
-            return
-        
-        # Extract all text from message including forwards and embeds
-        full_text = self.extract_all_text(message)
-        
-        if not self.contains_banned_content(full_text):
-            return
-        
-        offense_category = self.get_offense_category(full_text)
-        
-        if not offense_category:
-            return
-        
-        violation_source = "bot command output" if is_bot_output else "message"
-        self.bot.logger.log(MODULE_NAME, 
-            f"Auto-mod violation ({offense_category}) from {target_user} ({target_user.id}) via {violation_source}")
-        
-        # Check if user has Moderator role and used racial slur
-        moderator_role = discord.utils.get(message.guild.roles, name="Moderator")
-        moderator_role_removed = False
-        
-        if moderator_role and moderator_role in target_user.roles and offense_category == 'racial_slur':
-            try:
-                await target_user.remove_roles(moderator_role, reason="Auto-mod: Racial slur violation by moderator")
-                moderator_role_removed = True
-                self.bot.logger.log(MODULE_NAME, f"Removed Moderator role from {target_user} for racial slur")
-            except discord.Forbidden:
-                self.bot.logger.error(MODULE_NAME, f"No permission to remove Moderator role from {target_user}")
-        
+    async def handle_violation(self, message, violation_type, matched_pattern):
+        """Handle auto-mod violations"""
         try:
-            # Try to delete the message, but don't fail if already deleted
+            await message.delete()
+            self.bot.logger.log(MODULE_NAME, f"Deleted message from {message.author} - {violation_type}")
+        except:
+            pass
+        
+        # Child safety = immediate ban
+        if violation_type == 'child_safety':
             try:
-                await message.delete()
-            except discord.NotFound:
-                self.bot.logger.log(MODULE_NAME, "Message already deleted", "WARNING")
-            except discord.Forbidden:
-                self.bot.logger.error(MODULE_NAME, "No permission to delete message")
-            
-            # Handle based on severity
-            if offense_category == 'banned_word':
-                # Just delete, no strikes, no DM
+                await message.author.ban(reason=f"Auto-mod: Child safety violation - {matched_pattern}")
+                self.bot.logger.log(MODULE_NAME, f"BANNED {message.author} for child safety violation")
+                
                 action_data = {
-                    'action': 'delete',
-                    'user': str(target_user),
-                    'user_id': target_user.id,
-                    'user_obj': target_user,
+                    'action': 'ban',
+                    'user': str(message.author),
+                    'user_id': message.author.id,
+                    'user_obj': message.author,
                     'moderator': 'Auto-Mod',
-                    'reason': 'Use of banned content' + (' (via bot command)' if is_bot_output else ''),
-                    'category': offense_category,
-                    'message_content': full_text,
-                    'triggered_by_bot': is_bot_output
+                    'moderator_obj': message.guild.me,  # Bot is the moderator
+                    'reason': f"Child safety violation: {matched_pattern}"
                 }
                 await self.log_mod_action(action_data)
-                return
-            
-            # For serious violations: child safety, racial slurs, TOS violations
-            strike_count = self.strike_system.add_strike(target_user.id, f"Auto-mod: {offense_category}" + (" (bot output)" if is_bot_output else ""))
+            except Exception as e:
+                self.bot.logger.error(MODULE_NAME, "Failed to ban user for child safety violation", e)
+            return
+        
+        # Racial slurs = 1 day timeout
+        if violation_type == 'racial_slurs':
+            try:
+                timeout_until = datetime.utcnow() + timedelta(days=1)
+                await message.author.timeout(timeout_until, reason=f"Auto-mod: Racial slur - {matched_pattern}")
+                self.bot.logger.log(MODULE_NAME, f"Timed out {message.author} for 1 day - racial slur")
+                
+                action_data = {
+                    'action': 'timeout',
+                    'user': str(message.author),
+                    'user_id': message.author.id,
+                    'user_obj': message.author,
+                    'moderator': 'Auto-Mod',
+                    'moderator_obj': message.guild.me,  # Bot is the moderator
+                    'reason': f"Racial slur: {matched_pattern}",
+                    'duration': '1 day'
+                }
+                await self.log_mod_action(action_data)
+            except Exception as e:
+                self.bot.logger.error(MODULE_NAME, "Failed to timeout user", e)
+            return
+        
+        # Other violations = strike system
+        strike_count = self.strike_system.add_strike(
+            message.author.id,
+            f"Auto-mod: {violation_type} - {matched_pattern}"
+        )
+        
+        # Send DM to user
+        try:
+            embed = discord.Embed(
+                title="⚠️ Auto-Moderation Warning",
+                description=f"Your message was automatically deleted for violating server rules.",
+                color=0xf04747,
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(name="Violation Type", value=violation_type.replace('_', ' ').title(), inline=True)
+            embed.add_field(name="Strike Count", value=f"{strike_count}/2", inline=True)
             
             if strike_count == 1:
-                # First strike: 1 day timeout (24 hours)
-                timeout_duration = timedelta(days=1)
-                until = discord.utils.utcnow() + timeout_duration
-                
-                try:
-                    await target_user.timeout(until, reason=f"Auto-mod: First strike - {offense_category}" + (" (bot output)" if is_bot_output else ""))
-                    
-                    # Send DM for serious violations only
-                    try:
-                        embed = discord.Embed(
-                            title="⚠️ First Strike - Timeout",
-                            description="You have been timed out for violating server rules.",
-                            color=0xf04747,
-                            timestamp=datetime.utcnow()
-                        )
-                        embed.add_field(name="Action", value="⏰ Timeout (1 day)", inline=True)
-                        embed.add_field(name="Server", value=message.guild.name, inline=True)
-                        
-                        category_names = {
-                            'child_safety': 'Child Safety Violation',
-                            'racial_slur': 'Racial Slur',
-                            'tos_violation': 'Terms of Service Violation'
-                        }
-                        
-                        violation_text = f"🔴 {category_names.get(offense_category, offense_category)}"
-                        if is_bot_output:
-                            violation_text += "\n🤖 Triggered via bot command output"
-                        
-                        embed.add_field(
-                            name="Violation",
-                            value=violation_text,
-                            inline=False
-                        )
-                        
-                        embed.add_field(name="Strike Count", value="⚡ 1/2", inline=True)
-                        embed.add_field(name="Next Offense", value="❌ Permanent ban", inline=True)
-                        
-                        if moderator_role_removed:
-                            embed.add_field(
-                                name="🔴 Role Removed",
-                                value="Your **Moderator** role has been removed due to using a racial slur. This is a severe breach of trust and conduct expectations.",
-                                inline=False
-                            )
-                        
-                        embed.set_footer(text="Automated Moderation System")
-                        
-                        await target_user.send(embed=embed)
-                    except discord.Forbidden:
-                        pass
-                    
-                    # Log action
-                    action_data = {
-                        'action': 'timeout',
-                        'user': str(target_user),
-                        'user_id': target_user.id,
-                        'user_obj': target_user,
-                        'moderator': 'Auto-Mod',
-                        'reason': f'First strike: {self.format_category(offense_category)}' + 
-                                 (' - Moderator role removed' if moderator_role_removed else '') +
-                                 (' (via bot command)' if is_bot_output else ''),
-                        'duration': '1 day',
-                        'strikes': f'{strike_count}/2',
-                        'category': offense_category,
-                        'message_content': full_text,
-                        'triggered_by_bot': is_bot_output
-                    }
-                    await self.log_mod_action(action_data)
-                    
-                except discord.Forbidden:
-                    # Log permission failure
-                    action_data = {
-                        'action': 'permission_failed',
-                        'user': str(target_user),
-                        'user_id': target_user.id,
-                        'user_obj': target_user,
-                        'moderator': 'Auto-Mod',
-                        'reason': f'Failed to timeout user - Missing permissions. First strike: {self.format_category(offense_category)}' + 
-                                 (' - Moderator role removed' if moderator_role_removed else '') +
-                                 (' (via bot command)' if is_bot_output else ''),
-                        'strikes': f'{strike_count}/2',
-                        'category': offense_category,
-                        'message_content': full_text,
-                        'triggered_by_bot': is_bot_output
-                    }
-                    await self.log_mod_action(action_data)
-                    self.bot.logger.error(MODULE_NAME, f"No permission to timeout {target_user}")
+                embed.add_field(
+                    name="⚠️ Warning",
+                    value="This is your first strike. One more strike will result in a permanent ban.",
+                    inline=False
+                )
             
-            elif strike_count >= 2:
-                # Second strike: permanent ban - NO MESSAGE HISTORY DELETION
-                has_elevated_perms = self.has_elevated_permissions(target_user)
-                
-                try:
-                    # Send final DM for serious violations
-                    try:
-                        embed = discord.Embed(
-                            title="❌ Second Strike - Permanent Ban",
-                            description="You have been permanently banned from the server.",
-                            color=0x992d22,
-                            timestamp=datetime.utcnow()
-                        )
-                        embed.add_field(name="Reason", value="Repeated violations of server rules", inline=False)
-                        
-                        category_names = {
-                            'child_safety': 'Child Safety Violation',
-                            'racial_slur': 'Racial Slur',
-                            'tos_violation': 'Terms of Service Violation'
-                        }
-                        
-                        violation_text = f"🔴 {category_names.get(offense_category, offense_category)}"
-                        if is_bot_output:
-                            violation_text += "\n🤖 Triggered via bot command output"
-                        
-                        embed.add_field(
-                            name="Final Violation",
-                            value=violation_text,
-                            inline=False
-                        )
-                        
-                        embed.add_field(name="Strike Count", value="⚡ 2/2", inline=True)
-                        embed.add_field(name="Server", value=message.guild.name, inline=True)
-                        
-                        if moderator_role_removed:
-                            embed.add_field(
-                                name="🔴 Role Removed",
-                                value="Your **Moderator** role was removed during your first strike for using a racial slur.",
-                                inline=False
-                            )
-                        
-                        embed.set_footer(text="Automated Moderation System")
-                        
-                        await target_user.send(embed=embed)
-                    except discord.Forbidden:
-                        pass
-                    
-                    # Ban user WITHOUT deleting message history
-                    await target_user.ban(
-                        reason=f"Auto-mod: Second strike - {offense_category} violation" + (" (bot output)" if is_bot_output else ""),
-                        delete_message_days=0
-                    )
-                    
-                    # Log action
-                    action_data = {
-                        'action': 'ban',
-                        'user': str(target_user),
-                        'user_id': target_user.id,
-                        'user_obj': target_user,
-                        'moderator': 'Auto-Mod',
-                        'reason': f'Second strike: Repeated {offense_category} violations' + 
-                                 (' (Staff member)' if has_elevated_perms else '') +
-                                 (' - Moderator role was removed on first strike' if moderator_role_removed else '') +
-                                 (' (via bot command)' if is_bot_output else ''),
-                        'strikes': f'{strike_count}/2',
-                        'category': offense_category,
-                        'message_content': full_text,
-                        'triggered_by_bot': is_bot_output
-                    }
-                    await self.log_mod_action(action_data)
-                    
-                except discord.Forbidden:
-                    # Log permission failure
-                    action_data = {
-                        'action': 'permission_failed',
-                        'user': str(target_user),
-                        'user_id': target_user.id,
-                        'user_obj': target_user,
-                        'moderator': 'Auto-Mod',
-                        'reason': f'Failed to ban user - Missing permissions. Second strike: {offense_category} violation' + 
-                                 (' (Staff member)' if has_elevated_perms else '') +
-                                 (' - Moderator role was removed on first strike' if moderator_role_removed else '') +
-                                 (' (via bot command)' if is_bot_output else ''),
-                        'strikes': f'{strike_count}/2',
-                        'category': offense_category,
-                        'message_content': full_text,
-                        'triggered_by_bot': is_bot_output
-                    }
-                    await self.log_mod_action(action_data)
-                    self.bot.logger.error(MODULE_NAME, f"No permission to ban {target_user}")
+            embed.set_footer(text=f"Server: {message.guild.name}")
+            await message.author.send(embed=embed)
+        except discord.Forbidden:
+            pass
         
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Error handling auto-mod violation", e)
+        # Ban on second strike
+        if strike_count >= 2:
+            try:
+                await message.author.ban(reason=f"Auto-mod: Second strike - {violation_type}")
+                self.bot.logger.log(MODULE_NAME, f"BANNED {message.author} after second strike")
+                
+                action_data = {
+                    'action': 'ban',
+                    'user': str(message.author),
+                    'user_id': message.author.id,
+                    'user_obj': message.author,
+                    'moderator': 'Auto-Mod',
+                    'moderator_obj': message.guild.me,  # Bot is the moderator
+                    'reason': f"Second strike: {violation_type}"
+                }
+                await self.log_mod_action(action_data)
+                await self.log_mod_action(action_data)
+            except Exception as e:
+                self.bot.logger.error(MODULE_NAME, "Failed to ban user after second strike", e)
 
 
 def setup(bot):
-    """Setup function called by main bot to initialize this module"""
-    bot.logger.log(MODULE_NAME, "Setting up moderation module")
+    """Setup function called by main.py"""
     
     moderation_manager = ModerationManager(bot)
-    bot.moderation_manager = moderation_manager
     
-    @bot.listen('on_message')
-    async def moderation_on_message(message):
-        """Handle auto-mod message filtering"""
-        # Check if this is a bot message that might be from a command
+    # Event listeners
+    @bot.event
+    async def on_message(message):
+        """Auto-mod message checking"""
         if message.author.bot:
-            # Look up if this is in response to a user command
-            # Check reference (reply) or recent command cache
-            triggered_by = None
-            
-            # If message is a reply, check if replying to a user
-            if message.reference and message.reference.resolved:
-                referenced = message.reference.resolved
-                if not referenced.author.bot:
-                    triggered_by = referenced.author
-            
-            # If we found a triggering user, check for violations
-            if triggered_by:
-                await moderation_manager.handle_auto_mod_violation(message, triggered_by_user=triggered_by)
-            # Otherwise just check the bot message itself (might be forwarded content)
-            else:
-                await moderation_manager.handle_auto_mod_violation(message)
-        else:
-            # Regular user message
-            await moderation_manager.handle_auto_mod_violation(message)
+            await bot.process_commands(message)
+            return
+        
+        if not message.guild:
+            await bot.process_commands(message)
+            return
+        
+        # Check message content
+        violation_type, matched_pattern = await moderation_manager.check_content(message.content)
+        
+        if violation_type:
+            await moderation_manager.handle_violation(message, violation_type, matched_pattern)
+            return
+        
+        # Check embeds
+        for embed in message.embeds:
+            if embed.description:
+                violation_type, matched_pattern = await moderation_manager.check_content(embed.description)
+                if violation_type:
+                    await moderation_manager.handle_violation(message, violation_type, matched_pattern)
+                    return
+        
+        await bot.process_commands(message)
     
-    @bot.listen('on_member_remove')
+    @bot.event
     async def on_member_remove(member):
-        """Save member roles when they leave"""
+        """Save roles when member leaves"""
         moderation_manager.role_persistence.save_member_roles(member)
     
-    @bot.listen('on_member_join')
+    @bot.event
     async def on_member_join(member):
-        """Restore member roles when they rejoin"""
-        await asyncio.sleep(1)
+        """Restore roles when member rejoins"""
         await moderation_manager.role_persistence.restore_member_roles(member)
+    
+    # ==================== MODERATION COMMANDS ====================
+    
+    @bot.tree.command(name="ban", description="Ban a member from the server")
+    @app_commands.describe(
+        user="User to ban (mention, ID, or username)",
+        reason="Reason for ban",
+        delete_days="Days of messages to delete (0-7)"
+    )
+    @app_commands.default_permissions(ban_members=True)
+    async def ban(interaction: discord.Interaction, user: discord.User, 
+                  reason: Optional[str] = "No reason provided", delete_days: Optional[int] = 1):
+        """Ban a user (works even if they're not in the server)"""
+        if not interaction.user.guild_permissions.ban_members:
+            await interaction.response.send_message("❌ You don't have permission to ban members.", ephemeral=True)
+            return
+        
+        if user == interaction.user:
+            await interaction.response.send_message("❌ You cannot ban yourself.", ephemeral=True)
+            return
+        
+        if user == bot.user:
+            await interaction.response.send_message("❌ I cannot ban myself.", ephemeral=True)
+            return
+        
+        # Check if user is a member in the server
+        member = interaction.guild.get_member(user.id)
+        if member:
+            # If they're in the server, check role hierarchy
+            if member.top_role >= interaction.user.top_role and interaction.user != interaction.guild.owner:
+                await interaction.response.send_message("❌ You cannot ban someone with a higher or equal role.", ephemeral=True)
+                return
+        
+        delete_days = max(0, min(7, delete_days))
+        
+        try:
+            # Send DM before banning
+            try:
+                embed = discord.Embed(
+                    title="🔨 You have been banned",
+                    description=f"You have been banned from **{interaction.guild.name}**",
+                    color=0x992d22,
+                    timestamp=datetime.utcnow()
+                )
+                embed.add_field(name="Reason", value=reason, inline=False)
+                embed.add_field(name="Moderator", value=str(interaction.user), inline=True)
+                await user.send(embed=embed)
+            except discord.Forbidden:
+                pass
+            
+            # Ban the user
+            await interaction.guild.ban(user, reason=f"{reason} - By {interaction.user}", delete_message_days=delete_days)
+            
+            # Log action
+            action_data = {
+                'action': 'ban',
+                'user': str(user),
+                'user_id': user.id,
+                'user_obj': user,
+                'moderator': str(interaction.user),
+                'moderator_obj': interaction.user,
+                'reason': reason
+            }
+            await moderation_manager.log_mod_action(action_data)
+            
+            # Respond
+            embed = discord.Embed(
+                title="✅ User Banned",
+                description=f"**{user}** has been banned from the server.",
+                color=0x992d22,
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            embed.add_field(name="Messages Deleted", value=f"{delete_days} days", inline=True)
+            
+            await interaction.response.send_message(embed=embed)
+            bot.logger.log(MODULE_NAME, f"{interaction.user} banned {user}")
+            
+        except discord.NotFound:
+            await interaction.response.send_message("❌ User not found.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ I don't have permission to ban this user.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message("❌ An error occurred while trying to ban the user.", ephemeral=True)
+            bot.logger.error(MODULE_NAME, "Ban command failed", e)
+    
+    @bot.tree.command(name="unban", description="Unban a user from the server")
+    @app_commands.describe(
+        user_id="User ID to unban",
+        reason="Reason for unban"
+    )
+    @app_commands.default_permissions(ban_members=True)
+    async def unban(interaction: discord.Interaction, user_id: str, reason: Optional[str] = "No reason provided"):
+        """Unban a user"""
+        if not interaction.user.guild_permissions.ban_members:
+            await interaction.response.send_message("❌ You don't have permission to unban members.", ephemeral=True)
+            return
+        
+        try:
+            user_id_int = int(user_id)
+            user = await bot.fetch_user(user_id_int)
+            
+            await interaction.guild.unban(user, reason=f"{reason} - By {interaction.user}")
+            
+            action_data = {
+                'action': 'unban',
+                'user': str(user),
+                'user_id': user.id,
+                'user_obj': user,
+                'moderator': str(interaction.user),
+                'moderator_obj': interaction.user,
+                'reason': reason
+            }
+            await moderation_manager.log_mod_action(action_data)
+            
+            embed = discord.Embed(
+                title="✅ User Unbanned",
+                description=f"**{user}** has been unbanned from the server.",
+                color=0x2ecc71,
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            
+            await interaction.response.send_message(embed=embed)
+            bot.logger.log(MODULE_NAME, f"{interaction.user} unbanned {user}")
+            
+        except ValueError:
+            await interaction.response.send_message("❌ Invalid user ID provided.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.response.send_message("❌ User not found or not banned.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message("❌ An error occurred while trying to unban the user.", ephemeral=True)
+            bot.logger.error(MODULE_NAME, "Unban command failed", e)
     
     @bot.tree.command(name="kick", description="Kick a member from the server")
     @app_commands.describe(
         member="Member to kick",
-        reason="Reason for kicking"
+        reason="Reason for kick"
     )
     @app_commands.default_permissions(kick_members=True)
     async def kick(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided"):
-        """Kick command"""
+        """Kick a member"""
         if not interaction.user.guild_permissions.kick_members:
             await interaction.response.send_message("❌ You don't have permission to kick members.", ephemeral=True)
             return
@@ -734,13 +685,27 @@ def setup(bot):
             await interaction.response.send_message("❌ I cannot kick myself.", ephemeral=True)
             return
         
-        if member.top_role >= interaction.user.top_role:
-            await interaction.response.send_message("❌ You cannot kick members with equal or higher roles.", ephemeral=True)
+        if member.top_role >= interaction.user.top_role and interaction.user != interaction.guild.owner:
+            await interaction.response.send_message("❌ You cannot kick someone with a higher or equal role.", ephemeral=True)
             return
         
         try:
-            moderation_manager.role_persistence.save_member_roles(member)
-            await member.kick(reason=reason)
+            # Send DM before kicking
+            try:
+                embed = discord.Embed(
+                    title="👢 You have been kicked",
+                    description=f"You have been kicked from **{interaction.guild.name}**",
+                    color=0xe67e22,
+                    timestamp=datetime.utcnow()
+                )
+                embed.add_field(name="Reason", value=reason, inline=False)
+                embed.add_field(name="Moderator", value=str(interaction.user), inline=True)
+                embed.set_footer(text="You can rejoin if you have an invite link")
+                await member.send(embed=embed)
+            except discord.Forbidden:
+                pass
+            
+            await member.kick(reason=f"{reason} - By {interaction.user}")
             
             action_data = {
                 'action': 'kick',
@@ -748,109 +713,37 @@ def setup(bot):
                 'user_id': member.id,
                 'user_obj': member,
                 'moderator': str(interaction.user),
+                'moderator_obj': interaction.user,
                 'reason': reason
             }
-            
             await moderation_manager.log_mod_action(action_data)
             
             embed = discord.Embed(
                 title="✅ Member Kicked",
                 description=f"**{member}** has been kicked from the server.",
-                color=0xff9800,
+                color=0xe67e22,
                 timestamp=datetime.utcnow()
             )
             embed.add_field(name="Reason", value=reason, inline=False)
             embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            embed.set_footer(text="Roles will be restored if they rejoin")
             
             await interaction.response.send_message(embed=embed)
             bot.logger.log(MODULE_NAME, f"{interaction.user} kicked {member}")
             
-        except discord.Forbidden:
-            await interaction.response.send_message("❌ I don't have permission to kick that member.", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message("❌ An error occurred while trying to kick the member.", ephemeral=True)
             bot.logger.error(MODULE_NAME, "Kick command failed", e)
     
-    @bot.tree.command(name="ban", description="Ban a member from the server")
-    @app_commands.describe(
-        member="Member to ban",
-        reason="Reason for banning",
-        delete_message_days="Number of days of message history to delete (0-7)"
-    )
-    @app_commands.default_permissions(ban_members=True)
-    async def ban(interaction: discord.Interaction, member: discord.Member, 
-                 reason: Optional[str] = "No reason provided", 
-                 delete_message_days: Optional[int] = 0):
-        """Ban command"""
-        if not interaction.user.guild_permissions.ban_members:
-            await interaction.response.send_message("❌ You don't have permission to ban members.", ephemeral=True)
-            return
-        
-        if member == interaction.user:
-            await interaction.response.send_message("❌ You cannot ban yourself.", ephemeral=True)
-            return
-        
-        if member == bot.user:
-            await interaction.response.send_message("❌ I cannot ban myself.", ephemeral=True)
-            return
-        
-        if member.top_role >= interaction.user.top_role:
-            await interaction.response.send_message("❌ You cannot ban members with equal or higher roles.", ephemeral=True)
-            return
-        
-        delete_days = max(0, min(7, delete_message_days or 0))
-        
-        try:
-            moderation_manager.role_persistence.save_member_roles(member)
-            await member.ban(reason=reason, delete_message_days=delete_days)
-            
-            action_data = {
-                'action': 'ban',
-                'user': str(member),
-                'user_id': member.id,
-                'user_obj': member,
-                'moderator': str(interaction.user),
-                'reason': reason
-            }
-            
-            if delete_days > 0:
-                action_data['message_deletion'] = f'{delete_days} days'
-            
-            await moderation_manager.log_mod_action(action_data)
-            
-            embed = discord.Embed(
-                title="✅ Member Banned",
-                description=f"**{member}** has been banned from the server.",
-                color=0x992d22,
-                timestamp=datetime.utcnow()
-            )
-            embed.add_field(name="Reason", value=reason, inline=False)
-            if delete_days > 0:
-                embed.add_field(name="Message Deletion", value=f"{delete_days} days", inline=True)
-            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            embed.set_footer(text="Roles will be restored if ban is lifted and they rejoin")
-            
-            await interaction.response.send_message(embed=embed)
-            bot.logger.log(MODULE_NAME, f"{interaction.user} banned {member}")
-            
-        except discord.Forbidden:
-            await interaction.response.send_message("❌ I don't have permission to ban that member.", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message("❌ An error occurred while trying to ban the member.", ephemeral=True)
-            bot.logger.error(MODULE_NAME, "Ban command failed", e)
-    
     @bot.tree.command(name="timeout", description="Timeout a member")
     @app_commands.describe(
         member="Member to timeout",
-        duration_minutes="Duration in minutes (default: 60)",
+        duration="Duration in minutes",
         reason="Reason for timeout"
     )
     @app_commands.default_permissions(moderate_members=True)
-    async def timeout(interaction: discord.Interaction, member: discord.Member,
-                     duration_minutes: Optional[int] = 60,
-                     reason: Optional[str] = "No reason provided"):
-        """Timeout command"""
+    async def timeout(interaction: discord.Interaction, member: discord.Member, 
+                     duration: int, reason: Optional[str] = "No reason provided"):
+        """Timeout a member"""
         if not interaction.user.guild_permissions.moderate_members:
             await interaction.response.send_message("❌ You don't have permission to timeout members.", ephemeral=True)
             return
@@ -863,16 +756,13 @@ def setup(bot):
             await interaction.response.send_message("❌ I cannot timeout myself.", ephemeral=True)
             return
         
-        if member.top_role >= interaction.user.top_role:
-            await interaction.response.send_message("❌ You cannot timeout members with equal or higher roles.", ephemeral=True)
+        if duration < 1 or duration > 40320:  # Max 28 days
+            await interaction.response.send_message("❌ Duration must be between 1 minute and 28 days (40320 minutes).", ephemeral=True)
             return
         
-        duration_minutes = max(1, min(40320, duration_minutes or 60))
-        duration = timedelta(minutes=duration_minutes)
-        until = discord.utils.utcnow() + duration
-        
         try:
-            await member.timeout(until, reason=reason)
+            timeout_until = datetime.utcnow() + timedelta(minutes=duration)
+            await member.timeout(timeout_until, reason=f"{reason} - By {interaction.user}")
             
             action_data = {
                 'action': 'timeout',
@@ -880,43 +770,67 @@ def setup(bot):
                 'user_id': member.id,
                 'user_obj': member,
                 'moderator': str(interaction.user),
+                'moderator_obj': interaction.user,
                 'reason': reason,
-                'duration': f'{duration_minutes} minutes'
+                'duration': f"{duration} minutes"
             }
-            
             await moderation_manager.log_mod_action(action_data)
             
             embed = discord.Embed(
                 title="✅ Member Timed Out",
-                description=f"**{member}** has been timed out.",
-                color=0xf04747,
+                description=f"**{member}** has been timed out for **{duration}** minutes.",
+                color=0xe74c3c,
                 timestamp=datetime.utcnow()
             )
-            embed.add_field(name="Duration", value=f"{duration_minutes} minutes", inline=True)
             embed.add_field(name="Reason", value=reason, inline=False)
             embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            embed.add_field(name="Duration", value=f"{duration} minutes", inline=True)
             
             await interaction.response.send_message(embed=embed)
-            bot.logger.log(MODULE_NAME, f"{interaction.user} timed out {member} for {duration_minutes} minutes")
+            bot.logger.log(MODULE_NAME, f"{interaction.user} timed out {member} for {duration} minutes")
             
-        except discord.Forbidden:
-            await interaction.response.send_message("❌ I don't have permission to timeout that member.", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message("❌ An error occurred while trying to timeout the member.", ephemeral=True)
             bot.logger.error(MODULE_NAME, "Timeout command failed", e)
     
-    @bot.tree.command(name="mute", description="Mute a member (alias for timeout)")
+    @bot.tree.command(name="untimeout", description="Remove timeout from a member")
+    @app_commands.describe(member="Member to remove timeout from")
+    @app_commands.default_permissions(moderate_members=True)
+    async def untimeout(interaction: discord.Interaction, member: discord.Member):
+        """Remove timeout from a member"""
+        if not interaction.user.guild_permissions.moderate_members:
+            await interaction.response.send_message("❌ You don't have permission to remove timeouts.", ephemeral=True)
+            return
+        
+        try:
+            await member.timeout(None, reason=f"Timeout removed by {interaction.user}")
+            
+            embed = discord.Embed(
+                title="✅ Timeout Removed",
+                description=f"**{member}**'s timeout has been removed.",
+                color=0x2ecc71,
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            
+            await interaction.response.send_message(embed=embed)
+            bot.logger.log(MODULE_NAME, f"{interaction.user} removed timeout from {member}")
+            
+        except Exception as e:
+            await interaction.response.send_message("❌ An error occurred while trying to remove the timeout.", ephemeral=True)
+            bot.logger.error(MODULE_NAME, "Untimeout command failed", e)
+    
+    @bot.tree.command(name="mute", description="Mute a member")
     @app_commands.describe(
         member="Member to mute",
-        duration_minutes="Duration in minutes (default: 60)",
-        reason="Reason for mute"
+        reason="Reason for mute",
+        duration="Duration in minutes (optional)"
     )
-    @app_commands.default_permissions(moderate_members=True)
-    async def mute(interaction: discord.Interaction, member: discord.Member,
-                   duration_minutes: Optional[int] = 60,
-                   reason: Optional[str] = "No reason provided"):
-        """Mute command (same as timeout)"""
-        if not interaction.user.guild_permissions.moderate_members:
+    @app_commands.default_permissions(manage_roles=True)
+    async def mute(interaction: discord.Interaction, member: discord.Member, 
+                   reason: Optional[str] = "No reason provided", duration: Optional[int] = None):
+        """Mute a member"""
+        if not interaction.user.guild_permissions.manage_roles:
             await interaction.response.send_message("❌ You don't have permission to mute members.", ephemeral=True)
             return
         
@@ -928,94 +842,369 @@ def setup(bot):
             await interaction.response.send_message("❌ I cannot mute myself.", ephemeral=True)
             return
         
-        if member.top_role >= interaction.user.top_role:
-            await interaction.response.send_message("❌ You cannot mute members with equal or higher roles.", ephemeral=True)
-            return
-        
-        duration_minutes = max(1, min(40320, duration_minutes or 60))
-        duration = timedelta(minutes=duration_minutes)
-        until = discord.utils.utcnow() + duration
-        
         try:
-            await member.timeout(until, reason=reason)
+            mute_role = await moderation_manager.mute_manager.get_or_create_mute_role(interaction.guild)
+            if not mute_role:
+                await interaction.response.send_message("❌ Failed to get or create Muted role.", ephemeral=True)
+                return
+            
+            await member.add_roles(mute_role, reason=f"{reason} - By {interaction.user}")
+            
+            # Track mute
+            moderation_manager.mute_manager.add_mute(
+                interaction.guild.id,
+                member.id,
+                reason,
+                duration * 60 if duration else None,
+                interaction.user
+            )
             
             action_data = {
-                'action': 'timeout',
+                'action': 'mute',
                 'user': str(member),
                 'user_id': member.id,
                 'user_obj': member,
                 'moderator': str(interaction.user),
-                'reason': reason,
-                'duration': f'{duration_minutes} minutes'
+                'moderator_obj': interaction.user,
+                'reason': reason
             }
+            if duration:
+                action_data['duration'] = f"{duration} minutes"
             
             await moderation_manager.log_mod_action(action_data)
             
             embed = discord.Embed(
                 title="✅ Member Muted",
                 description=f"**{member}** has been muted.",
-                color=0xf04747,
+                color=0xf39c12,
                 timestamp=datetime.utcnow()
             )
-            embed.add_field(name="Duration", value=f"{duration_minutes} minutes", inline=True)
             embed.add_field(name="Reason", value=reason, inline=False)
             embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            if duration:
+                embed.add_field(name="Duration", value=f"{duration} minutes", inline=True)
             
             await interaction.response.send_message(embed=embed)
-            bot.logger.log(MODULE_NAME, f"{interaction.user} muted {member} for {duration_minutes} minutes")
+            bot.logger.log(MODULE_NAME, f"{interaction.user} muted {member}")
             
-        except discord.Forbidden:
-            await interaction.response.send_message("❌ I don't have permission to mute that member.", ephemeral=True)
+            # Auto-unmute after duration
+            if duration:
+                await asyncio.sleep(duration * 60)
+                if mute_role in member.roles:
+                    await member.remove_roles(mute_role, reason="Mute duration expired")
+                    moderation_manager.mute_manager.remove_mute(interaction.guild.id, member.id)
+                    bot.logger.log(MODULE_NAME, f"Auto-unmuted {member} after {duration} minutes")
+            
         except Exception as e:
             await interaction.response.send_message("❌ An error occurred while trying to mute the member.", ephemeral=True)
             bot.logger.error(MODULE_NAME, "Mute command failed", e)
     
-    @bot.tree.command(name="purge", description="Delete a number of messages")
+    @bot.tree.command(name="unmute", description="Unmute a member")
+    @app_commands.describe(member="Member to unmute")
+    @app_commands.default_permissions(manage_roles=True)
+    async def unmute(interaction: discord.Interaction, member: discord.Member):
+        """Unmute a member"""
+        if not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message("❌ You don't have permission to unmute members.", ephemeral=True)
+            return
+        
+        try:
+            mute_role = discord.utils.get(interaction.guild.roles, name="Muted")
+            if not mute_role or mute_role not in member.roles:
+                await interaction.response.send_message("❌ This member is not muted.", ephemeral=True)
+                return
+            
+            await member.remove_roles(mute_role, reason=f"Unmuted by {interaction.user}")
+            moderation_manager.mute_manager.remove_mute(interaction.guild.id, member.id)
+            
+            action_data = {
+                'action': 'unmute',
+                'user': str(member),
+                'user_id': member.id,
+                'user_obj': member,
+                'moderator': str(interaction.user),
+                'moderator_obj': interaction.user,
+                'reason': 'Manual unmute'
+            }
+            await moderation_manager.log_mod_action(action_data)
+            
+            embed = discord.Embed(
+                title="✅ Member Unmuted",
+                description=f"**{member}** has been unmuted.",
+                color=0x2ecc71,
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            
+            await interaction.response.send_message(embed=embed)
+            bot.logger.log(MODULE_NAME, f"{interaction.user} unmuted {member}")
+            
+        except Exception as e:
+            await interaction.response.send_message("❌ An error occurred while trying to unmute the member.", ephemeral=True)
+            bot.logger.error(MODULE_NAME, "Unmute command failed", e)
+    
+    @bot.tree.command(name="softban", description="Softban a member (ban then immediately unban to delete messages)")
+    @app_commands.describe(
+        member="Member to softban",
+        reason="Reason for softban",
+        delete_days="Days of messages to delete (0-7)"
+    )
+    @app_commands.default_permissions(ban_members=True)
+    async def softban(interaction: discord.Interaction, member: discord.Member, 
+                      reason: Optional[str] = "No reason provided", delete_days: Optional[int] = 1):
+        """Softban a member"""
+        if not interaction.user.guild_permissions.ban_members:
+            await interaction.response.send_message("❌ You don't have permission to softban members.", ephemeral=True)
+            return
+        
+        if member == interaction.user:
+            await interaction.response.send_message("❌ You cannot softban yourself.", ephemeral=True)
+            return
+        
+        if member == bot.user:
+            await interaction.response.send_message("❌ I cannot softban myself.", ephemeral=True)
+            return
+        
+        delete_days = max(0, min(7, delete_days))
+        
+        try:
+            # Ban then unban
+            await member.ban(reason=f"Softban: {reason} - By {interaction.user}", delete_message_days=delete_days)
+            await interaction.guild.unban(member, reason=f"Softban unban - By {interaction.user}")
+            
+            action_data = {
+                'action': 'softban',
+                'user': str(member),
+                'user_id': member.id,
+                'user_obj': member,
+                'moderator': str(interaction.user),
+                'moderator_obj': interaction.user,
+                'reason': reason
+            }
+            await moderation_manager.log_mod_action(action_data)
+            
+            embed = discord.Embed(
+                title="✅ Member Softbanned",
+                description=f"**{member}** has been softbanned (messages deleted, can rejoin).",
+                color=0x992d22,
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            embed.add_field(name="Messages Deleted", value=f"{delete_days} days", inline=True)
+            
+            await interaction.response.send_message(embed=embed)
+            bot.logger.log(MODULE_NAME, f"{interaction.user} softbanned {member}")
+            
+        except Exception as e:
+            await interaction.response.send_message("❌ An error occurred while trying to softban the member.", ephemeral=True)
+            bot.logger.error(MODULE_NAME, "Softban command failed", e)
+    
+    @bot.tree.command(name="purge", description="Delete multiple messages")
     @app_commands.describe(
         amount="Number of messages to delete (1-100)",
-        user="Only delete messages from this user (optional)"
+        user="Optional: Only delete messages from this user"
     )
     @app_commands.default_permissions(manage_messages=True)
     async def purge(interaction: discord.Interaction, amount: int, user: Optional[discord.Member] = None):
-        """Purge messages command"""
+        """Purge messages"""
         if not interaction.user.guild_permissions.manage_messages:
-            await interaction.response.send_message("❌ You don't have permission to manage messages.", ephemeral=True)
+            await interaction.response.send_message("❌ You don't have permission to purge messages.", ephemeral=True)
             return
         
-        amount = max(1, min(100, amount))
+        if amount < 1 or amount > 100:
+            await interaction.response.send_message("❌ Amount must be between 1 and 100.", ephemeral=True)
+            return
+        
+        await interaction.response.defer(ephemeral=True)
         
         try:
-            await interaction.response.defer(ephemeral=True)
-            
-            def check(msg):
-                return user is None or msg.author == user
+            def check(m):
+                if user:
+                    return m.author.id == user.id
+                return True
             
             deleted = await interaction.channel.purge(limit=amount, check=check)
             
-            action_data = {
-                'action': 'purge',
-                'channel': interaction.channel.mention,
-                'moderator': str(interaction.user),
-                'user': str(interaction.user),
-                'user_id': interaction.user.id,
-                'user_obj': interaction.user,
-                'messages_deleted': len(deleted),
-                'target_user': str(user) if user else 'All users',
-                'reason': f"Purged {len(deleted)} messages" + (f" from {user}" if user else "")
-            }
-            
-            await moderation_manager.log_mod_action(action_data)
-            
-            await interaction.followup.send(
-                f"✅ Deleted {len(deleted)} messages" + 
-                (f" from {user}" if user else ""),
-                ephemeral=True
+            embed = discord.Embed(
+                title="✅ Messages Purged",
+                description=f"Deleted **{len(deleted)}** messages{f' from {user.mention}' if user else ''}.",
+                color=0x2ecc71,
+                timestamp=datetime.utcnow()
             )
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            embed.add_field(name="Channel", value=interaction.channel.mention, inline=True)
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
             bot.logger.log(MODULE_NAME, f"{interaction.user} purged {len(deleted)} messages")
             
         except Exception as e:
             await interaction.followup.send("❌ An error occurred while trying to purge messages.", ephemeral=True)
             bot.logger.error(MODULE_NAME, "Purge command failed", e)
+    
+    @bot.tree.command(name="slowmode", description="Set channel slowmode")
+    @app_commands.describe(
+        seconds="Slowmode delay in seconds (0 to disable)",
+        channel="Channel to apply slowmode to (default: current)"
+    )
+    @app_commands.default_permissions(manage_channels=True)
+    async def slowmode(interaction: discord.Interaction, seconds: int, 
+                       channel: Optional[discord.TextChannel] = None):
+        """Set slowmode"""
+        if not interaction.user.guild_permissions.manage_channels:
+            await interaction.response.send_message("❌ You don't have permission to manage channels.", ephemeral=True)
+            return
+        
+        target_channel = channel or interaction.channel
+        
+        if seconds < 0 or seconds > 21600:
+            await interaction.response.send_message("❌ Slowmode must be between 0 and 21600 seconds (6 hours).", ephemeral=True)
+            return
+        
+        try:
+            await target_channel.edit(slowmode_delay=seconds, reason=f"Slowmode set by {interaction.user}")
+            
+            action_data = {
+                'action': 'slowmode',
+                'user': 'N/A',
+                'user_id': 'N/A',
+                'user_obj': None,
+                'moderator': str(interaction.user),
+                'moderator_obj': interaction.user,
+                'reason': f"Slowmode set to {seconds} seconds",
+                'channel': target_channel.mention
+            }
+            await moderation_manager.log_mod_action(action_data)
+            
+            if seconds == 0:
+                embed = discord.Embed(
+                    title="✅ Slowmode Disabled",
+                    description=f"Slowmode has been disabled in {target_channel.mention}.",
+                    color=0x2ecc71
+                )
+            else:
+                embed = discord.Embed(
+                    title="✅ Slowmode Enabled",
+                    description=f"Slowmode set to **{seconds}** seconds in {target_channel.mention}.",
+                    color=0x3498db
+                )
+            
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            
+            await interaction.response.send_message(embed=embed)
+            bot.logger.log(MODULE_NAME, f"{interaction.user} set slowmode to {seconds}s in {target_channel.name}")
+            
+        except Exception as e:
+            await interaction.response.send_message("❌ An error occurred while trying to set slowmode.", ephemeral=True)
+            bot.logger.error(MODULE_NAME, "Slowmode command failed", e)
+    
+    @bot.tree.command(name="lock", description="Lock a channel")
+    @app_commands.describe(
+        channel="Channel to lock (default: current)",
+        reason="Reason for locking"
+    )
+    @app_commands.default_permissions(manage_channels=True)
+    async def lock(interaction: discord.Interaction, 
+                   channel: Optional[discord.TextChannel] = None,
+                   reason: Optional[str] = "No reason provided"):
+        """Lock a channel"""
+        if not interaction.user.guild_permissions.manage_channels:
+            await interaction.response.send_message("❌ You don't have permission to lock channels.", ephemeral=True)
+            return
+        
+        target_channel = channel or interaction.channel
+        
+        try:
+            # Deny send messages for @everyone
+            overwrites = target_channel.overwrites_for(interaction.guild.default_role)
+            overwrites.send_messages = False
+            await target_channel.set_permissions(
+                interaction.guild.default_role,
+                overwrite=overwrites,
+                reason=f"Channel locked by {interaction.user}: {reason}"
+            )
+            
+            action_data = {
+                'action': 'lock',
+                'user': 'N/A',
+                'user_id': 'N/A',
+                'user_obj': None,
+                'moderator': str(interaction.user),
+                'moderator_obj': interaction.user,
+                'reason': reason,
+                'channel': target_channel.mention
+            }
+            await moderation_manager.log_mod_action(action_data)
+            
+            embed = discord.Embed(
+                title="🔒 Channel Locked",
+                description=f"{target_channel.mention} has been locked.",
+                color=0x95a5a6,
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            
+            await interaction.response.send_message(embed=embed)
+            bot.logger.log(MODULE_NAME, f"{interaction.user} locked {target_channel.name}")
+            
+        except Exception as e:
+            await interaction.response.send_message("❌ An error occurred while trying to lock the channel.", ephemeral=True)
+            bot.logger.error(MODULE_NAME, "Lock command failed", e)
+    
+    @bot.tree.command(name="unlock", description="Unlock a channel")
+    @app_commands.describe(
+        channel="Channel to unlock (default: current)",
+        reason="Reason for unlocking"
+    )
+    @app_commands.default_permissions(manage_channels=True)
+    async def unlock(interaction: discord.Interaction, 
+                     channel: Optional[discord.TextChannel] = None,
+                     reason: Optional[str] = "No reason provided"):
+        """Unlock a channel"""
+        if not interaction.user.guild_permissions.manage_channels:
+            await interaction.response.send_message("❌ You don't have permission to unlock channels.", ephemeral=True)
+            return
+        
+        target_channel = channel or interaction.channel
+        
+        try:
+            # Allow send messages for @everyone
+            overwrites = target_channel.overwrites_for(interaction.guild.default_role)
+            overwrites.send_messages = None  # Reset to default
+            await target_channel.set_permissions(
+                interaction.guild.default_role,
+                overwrite=overwrites,
+                reason=f"Channel unlocked by {interaction.user}: {reason}"
+            )
+            
+            action_data = {
+                'action': 'unlock',
+                'user': 'N/A',
+                'user_id': 'N/A',
+                'user_obj': None,
+                'moderator': str(interaction.user),
+                'moderator_obj': interaction.user,
+                'reason': reason,
+                'channel': target_channel.mention
+            }
+            await moderation_manager.log_mod_action(action_data)
+            
+            embed = discord.Embed(
+                title="🔓 Channel Unlocked",
+                description=f"{target_channel.mention} has been unlocked.",
+                color=0x2ecc71,
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            
+            await interaction.response.send_message(embed=embed)
+            bot.logger.log(MODULE_NAME, f"{interaction.user} unlocked {target_channel.name}")
+            
+        except Exception as e:
+            await interaction.response.send_message("❌ An error occurred while trying to unlock the channel.", ephemeral=True)
+            bot.logger.error(MODULE_NAME, "Unlock command failed", e)
     
     @bot.tree.command(name="warn", description="Warn a member")
     @app_commands.describe(
@@ -1059,6 +1248,7 @@ def setup(bot):
                 'user_id': member.id,
                 'user_obj': member,
                 'moderator': str(interaction.user),
+                'moderator_obj': interaction.user,
                 'reason': reason
             }
             
@@ -1133,6 +1323,7 @@ def setup(bot):
                 'user_id': member.id,
                 'user_obj': member,
                 'moderator': str(interaction.user),
+                'moderator_obj': interaction.user,
                 'reason': 'Strikes cleared by administrator'
             }
             
@@ -1199,5 +1390,26 @@ def setup(bot):
         
         embed.set_footer(text=f"Requested by {interaction.user}")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    @bot.tree.command(name="setmodlog", description="Set the moderation log channel")
+    @app_commands.describe(channel="Channel to send moderation logs to")
+    @app_commands.default_permissions(administrator=True)
+    async def set_mod_log(interaction: discord.Interaction, channel: discord.TextChannel):
+        """Set mod log channel"""
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ You need Administrator permission to use this command.", ephemeral=True)
+            return
+        
+        moderation_manager.mod_log_channel_id = channel.id
+        moderation_manager.save_config()
+        
+        embed = discord.Embed(
+            title="✅ Moderation Log Channel Set",
+            description=f"Moderation logs will now be sent to {channel.mention}",
+            color=0x2ecc71
+        )
+        
+        await interaction.response.send_message(embed=embed)
+        bot.logger.log(MODULE_NAME, f"Mod log channel set to {channel.name} by {interaction.user}")
 
     bot.logger.log(MODULE_NAME, "Moderation module setup complete")

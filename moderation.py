@@ -37,7 +37,7 @@ def load_config():
             pass
     # Default config if file doesn't exist
     return {
-        "elevated_roles": ["Moderator", "Admin", "co-owner"],
+        "elevated_roles": ["Moderator", "Admin", "Owner"],
         "moderation": {"min_reason_length": 10, "muted_role_name": "Muted"},
         "channels": {"bot_logs_channel_id": None}
     }
@@ -45,13 +45,13 @@ def load_config():
 CONFIG = load_config()
 
 # Elevated roles for moderation
-ELEVATED_ROLES = CONFIG.get("elevated_roles", ["Moderator", "Admin", "co-owner"])
+ELEVATED_ROLES = CONFIG.get("elevated_roles", ["Moderator", "Admin", "Owner"])
 
 # Minimum reason length
 MIN_REASON_LENGTH = CONFIG.get("moderation", {}).get("min_reason_length", 10)
 
 # Error messages
-ERROR_NO_PERMISSION = "❌ You need a moderation role (Moderator, Admin, or co-owner) to use this command."
+ERROR_NO_PERMISSION = "❌ You need a moderation role (Moderator, Admin, or Owner) to use this command."
 ERROR_REASON_REQUIRED = "❌ You must provide a reason for this action."
 ERROR_REASON_TOO_SHORT = f"❌ Reason must be at least {MIN_REASON_LENGTH} characters long."
 ERROR_CANNOT_ACTION_SELF = "❌ You cannot perform this action on yourself."
@@ -60,7 +60,11 @@ ERROR_HIGHER_ROLE = "❌ You cannot perform this action on someone with a higher
 
 
 def has_elevated_role(member: discord.Member) -> bool:
-    """Check if member has an elevated moderation role"""
+    """Check if member has an elevated moderation role or is the server owner"""
+    # Server owner always has elevated permissions
+    if member.guild.owner_id == member.id:
+        return True
+    
     return any(role.name in ELEVATED_ROLES for role in member.roles)
 
 
@@ -87,7 +91,6 @@ async def send_error_dm(user: discord.User, error_message: str) -> bool:
             color=0xe74c3c,
             timestamp=datetime.utcnow()
         )
-        embed.set_footer(text="Errors are sent privately to avoid channel clutter")
         await user.send(embed=embed)
         return True
     except discord.Forbidden:

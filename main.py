@@ -186,6 +186,10 @@ def load_modules():
     loaded_count = 0
     failed_count = 0
     
+    # Initialize command tracking
+    if not hasattr(bot, '_module_commands'):
+        bot._module_commands = {}
+    
     # NEVER clear commands here - only do it once at startup if needed
     # Commands persist across reloads
     
@@ -207,6 +211,9 @@ def load_modules():
         name = file[:-3]  # Strip .py extension
         
         try:
+            # Track commands before loading
+            commands_before = {cmd.name: cmd for cmd in bot.tree.get_commands()}
+            
             # Reload the module to get fresh code
             if name in sys.modules:
                 module = importlib.reload(sys.modules[name])
@@ -220,6 +227,13 @@ def load_modules():
                     module.setup(bot, register_console_command)
                 else:
                     module.setup(bot)
+                
+                # Track commands added by this module
+                commands_after = {cmd.name: cmd for cmd in bot.tree.get_commands()}
+                new_commands = {cmd_name: cmd for cmd_name, cmd in commands_after.items() if cmd_name not in commands_before}
+                if new_commands:
+                    bot._module_commands[name] = new_commands
+                
                 bot.logger.log("MAIN", f"Loaded module: {name}")
                 loaded_count += 1
             else:
@@ -447,24 +461,49 @@ def setup_console_commands():
         
         print(f"🔄 Reloading {module_name}...")
         try:
+            # First, get list of existing commands from this module
+            existing_commands = {}
+            if hasattr(bot, '_module_commands'):
+                existing_commands = bot._module_commands.get(module_name, {})
+            else:
+                bot._module_commands = {}
+            
+            # Remove existing commands from tree to prevent "already registered" errors
+            removed_count = 0
+            if existing_commands:
+                for cmd_name in list(existing_commands.keys()):
+                    try:
+                        bot.tree.remove_command(cmd_name)
+                        removed_count += 1
+                    except:
+                        pass
+                print(f"  Removed {removed_count} existing command(s)")
+            
+            # Reload the module
             if module_name in sys.modules:
                 module = importlib.reload(sys.modules[module_name])
             else:
                 module = importlib.import_module(module_name)
             
             if hasattr(module, 'setup'):
-                # DON'T clear commands - just re-setup
-                # Commands will be overwritten, not duplicated
+                # Track commands before setup
+                commands_before = {cmd.name: cmd for cmd in bot.tree.get_commands()}
                 
-                # Re-setup the module - only pass register_console_command to dev module
+                # Re-setup the module
                 if module_name == 'dev':
                     module.setup(bot, register_console_command)
                 else:
                     module.setup(bot)
                 
-                # DON'T sync here - commands are already registered from initial startup
-                # They'll be available without syncing
-                print(f"✅ Module '{module_name}' reloaded successfully (no sync needed)")
+                # Track new commands from this module
+                commands_after = {cmd.name: cmd for cmd in bot.tree.get_commands()}
+                new_commands = {name: cmd for name, cmd in commands_after.items() if name not in commands_before}
+                bot._module_commands[module_name] = new_commands
+                
+                if new_commands:
+                    print(f"  Registered {len(new_commands)} command(s): {', '.join(new_commands.keys())}")
+                
+                print(f"✅ Module '{module_name}' reloaded successfully (commands updated, no sync needed)")
             else:
                 print(f"✅ Module '{module_name}' reloaded (no setup function)")
                 

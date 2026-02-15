@@ -787,14 +787,14 @@ icons/
                 return
             
             try:
+                # Get current commands before reload
+                commands_before = {cmd.name for cmd in self.bot.tree.get_commands()}
+                
                 # Reload the module
                 module = importlib.reload(sys.modules[module_name])
                 
                 # Re-run setup if it exists
                 if hasattr(module, 'setup'):
-                    # Clear existing commands for this module ONLY
-                    # Don't clear all commands to avoid rate limits
-                    
                     # Re-setup the module - only pass register_console_command to dev module
                     if module_name == 'dev':
                         # Create a dummy register function for hot-reload
@@ -802,7 +802,34 @@ icons/
                             pass
                         module.setup(self.bot, dummy_register)
                     else:
-                        module.setup(self.bot)
+                        # Get commands after reload to see what this module adds
+                        # Create a temporary tree to see what commands would be added
+                        temp_tree_commands = []
+                        original_add = self.bot.tree.add_command
+                        
+                        def capture_add(command, **kwargs):
+                            temp_tree_commands.append(command.name)
+                            return original_add(command, **kwargs)
+                        
+                        # Temporarily replace add_command to capture new commands
+                        self.bot.tree.add_command = capture_add
+                        
+                        try:
+                            # Now run setup - this will tell us which commands it tries to add
+                            module.setup(self.bot)
+                        except discord.app_commands.errors.CommandAlreadyRegistered as e:
+                            # Extract command name from error message
+                            match = re.search(r"Command '(\w+)' already registered", str(e))
+                            if match:
+                                cmd_name = match.group(1)
+                                # Remove the existing command and try again
+                                self.bot.tree.remove_command(cmd_name)
+                                self.bot.logger.log(MODULE_NAME, f"Removed duplicate command: {cmd_name}")
+                                # Try setup again
+                                module.setup(self.bot)
+                        finally:
+                            # Restore original add_command
+                            self.bot.tree.add_command = original_add
                     
                     # DO NOT SYNC COMMANDS HERE - that's what's causing rate limits
                     # Commands will be available without syncing (they're already registered)

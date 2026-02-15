@@ -1,6 +1,7 @@
 # [file name]: moderation.py
 import discord
 from discord import app_commands
+from discord.ext import commands
 import re
 from datetime import datetime, timedelta
 import asyncio
@@ -480,7 +481,6 @@ class ModerationManager:
                     'moderator_obj': message.guild.me,  # Bot is the moderator
                     'reason': f"Second strike: {violation_type}"
                 }
-                await self.log_mod_action(action_data)
                 await self.log_mod_action(action_data)
             except Exception as e:
                 self.bot.logger.error(MODULE_NAME, "Failed to ban user after second strike", e)
@@ -1411,5 +1411,380 @@ def setup(bot):
         
         await interaction.response.send_message(embed=embed)
         bot.logger.log(MODULE_NAME, f"Mod log channel set to {channel.name} by {interaction.user}")
+    
+    # ==================== TEXT-BASED COMMAND SUPPORT (? prefix) ====================
+    # Add text-based versions of all moderation commands for ? prefix support
+    
+    @bot.command(name="ban")
+    @commands.has_permissions(ban_members=True)
+    async def text_ban(ctx, user: discord.User, delete_days: int = 1, *, reason: str = "No reason provided"):
+        """Ban a user (text command version)"""
+        if user == ctx.author:
+            await ctx.send("❌ You cannot ban yourself.")
+            return
+        if user == bot.user:
+            await ctx.send("❌ I cannot ban myself.")
+            return
+        
+        delete_days = max(0, min(delete_days, 7))
+        
+        try:
+            try:
+                embed = discord.Embed(
+                    title="🔨 Banned from Server",
+                    description=f"You have been banned from **{ctx.guild.name}**.",
+                    color=0x992d22,
+                    timestamp=datetime.utcnow()
+                )
+                embed.add_field(name="Reason", value=reason, inline=False)
+                embed.add_field(name="Moderator", value=str(ctx.author), inline=True)
+                await user.send(embed=embed)
+            except discord.Forbidden:
+                pass
+            
+            await ctx.guild.ban(user, reason=reason, delete_message_days=delete_days)
+            
+            action_data = {
+                'action': 'ban',
+                'user': str(user),
+                'user_id': user.id,
+                'user_obj': user,
+                'moderator': str(ctx.author),
+                'moderator_obj': ctx.author,
+                'reason': reason
+            }
+            await moderation_manager.log_mod_action(action_data)
+            
+            embed = discord.Embed(
+                title="✅ User Banned",
+                description=f"**{user}** has been banned from the server.",
+                color=0x992d22,
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+            embed.add_field(name="Messages Deleted", value=f"Last {delete_days} day(s)", inline=True)
+            
+            await ctx.send(embed=embed)
+            bot.logger.log(MODULE_NAME, f"{ctx.author} banned {user}")
+            
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to ban this user.")
+        except Exception as e:
+            await ctx.send("❌ An error occurred while trying to ban the user.")
+            bot.logger.error(MODULE_NAME, "Ban command failed", e)
+    
+    @bot.command(name="kick")
+    @commands.has_permissions(kick_members=True)
+    async def text_kick(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+        """Kick a member (text command version)"""
+        if member == ctx.author:
+            await ctx.send("❌ You cannot kick yourself.")
+            return
+        if member == bot.user:
+            await ctx.send("❌ I cannot kick myself.")
+            return
+        
+        try:
+            try:
+                embed = discord.Embed(
+                    title="👢 Kicked from Server",
+                    description=f"You have been kicked from **{ctx.guild.name}**.",
+                    color=0xe67e22,
+                    timestamp=datetime.utcnow()
+                )
+                embed.add_field(name="Reason", value=reason, inline=False)
+                embed.add_field(name="Moderator", value=str(ctx.author), inline=True)
+                await member.send(embed=embed)
+            except discord.Forbidden:
+                pass
+            
+            await member.kick(reason=reason)
+            
+            action_data = {
+                'action': 'kick',
+                'user': str(member),
+                'user_id': member.id,
+                'user_obj': member,
+                'moderator': str(ctx.author),
+                'moderator_obj': ctx.author,
+                'reason': reason
+            }
+            await moderation_manager.log_mod_action(action_data)
+            
+            embed = discord.Embed(
+                title="✅ Member Kicked",
+                description=f"**{member}** has been kicked from the server.",
+                color=0xe67e22,
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+            
+            await ctx.send(embed=embed)
+            bot.logger.log(MODULE_NAME, f"{ctx.author} kicked {member}")
+            
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to kick this member.")
+        except Exception as e:
+            await ctx.send("❌ An error occurred while trying to kick the member.")
+            bot.logger.error(MODULE_NAME, "Kick command failed", e)
+    
+    @bot.command(name="warn")
+    @commands.has_permissions(manage_messages=True)
+    async def text_warn(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+        """Warn a member (text command version)"""
+        if member == ctx.author:
+            await ctx.send("❌ You cannot warn yourself.")
+            return
+        if member == bot.user:
+            await ctx.send("❌ I cannot warn myself.")
+            return
+        
+        try:
+            try:
+                embed = discord.Embed(
+                    title="⚠️ Warning",
+                    description=f"You have been warned by a moderator.",
+                    color=0xfaa61a,
+                    timestamp=datetime.utcnow()
+                )
+                embed.add_field(name="Reason", value=reason, inline=False)
+                embed.add_field(name="Moderator", value=str(ctx.author), inline=True)
+                embed.add_field(name="Server", value=ctx.guild.name, inline=True)
+                embed.set_footer(text="Please follow server rules to avoid further action")
+                await member.send(embed=embed)
+            except discord.Forbidden:
+                pass
+            
+            action_data = {
+                'action': 'warn',
+                'user': str(member),
+                'user_id': member.id,
+                'user_obj': member,
+                'moderator': str(ctx.author),
+                'moderator_obj': ctx.author,
+                'reason': reason
+            }
+            await moderation_manager.log_mod_action(action_data)
+            
+            embed = discord.Embed(
+                title="✅ Member Warned",
+                description=f"**{member}** has been warned.",
+                color=0xfaa61a,
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+            
+            await ctx.send(embed=embed)
+            bot.logger.log(MODULE_NAME, f"{ctx.author} warned {member}")
+            
+        except Exception as e:
+            await ctx.send("❌ An error occurred while trying to warn the member.")
+            bot.logger.error(MODULE_NAME, "Warn command failed", e)
+    
+    @bot.command(name="mute")
+    @commands.has_permissions(manage_roles=True)
+    async def text_mute(ctx, member: discord.Member, duration: Optional[str] = None, *, reason: str = "No reason provided"):
+        """Mute a member (text command version)"""
+        if member == ctx.author:
+            await ctx.send("❌ You cannot mute yourself.")
+            return
+        if member == bot.user:
+            await ctx.send("❌ I cannot mute myself.")
+            return
+        
+        duration_seconds = None
+        duration_str = "Permanent"
+        
+        if duration:
+            duration = duration.lower()
+            match = re.match(r'^(\d+)([smhd])$', duration)
+            if match:
+                value, unit = int(match.group(1)), match.group(2)
+                if unit == 's':
+                    duration_seconds = value
+                    duration_str = f"{value} second{'s' if value != 1 else ''}"
+                elif unit == 'm':
+                    duration_seconds = value * 60
+                    duration_str = f"{value} minute{'s' if value != 1 else ''}"
+                elif unit == 'h':
+                    duration_seconds = value * 3600
+                    duration_str = f"{value} hour{'s' if value != 1 else ''}"
+                elif unit == 'd':
+                    duration_seconds = value * 86400
+                    duration_str = f"{value} day{'s' if value != 1 else ''}"
+        
+        try:
+            muted_role = discord.utils.get(ctx.guild.roles, name=moderation_manager.mute_manager.muted_role_name)
+            
+            if not muted_role:
+                muted_role = await ctx.guild.create_role(
+                    name=moderation_manager.mute_manager.muted_role_name,
+                    color=discord.Color.dark_gray(),
+                    reason="Creating Muted role for moderation"
+                )
+                
+                for channel in ctx.guild.channels:
+                    try:
+                        await channel.set_permissions(muted_role, send_messages=False, speak=False)
+                    except:
+                        pass
+            
+            await member.add_roles(muted_role, reason=reason)
+            moderation_manager.mute_manager.add_mute(ctx.guild.id, member.id, reason, ctx.author, duration_seconds)
+            
+            try:
+                embed = discord.Embed(
+                    title="🔇 You Have Been Muted",
+                    description=f"You have been muted in **{ctx.guild.name}**.",
+                    color=0xf39c12,
+                    timestamp=datetime.utcnow()
+                )
+                embed.add_field(name="Reason", value=reason, inline=False)
+                embed.add_field(name="Duration", value=duration_str, inline=True)
+                embed.add_field(name="Moderator", value=str(ctx.author), inline=True)
+                await member.send(embed=embed)
+            except discord.Forbidden:
+                pass
+            
+            action_data = {
+                'action': 'mute',
+                'user': str(member),
+                'user_id': member.id,
+                'user_obj': member,
+                'moderator': str(ctx.author),
+                'moderator_obj': ctx.author,
+                'reason': reason,
+                'duration': duration_str
+            }
+            await moderation_manager.log_mod_action(action_data)
+            
+            embed = discord.Embed(
+                title="✅ Member Muted",
+                description=f"**{member}** has been muted.",
+                color=0xf39c12,
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.add_field(name="Duration", value=duration_str, inline=True)
+            embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+            
+            await ctx.send(embed=embed)
+            bot.logger.log(MODULE_NAME, f"{ctx.author} muted {member} for {duration_str}")
+            
+            if duration_seconds:
+                await asyncio.sleep(duration_seconds)
+                if moderation_manager.mute_manager.is_muted(ctx.guild.id, member.id):
+                    try:
+                        await member.remove_roles(muted_role, reason="Mute duration expired")
+                        moderation_manager.mute_manager.remove_mute(ctx.guild.id, member.id)
+                        bot.logger.log(MODULE_NAME, f"Auto-unmuted {member} after {duration_str}")
+                    except:
+                        pass
+            
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to mute this member.")
+        except Exception as e:
+            await ctx.send("❌ An error occurred while trying to mute the member.")
+            bot.logger.error(MODULE_NAME, "Mute command failed", e)
+    
+    @bot.command(name="unmute")
+    @commands.has_permissions(manage_roles=True)
+    async def text_unmute(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+        """Unmute a member (text command version)"""
+        try:
+            muted_role = discord.utils.get(ctx.guild.roles, name=moderation_manager.mute_manager.muted_role_name)
+            
+            if not muted_role or muted_role not in member.roles:
+                await ctx.send(f"❌ **{member}** is not muted.")
+                return
+            
+            await member.remove_roles(muted_role, reason=reason)
+            moderation_manager.mute_manager.remove_mute(ctx.guild.id, member.id)
+            
+            try:
+                embed = discord.Embed(
+                    title="🔊 You Have Been Unmuted",
+                    description=f"You have been unmuted in **{ctx.guild.name}**.",
+                    color=0x2ecc71,
+                    timestamp=datetime.utcnow()
+                )
+                embed.add_field(name="Reason", value=reason, inline=False)
+                embed.add_field(name="Moderator", value=str(ctx.author), inline=True)
+                await member.send(embed=embed)
+            except discord.Forbidden:
+                pass
+            
+            action_data = {
+                'action': 'unmute',
+                'user': str(member),
+                'user_id': member.id,
+                'user_obj': member,
+                'moderator': str(ctx.author),
+                'moderator_obj': ctx.author,
+                'reason': reason
+            }
+            await moderation_manager.log_mod_action(action_data)
+            
+            embed = discord.Embed(
+                title="✅ Member Unmuted",
+                description=f"**{member}** has been unmuted.",
+                color=0x2ecc71,
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+            
+            await ctx.send(embed=embed)
+            bot.logger.log(MODULE_NAME, f"{ctx.author} unmuted {member}")
+            
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to unmute this member.")
+        except Exception as e:
+            await ctx.send("❌ An error occurred while trying to unmute the member.")
+            bot.logger.error(MODULE_NAME, "Unmute command failed", e)
+    
+    @bot.command(name="purge")
+    @commands.has_permissions(manage_messages=True)
+    async def text_purge(ctx, amount: int, member: Optional[discord.Member] = None):
+        """Purge messages (text command version)"""
+        if amount < 1 or amount > 1000:
+            await ctx.send("❌ Please specify a number between 1 and 1000.")
+            return
+        
+        try:
+            if member:
+                deleted = await ctx.channel.purge(limit=amount + 1, check=lambda m: m.author == member)
+            else:
+                deleted = await ctx.channel.purge(limit=amount + 1)
+            
+            count = len(deleted) - 1
+            
+            action_data = {
+                'action': 'purge',
+                'user': None,
+                'user_id': None,
+                'user_obj': None,
+                'moderator': str(ctx.author),
+                'moderator_obj': ctx.author,
+                'reason': f"Purged {count} message(s)" + (f" from {member}" if member else ""),
+                'channel': ctx.channel.mention,
+                'amount': count
+            }
+            await moderation_manager.log_mod_action(action_data)
+            
+            msg = await ctx.send(f"✅ Deleted {count} message(s)" + (f" from {member.mention}" if member else ""))
+            await asyncio.sleep(3)
+            await msg.delete()
+            
+            bot.logger.log(MODULE_NAME, f"{ctx.author} purged {count} messages in {ctx.channel}")
+            
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to delete messages.")
+        except Exception as e:
+            await ctx.send("❌ An error occurred while trying to purge messages.")
+            bot.logger.error(MODULE_NAME, "Purge command failed", e)
 
-    bot.logger.log(MODULE_NAME, "Moderation module setup complete")
+    bot.logger.log(MODULE_NAME, "Moderation module setup complete (slash + text commands)")

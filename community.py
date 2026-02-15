@@ -134,9 +134,19 @@ class Submission:
     def increment_version(self) -> str:
         """Increment version number and return new version"""
         try:
-            major, minor = map(int, self.version.split('.'))
-            self.version = f"{major + 1}.0"
-        except ValueError:
+            # Handle version strings like "v10" or "10" without dots
+            version_str = self.version.lstrip('v')
+            if '.' in version_str:
+                parts = version_str.split('.')
+                major = int(parts[0])
+                minor = int(parts[1]) if len(parts) > 1 else 0
+                self.version = f"{major + 1}.0"
+            else:
+                # Single number version like "v10"
+                current = int(version_str)
+                self.version = f"{current + 1}.0"
+        except (ValueError, AttributeError):
+            # If parsing fails, append .1
             self.version = f"{self.version}.1"
         self.updated_at = datetime.now().isoformat()
         return self.version
@@ -291,9 +301,18 @@ class SubmissionDatabase:
                     version = detected_version
                 else:
                     try:
-                        major, minor = map(int, latest_version.split('.'))
-                        version = f"{major + 1}.0"
-                    except:
+                        # Handle version strings like "v10" or "10" without dots
+                        version_str = latest_version.lstrip('v')
+                        if '.' in version_str:
+                            parts = version_str.split('.')
+                            major = int(parts[0])
+                            minor = int(parts[1]) if len(parts) > 1 else 0
+                            version = f"{major + 1}.0"
+                        else:
+                            # Single number version like "v10"
+                            current = int(version_str)
+                            version = f"{current + 1}.0"
+                    except (ValueError, AttributeError):
                          version = "2.0"
                          
                 self.data["project_versions"][version_key].append(message_id)

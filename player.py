@@ -274,7 +274,7 @@ def setup(bot):
     # Initialize music players dictionary
     bot.music_players = {}
 
-    @bot.event
+    @bot.listen()
     async def on_voice_state_update(member, before, after):
         """✅ IMPROVED voice state updates for cleanup"""
         if member.id != bot.user.id:

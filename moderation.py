@@ -1,12 +1,13 @@
 # [file name]: moderation.py
 import discord
 from discord import app_commands, ui
-from discord.ext import commands
+from discord.ext import commands, tasks
 import re
 from datetime import datetime, timedelta
 import asyncio
 from typing import Optional
 import json
+import os
 from pathlib import Path
 
 MODULE_NAME = "MODERATION"
@@ -181,10 +182,23 @@ class RolePersistenceManager:
             return {}
     
     def save_roles(self):
-        """Save roles to file"""
+        """Save roles to file atomically"""
         try:
-            with open(self.roles_file, 'w') as f:
-                json.dump(self.role_cache, f, indent=2)
+            import tempfile
+            # Write to temporary file first
+            temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(self.roles_file), suffix='.tmp')
+            try:
+                with os.fdopen(temp_fd, 'w') as f:
+                    json.dump(self.role_cache, f, indent=2)
+                # Atomic replace
+                os.replace(temp_path, self.roles_file)
+            except:
+                # Clean up temp file if something fails
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+                raise
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to save role cache", e)
     
@@ -271,10 +285,23 @@ class StrikeSystem:
             return {}
     
     def save_strikes(self):
-        """Save strikes to file"""
+        """Save strikes to file atomically"""
         try:
-            with open(self.strikes_file, 'w') as f:
-                json.dump(self.strikes, f, indent=2)
+            import tempfile
+            # Write to temporary file first
+            temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(self.strikes_file), suffix='.tmp')
+            try:
+                with os.fdopen(temp_fd, 'w') as f:
+                    json.dump(self.strikes, f, indent=2)
+                # Atomic replace
+                os.replace(temp_path, self.strikes_file)
+            except:
+                # Clean up temp file if something fails
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+                raise
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to save strikes", e)
     
@@ -341,31 +368,72 @@ class MuteManager:
             return {}
     
     def save_mutes(self):
-        """Save mutes to file"""
+        """Save mutes to file atomically"""
         try:
-            with open(self.mutes_file, 'w') as f:
-                json.dump(self.mutes, f, indent=2)
+            import tempfile
+            # Write to temporary file first
+            temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(self.mutes_file), suffix='.tmp')
+            try:
+                with os.fdopen(temp_fd, 'w') as f:
+                    json.dump(self.mutes, f, indent=2)
+                # Atomic replace
+                os.replace(temp_path, self.mutes_file)
+            except:
+                # Clean up temp file if something fails
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+                raise
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to save mutes", e)
     
     def add_mute(self, guild_id, user_id, reason, moderator, duration_seconds=None):
-        """Add a mute record"""
+        """Add a mute record with expiry time for persistent timers"""
         guild_key = str(guild_id)
         user_key = str(user_id)
         
         if guild_key not in self.mutes:
             self.mutes[guild_key] = {}
         
+        expiry_time = None
+        if duration_seconds:
+            expiry_time = (datetime.utcnow() + timedelta(seconds=duration_seconds)).isoformat()
+        
         mute_data = {
             'user_id': user_id,
             'reason': reason,
             'moderator': str(moderator),
             'timestamp': datetime.utcnow().isoformat(),
-            'duration_seconds': duration_seconds
+            'duration_seconds': duration_seconds,
+            'expiry_time': expiry_time
         }
         
         self.mutes[guild_key][user_key] = mute_data
         self.save_mutes()
+    
+    def get_expired_mutes(self):
+        """Get all mutes that have expired"""
+        expired = []
+        now = datetime.utcnow()
+        
+        for guild_key, users in self.mutes.items():
+            for user_key, mute_data in users.items():
+                expiry_time = mute_data.get('expiry_time')
+                if expiry_time:
+                    try:
+                        expiry = datetime.fromisoformat(expiry_time)
+                        if now >= expiry:
+                            expired.append({
+                                'guild_id': int(guild_key),
+                                'user_id': mute_data['user_id'],
+                                'user_key': user_key,
+                                'guild_key': guild_key
+                            })
+                    except (ValueError, AttributeError):
+                        pass
+        
+        return expired
     
     def remove_mute(self, guild_id, user_id):
         """Remove a mute record"""
@@ -823,8 +891,8 @@ def setup(bot):
                 for channel in interaction.guild.channels:
                     try:
                         await channel.set_permissions(muted_role, send_messages=False, speak=False)
-                    except:
-                        pass
+                    except Exception as e:
+                        bot.logger.error(MODULE_NAME, f"Failed to set mute permissions in channel {channel.name}", e)
             
             await member.add_roles(muted_role, reason=reason)
             moderation_manager.mute_manager.add_mute(interaction.guild.id, member.id, reason, interaction.user, duration_seconds)
@@ -876,16 +944,8 @@ def setup(bot):
             
             bot.logger.log(MODULE_NAME, f"{interaction.user} muted {member} for {duration_str}")
             
-            # Schedule unmute if temporary
-            if duration_seconds:
-                await asyncio.sleep(duration_seconds)
-                if moderation_manager.mute_manager.is_muted(interaction.guild.id, member.id):
-                    try:
-                        await member.remove_roles(muted_role, reason="Mute duration expired")
-                        moderation_manager.mute_manager.remove_mute(interaction.guild.id, member.id)
-                        bot.logger.log(MODULE_NAME, f"Auto-unmuted {member} after {duration_str}")
-                    except:
-                        pass
+            # Unmute is now handled by the background task check_expired_mutes
+            # which persists across restarts
             
         except discord.Forbidden:
             try:
@@ -1383,7 +1443,7 @@ def setup(bot):
     
     # ==================== AUTO-MOD MESSAGE SCANNING ====================
     
-    @bot.event
+    @bot.listen()
     async def on_message(message):
         """Auto-mod message scanning"""
         if message.author.bot or not message.guild:
@@ -1463,14 +1523,59 @@ def setup(bot):
     
     # ==================== MEMBER EVENTS ====================
     
-    @bot.event
+    @bot.listen()
     async def on_member_remove(member):
         """Save roles when member leaves"""
         moderation_manager.role_persistence.save_member_roles(member)
     
-    @bot.event
+    @bot.listen()
     async def on_member_join(member):
         """Restore roles when member rejoins"""
         await moderation_manager.role_persistence.restore_member_roles(member)
+    
+    # ==================== MUTE TIMER BACKGROUND TASK ====================
+    
+    @tasks.loop(minutes=1)
+    async def check_expired_mutes():
+        """Background task to check for expired mutes and remove them"""
+        try:
+            expired_mutes = moderation_manager.mute_manager.get_expired_mutes()
+            
+            for mute in expired_mutes:
+                guild = bot.get_guild(mute['guild_id'])
+                if not guild:
+                    continue
+                
+                member = guild.get_member(mute['user_id'])
+                if not member:
+                    # User left server, just remove from records
+                    moderation_manager.mute_manager.remove_mute(mute['guild_id'], mute['user_id'])
+                    continue
+                
+                # Get muted role
+                muted_role_name = CONFIG.get("moderation", {}).get("muted_role_name", "Muted")
+                muted_role = discord.utils.get(guild.roles, name=muted_role_name)
+                
+                if muted_role and muted_role in member.roles:
+                    try:
+                        await member.remove_roles(muted_role, reason="Mute duration expired")
+                        bot.logger.log(MODULE_NAME, f"Auto-unmuted {member} after mute expiry")
+                    except Exception as e:
+                        bot.logger.error(MODULE_NAME, f"Failed to auto-unmute {member}", e)
+                
+                # Remove from records
+                moderation_manager.mute_manager.remove_mute(mute['guild_id'], mute['user_id'])
+        
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "Error in mute expiry checker", e)
+    
+    @check_expired_mutes.before_loop
+    async def before_check_expired_mutes():
+        """Wait for bot to be ready before starting mute checker"""
+        await bot.wait_until_ready()
+    
+    # Start the mute checker
+    check_expired_mutes.start()
+    bot.logger.log(MODULE_NAME, "Started background mute expiry checker")
     
     bot.logger.log(MODULE_NAME, "Moderation module setup complete with oversight integration")

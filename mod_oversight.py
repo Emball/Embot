@@ -5,6 +5,7 @@ from discord.ext import commands, tasks
 from datetime import datetime, timedelta
 import json
 import asyncio
+import os
 from typing import Optional, Dict, List
 import io
 from PIL import Image, ImageDraw, ImageFont
@@ -86,10 +87,23 @@ class ModOversightSystem:
             return default
     
     def save_data(self, filename: str, data):
-        """Save data to JSON file"""
+        """Save data to JSON file atomically"""
         try:
-            with open(filename, 'w') as f:
-                json.dump(data, f, indent=2)
+            import tempfile
+            # Write to temporary file first
+            temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(filename), suffix='.tmp')
+            try:
+                with os.fdopen(temp_fd, 'w') as f:
+                    json.dump(data, f, indent=2)
+                # Atomic replace
+                os.replace(temp_path, filename)
+            except:
+                # Clean up temp file if something fails
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+                raise
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, f"Failed to save {filename}", e)
     
@@ -983,13 +997,13 @@ def setup(bot):
     bot.mod_oversight = oversight
     
     # Register message cache event
-    @bot.event
+    @bot.listen()
     async def on_message(message):
         """Cache messages for context logging"""
         await oversight.cache_message(message)
     
     # Register embed deletion tracking
-    @bot.event
+    @bot.listen()
     async def on_message_delete(message):
         """Track when moderation embeds are deleted"""
         await oversight.handle_embed_deletion(message.id)

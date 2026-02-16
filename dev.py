@@ -10,11 +10,9 @@ import discord
 from discord import app_commands
 import re
 import asyncio
-import time  # ADDED THIS IMPORT
+import time
 import traceback
 import difflib
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
 
 MODULE_NAME = "DEV"
 
@@ -44,97 +42,8 @@ MINOR_THRESHOLD = 20        # Minor features (patch version bump)
 PATCH_THRESHOLD = 1         # Bug fixes (micro version bump)
 
 
-class FileChangeHandler(FileSystemEventHandler):
-    """Handles file system events for hot-reloading with improved filtering"""
-    
-    def __init__(self, dev_manager, loop):
-        self.dev_manager = dev_manager
-        self.loop = loop
-        self.last_reload_time = {}
-        self.reload_cooldown = 5  # Increased to 5 seconds
-        self.file_states = {}  # Track file size and mtime to detect real changes
-        self.last_event_time = 0
-        self.event_cooldown = 1  # Minimum 1 second between events for same file
-    
-    def should_ignore_file(self, file_path):
-        """Check if file should be ignored for hot-reload"""
-        file_name = file_path.name
-        
-        # Ignore all excluded files
-        for exclude in EXCLUDE_FILES:
-            if exclude.startswith('*'):
-                if file_name.endswith(exclude[1:]):
-                    return True
-            elif file_name == exclude:
-                return True
-        
-        # Ignore directories
-        path_str = str(file_path)
-        for exclude_dir in EXCLUDE_DIRS:
-            if exclude_dir in path_str:
-                return True
-        
-        return False
-    
-    def on_modified(self, event):
-        """Handle file modification events with better filtering"""
-        if event.is_directory:
-            return
-        
-        file_path = Path(event.src_path)
-        
-        # Only track Python files in the bot directory
-        if file_path.suffix != '.py':
-            return
-        
-        # Use the improved ignore check
-        if self.should_ignore_file(file_path):
-            return
-        
-        # Check if file actually changed (size or mtime)
-        try:
-            current_stat = file_path.stat()
-            current_size = current_stat.st_size
-            current_mtime = current_stat.st_mtime
-            
-            # Get previous state
-            prev_state = self.file_states.get(str(file_path))
-            
-            # If we have a previous state and nothing changed, ignore
-            if prev_state and prev_state[0] == current_size and prev_state[1] == current_mtime:
-                return
-            
-            # Update state
-            self.file_states[str(file_path)] = (current_size, current_mtime)
-            
-        except Exception as e:
-            self.dev_manager.bot.logger.log(MODULE_NAME, 
-                f"Could not check file state for {file_path.name}", "WARNING")
-        
-        # Global cooldown to prevent rapid-fire events
-        now = time.time()
-        if now - self.last_event_time < self.event_cooldown:
-            return
-        self.last_event_time = now
-        
-        # Per-file cooldown
-        file_key = str(file_path)
-        last_reload = self.last_reload_time.get(file_key, 0)
-        
-        if now - last_reload < self.reload_cooldown:
-            return
-        
-        self.last_reload_time[file_key] = now
-        
-        # Schedule reload
-        asyncio.run_coroutine_threadsafe(
-            self.dev_manager.reload_module(file_path),
-            self.loop
-        )
-
-
 class DevManager:
-    """Manages development mode: versioning, hot-reloading, and GitHub integration"""
+    """Manages development mode: versioning and GitHub integration"""
     
     def __init__(self, bot):
         self.bot = bot
@@ -143,12 +52,8 @@ class DevManager:
         self.file_contents = {}  # Store actual file contents for diff
         self.last_check_time = None
         self.git_enabled = False
-        self.file_observer = None
-        self.watched_modules = {}
         self.auto_commit_enabled = True  # DEFAULT TO ENABLED as requested
         self.auto_versioning_enabled = True  # Default to enabled
-        self.is_reloading = False  # Prevent reload cycles
-        self.file_states = {}  # Track file states to prevent false positives
         
         # Check Git availability
         self._check_git()
@@ -165,10 +70,8 @@ class DevManager:
     def _log_dev_features(self):
         """Log development-specific features that are enabled"""
         self.bot.logger.log(MODULE_NAME, "🔧 Development features enabled:")
-        self.bot.logger.log(MODULE_NAME, "  • Hot-reload on file changes")
         self.bot.logger.log(MODULE_NAME, "  • Automatic versioning (MAJOR.MINOR.PATCH.MICRO)")
         self.bot.logger.log(MODULE_NAME, "  • Git integration (commit & push)")
-        self.bot.logger.log(MODULE_NAME, "  • File watcher monitoring")
         self.bot.logger.log(MODULE_NAME, "  • Development console commands")
         self.bot.logger.log(MODULE_NAME, f"  • Auto-commit: {'ENABLED' if self.auto_commit_enabled else 'DISABLED'}")
         self.bot.logger.log(MODULE_NAME, f"  • Auto-versioning: {'ENABLED' if self.auto_versioning_enabled else 'DISABLED'}")
@@ -395,7 +298,6 @@ icons/
                     content = f.read()
                 
                 # Extract version using regex to avoid importing
-                import re
                 match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
                 if match:
                     return match.group(1)
@@ -786,120 +688,6 @@ icons/
             self.bot.logger.error(MODULE_NAME, "Git operation failed", e)
             return False
     
-    async def reload_module(self, file_path):
-        """Hot-reload a module when its file changes with cycle prevention"""
-        # PREVENT RELOAD CYCLES
-        if self.is_reloading:
-            self.bot.logger.log(MODULE_NAME, 
-                f"Already reloading, skipping {file_path.name}", "WARNING")
-            return
-            
-        self.is_reloading = True
-        
-        try:
-            module_name = file_path.stem
-            
-            # Don't reload main.py or excluded files
-            if module_name == 'main' or self._should_exclude_file(file_path):
-                return
-            
-            self.bot.logger.log(MODULE_NAME, f"🔄 Reloading module: {module_name}")
-            
-            # Check if module exists in sys.modules
-            if module_name not in sys.modules:
-                self.bot.logger.log(MODULE_NAME, 
-                    f"Module {module_name} not loaded yet", "WARNING")
-                return
-            
-            try:
-                # Get current commands before reload
-                commands_before = {cmd.name for cmd in self.bot.tree.get_commands()}
-                
-                # Reload the module
-                module = importlib.reload(sys.modules[module_name])
-                
-                # Re-run setup if it exists
-                if hasattr(module, 'setup'):
-                    # Re-setup the module - only pass register_console_command to dev module
-                    if module_name == 'dev':
-                        # Create a dummy register function for hot-reload
-                        def dummy_register(*args, **kwargs):
-                            pass
-                        module.setup(self.bot, dummy_register)
-                    else:
-                        # Get commands after reload to see what this module adds
-                        # Create a temporary tree to see what commands would be added
-                        temp_tree_commands = []
-                        original_add = self.bot.tree.add_command
-                        
-                        def capture_add(command, **kwargs):
-                            temp_tree_commands.append(command.name)
-                            return original_add(command, **kwargs)
-                        
-                        # Temporarily replace add_command to capture new commands
-                        self.bot.tree.add_command = capture_add
-                        
-                        try:
-                            # Now run setup - this will tell us which commands it tries to add
-                            module.setup(self.bot)
-                        except discord.app_commands.errors.CommandAlreadyRegistered as e:
-                            # Extract command name from error message
-                            match = re.search(r"Command '(\w+)' already registered", str(e))
-                            if match:
-                                cmd_name = match.group(1)
-                                # Remove the existing command and try again
-                                self.bot.tree.remove_command(cmd_name)
-                                self.bot.logger.log(MODULE_NAME, f"Removed duplicate command: {cmd_name}")
-                                # Try setup again
-                                module.setup(self.bot)
-                        finally:
-                            # Restore original add_command
-                            self.bot.tree.add_command = original_add
-                    
-                    # DO NOT SYNC COMMANDS HERE - that's what's causing rate limits
-                    # Commands will be available without syncing (they're already registered)
-                    
-                    self.bot.logger.log(MODULE_NAME, 
-                        f"✅ Reloaded and re-setup: {module_name} (no sync)")
-                else:
-                    self.bot.logger.log(MODULE_NAME, f"✅ Reloaded: {module_name} (no setup)")
-                
-                # Don't trigger version check on hot-reload - it causes cycles
-                # Version will be checked on manual saves/commits instead
-                
-            except Exception as e:
-                self.bot.logger.error(MODULE_NAME, f"Failed to reload {module_name}", e)
-                tb = traceback.format_exc()
-                self.bot.logger.log(MODULE_NAME, f"Traceback:\n{tb}", "ERROR")
-                
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, f"Error in reload_module for {file_path}", e)
-        finally:
-            # CRITICAL: Reset the reloading flag
-            self.is_reloading = False
-    
-    def start_file_watcher(self):
-        """Start watching files for changes (only in dev mode)"""
-        try:
-            bot_dir = Path(os.path.dirname(os.path.abspath(__file__)))
-            
-            # Pass the bot's event loop to the file handler
-            event_handler = FileChangeHandler(self, self.bot.loop)
-            self.file_observer = Observer()
-            self.file_observer.schedule(event_handler, str(bot_dir), recursive=False)
-            self.file_observer.start()
-            
-            self.bot.logger.log(MODULE_NAME, "📁 File watcher started - hot-reloading enabled")
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Failed to start file watcher", e)
-    
-    def stop_file_watcher(self):
-        """Stop watching files"""
-        if self.file_observer:
-            self.file_observer.stop()
-            self.file_observer.join()
-            self.bot.logger.log(MODULE_NAME, "File watcher stopped")
-    
     def get_version_info(self):
         """Get formatted version information"""
         current_version = self._get_version_from_file()
@@ -910,7 +698,6 @@ icons/
             'tracked_files': len(self.file_hashes),
             'last_update': None,
             'git_enabled': self.git_enabled,
-            'hot_reload_enabled': self.file_observer is not None,
             'auto_commit_enabled': self.auto_commit_enabled,
             'auto_versioning_enabled': self.auto_versioning_enabled
         }
@@ -937,9 +724,6 @@ def setup(bot, register_console_command):
     
     # Get version from _version.py and set on bot
     bot.version = dev_manager._get_version_from_file()
-    
-    # Start file watcher for hot-reloading (only in dev mode)
-    dev_manager.start_file_watcher()
     
     # Initial version check - WITH AUTO-COMMIT AS REQUESTED
     async def initial_version_check():
@@ -1117,7 +901,6 @@ def setup(bot, register_console_command):
             print(f"│ Tracked Files: {info['tracked_files']:<47} │")
             print(f"│ Total Versions: {info['total_versions']:<46} │")
             print(f"│ Git Enabled: {'✅ Yes' if info['git_enabled'] else '❌ No':<49} │")
-            print(f"│ Hot Reload: {'✅ Enabled' if info['hot_reload_enabled'] else '❌ Disabled':<46} │")
             print(f"│ Auto-Commit: {'✅ Enabled' if info['auto_commit_enabled'] else '❌ Disabled':<45} │")
             print(f"│ Auto-Versioning: {'✅ Enabled' if info['auto_versioning_enabled'] else '❌ Disabled':<41} │")
             
@@ -1143,32 +926,32 @@ def setup(bot, register_console_command):
             """Toggle auto-commit functionality"""
             if args.strip().lower() in ['on', 'enable', 'true', '1']:
                 dev_manager.auto_commit_enabled = True
-                print("✅ Auto-commit ENABLED")
+                status = "ENABLED"
             elif args.strip().lower() in ['off', 'disable', 'false', '0']:
                 dev_manager.auto_commit_enabled = False
-                print("✅ Auto-commit DISABLED")
+                status = "DISABLED"
             else:
                 # Toggle if no args
                 dev_manager.auto_commit_enabled = not dev_manager.auto_commit_enabled
                 status = "ENABLED" if dev_manager.auto_commit_enabled else "DISABLED"
-                print(f"✅ Auto-commit {status}")
             
+            print(f"✅ Auto-commit {status}")
             dev_manager.bot.logger.log(MODULE_NAME, f"Auto-commit {status}")
         
         async def handle_auto_version(args):
             """Toggle auto-versioning functionality"""
             if args.strip().lower() in ['on', 'enable', 'true', '1']:
                 dev_manager.auto_versioning_enabled = True
-                print("✅ Auto-versioning ENABLED")
+                status = "ENABLED"
             elif args.strip().lower() in ['off', 'disable', 'false', '0']:
                 dev_manager.auto_versioning_enabled = False
-                print("✅ Auto-versioning DISABLED")
+                status = "DISABLED"
             else:
                 # Toggle if no args
                 dev_manager.auto_versioning_enabled = not dev_manager.auto_versioning_enabled
                 status = "ENABLED" if dev_manager.auto_versioning_enabled else "DISABLED"
-                print(f"✅ Auto-versioning {status}")
             
+            print(f"✅ Auto-versioning {status}")
             dev_manager.bot.logger.log(MODULE_NAME, f"Auto-versioning {status}")
         
         # Register development console commands

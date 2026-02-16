@@ -252,6 +252,10 @@ class ModOversightSystem:
         - additional: dict (any additional data)
         """
         
+        # EXCLUSION: Ignore mutes, warns, and timeouts for the oversight report/queue
+        if action_data['action'] in ['mute', 'warn', 'timeout']:
+            return None
+
         # Generate unique action ID
         action_id = f"{action_data['guild_id']}_{action_data['action']}_{int(datetime.utcnow().timestamp())}"
         
@@ -296,6 +300,29 @@ class ModOversightSystem:
         
         return action_id
     
+    def resolve_pending_action(self, user_id: int, action_type: str):
+        """
+        Manually resolve/remove a pending action from the queue.
+        Used when a moderator manually reverses an action (e.g., manual /unban).
+        """
+        to_delete = []
+        for action_id, action in self.pending_actions.items():
+            # Check if action matches user and type
+            if (action.get('user_id') == user_id and 
+                action.get('action') == action_type and 
+                action.get('status') == 'pending'):
+                
+                to_delete.append(action_id)
+        
+        if to_delete:
+            for aid in to_delete:
+                del self.pending_actions[aid]
+            
+            self.save_pending_actions()
+            self.bot.logger.log(MODULE_NAME, f"Auto-resolved {len(to_delete)} pending {action_type} action(s) for user {user_id}")
+            return True
+        return False
+
     def track_embed(self, message_id: int, action_id: str, embed_type: str):
         """Track an embed message for deletion monitoring"""
         self.tracked_embeds[message_id] = {

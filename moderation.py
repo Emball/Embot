@@ -170,10 +170,12 @@ async def log_to_oversight(ctx: ModContext, action: str, user_id: Optional[int],
             'additional': additional or {}
         })
         
-        if inchat_msg_id:
-            ctx.bot.mod_oversight.track_embed(inchat_msg_id, action_id, 'inchat')
-        if botlog_msg_id:
-            ctx.bot.mod_oversight.track_embed(botlog_msg_id, action_id, 'botlog')
+        # Action ID might be None if the action type was ignored (e.g. mute/warn)
+        if action_id:
+            if inchat_msg_id:
+                ctx.bot.mod_oversight.track_embed(inchat_msg_id, action_id, 'inchat')
+            if botlog_msg_id:
+                ctx.bot.mod_oversight.track_embed(botlog_msg_id, action_id, 'botlog')
         
         return action_id
     except Exception as e:
@@ -444,6 +446,11 @@ async def _do_unban(ctx: ModContext, mgr: ModerationManager,
     try:
         user = await ctx.bot.fetch_user(int(user_id))
         await ctx.guild.unban(user, reason=f"{reason} - By {ctx.author}")
+        
+        # Report resolution logic
+        if hasattr(ctx.bot, 'mod_oversight'):
+            ctx.bot.mod_oversight.resolve_pending_action(user.id, 'ban')
+
         embed = discord.Embed(title="✅ User Unbanned",
                               description=f"{user.mention} has been unbanned.",
                               color=0x2ecc71, timestamp=datetime.utcnow())
@@ -1216,3 +1223,4 @@ def setup(bot):
     check_expired_mutes.start()
     bot.logger.log(MODULE_NAME, "Started background mute expiry checker")
     bot.logger.log(MODULE_NAME, "Moderation setup complete")
+}

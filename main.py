@@ -30,8 +30,9 @@ data_dir.mkdir(exist_ok=True)
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
+intents.members = True  # Required for Member lookup in prefix commands
 
-bot = commands.Bot(command_prefix='!', intents=intents)
+bot = commands.Bot(command_prefix=['!', '?'], intents=intents)
 
 class ConsoleLogger:
     """Centralized console and file logging system for all modules"""

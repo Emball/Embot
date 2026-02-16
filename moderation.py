@@ -483,7 +483,7 @@ def setup(bot):
         delete_days="Days of messages to delete (0-7)"
     )
     @app_commands.default_permissions(ban_members=True)
-    async def ban(interaction: discord.Interaction, user: discord.User, reason: str, delete_days: Optional[int] = 1):
+    async def ban(interaction: discord.Interaction, user: discord.User, reason: str, delete_days: Optional[int] = 0):
         """Ban a user"""
         
         # Check for elevated role

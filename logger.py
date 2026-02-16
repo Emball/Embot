@@ -290,6 +290,10 @@ class EventLogger:
         
         await self.log_to_channel(channel, embed)
     
+    async def log_member_ban(self, guild, user):
+        """Log when a member is banned — handled by moderation.py for bot actions"""
+        pass  # Ban logging is handled by moderation.py's explicit log_ban embeds
+
     async def log_member_unban(self, guild, user):
         """Log when a member is unbanned — handled by moderation.py for bot actions"""
         pass  # Unban logging is handled by moderation.py's explicit botlog embeds

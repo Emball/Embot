@@ -124,6 +124,10 @@ class LinkManager:
         # Extract command name (remove prefix)
         command = message.content[len(self.prefix):].split()[0].lower()
         
+        # Let the bot framework handle real registered commands (ban, kick, etc.)
+        if self.bot.get_command(command):
+            return False
+        
         # Check if it's a valid link command
         if command not in self.links:
             return False
@@ -141,17 +145,8 @@ class LinkManager:
             await message.channel.send(f"⚠️ The `{command}` link is not configured yet. Please set it up using `/linkset {command} <url>`")
             return True
         
-        # Send the link
-        description = link_data.get("description", "")
-        
-        embed = discord.Embed(
-            title=f"🔗 {command.title()}",
-            description=description if description else "Click the link below",
-            color=0x5865f2
-        )
-        embed.add_field(name="Link", value=url, inline=False)
-        
-        await message.channel.send(embed=embed)
+        # Send the link as plain text
+        await message.channel.send(url)
         self.bot.logger.log(MODULE_NAME, f"{message.author} used ?{command}")
         
         return True
@@ -169,12 +164,8 @@ def setup(bot):
         if message.author.bot:
             return
         
-        # Handle link commands
-        handled = await link_manager.handle_link_command(message)
-        
-        # Continue processing other commands if not handled by link manager
-        if not handled:
-            await bot.process_commands(message)
+        # Handle link commands - bot framework handles all other ? prefixed commands natively
+        await link_manager.handle_link_command(message)
     
     # Slash commands for managing links
     @bot.tree.command(name="linkset", description="Set or update a link command")

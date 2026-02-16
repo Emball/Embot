@@ -5,7 +5,7 @@ from discord.ext import commands, tasks
 import re
 from datetime import datetime, timedelta
 import asyncio
-from typing import Optional
+from typing import Optional, Union
 import json
 import os
 from pathlib import Path
@@ -19,30 +19,31 @@ CONFIG = {
     "moderation": {"min_reason_length": 10, "muted_role_name": "Muted"}
 }
 
-CHILD_SAFETY  = ["child porn", "Teen leaks"]
-RACIAL_SLURS  = ["chink", "beaner", "n i g g e r", "nigger", "nigger'", "Nigger",
-                  "niggers", "niiger", "niigger"]
+# Severity categories (From OG file)
+CHILD_SAFETY = ["child porn", "Teen leaks"]
+RACIAL_SLURS = ["chink", "beaner", "n i g g e r", "nigger", "nigger'", "Nigger", 
+                "niggers", "niiger", "niigger"]
 TOS_VIOLATIONS = []
-BANNED_WORDS  = [
+BANNED_WORDS = [
     "embis", "embis'", "Embis", "embis!", "Embis!", "embis's", "embiss", "embiz",
     "https://www.youtube.com/watch?v=fXvOrWWB3Vg", "https://youtu.be/fXvOrWWB3Vg",
     "https://youtu.be/fXvOrWWB3Vg?si=rSS11Yf2si_MVauu", "leaked porn", "nudes leak",
-    "mbis", "m'bis", "Mbis", "mbs", "mebis", "Michael Blake Sinclair",
-    "Michael Sinclair", "montear", "www.youtube.com/watch?v=fXvOrWWB3Vg",
+    "mbis", "m'bis", "Mbis", "mbs", "mebis", "Michael Blake Sinclair", 
+    "Michael Sinclair", "montear", "www.youtube.com/watch?v=fXvOrWWB3Vg", 
     "youtube.com/watch?v=fXvOrWWB3Vg"
 ]
 
-ELEVATED_ROLES    = CONFIG["elevated_roles"]
-MIN_REASON_LENGTH = CONFIG["moderation"]["min_reason_length"]
-MUTED_ROLE_NAME   = CONFIG["moderation"]["muted_role_name"]
+ELEVATED_ROLES = CONFIG.get("elevated_roles", ["Moderator", "Admin", "Owner"])
+MIN_REASON_LENGTH = CONFIG.get("moderation", {}).get("min_reason_length", 10)
+MUTED_ROLE_NAME = CONFIG.get("moderation", {}).get("muted_role_name", "Muted")
 
-ERROR_NO_PERMISSION      = "❌ You need a moderation role (Moderator, Admin, or Owner) to use this command."
-ERROR_REASON_REQUIRED    = "❌ You must provide a reason for this action."
-ERROR_REASON_TOO_SHORT   = f"❌ Reason must be at least {MIN_REASON_LENGTH} characters long."
+# Standard Errors
+ERROR_NO_PERMISSION = "❌ You need a moderation role (Moderator, Admin, or Owner) to use this command."
+ERROR_REASON_REQUIRED = "❌ You must provide a reason for this action."
+ERROR_REASON_TOO_SHORT = f"❌ Reason must be at least {MIN_REASON_LENGTH} characters long."
 ERROR_CANNOT_ACTION_SELF = "❌ You cannot perform this action on yourself."
-ERROR_CANNOT_ACTION_BOT  = "❌ I cannot perform this action on myself."
-ERROR_HIGHER_ROLE        = "❌ You cannot perform this action on someone with a higher or equal role."
-
+ERROR_CANNOT_ACTION_BOT = "❌ I cannot perform this action on myself."
+ERROR_HIGHER_ROLE = "❌ You cannot perform this action on someone with a higher or equal role."
 
 # ==================== HELPERS ====================
 
@@ -51,14 +52,12 @@ def has_elevated_role(member: discord.Member) -> bool:
         return True
     return any(role.name in ELEVATED_ROLES for role in member.roles)
 
-
 def validate_reason(reason: Optional[str]) -> tuple:
     if not reason or reason.strip() == "" or reason == "No reason provided":
         return False, ERROR_REASON_REQUIRED
     if len(reason) < MIN_REASON_LENGTH:
         return False, ERROR_REASON_TOO_SHORT
     return True, None
-
 
 def parse_duration(duration: str) -> tuple:
     """Parse a duration string like '10m', '2h', '1d'. Returns (seconds, label)."""
@@ -74,6 +73,9 @@ def parse_duration(duration: str) -> tuple:
     label   = f"{value} {labels[unit]}{'s' if value != 1 else ''}"
     return seconds, label
 
+def get_event_logger(bot):
+    """Return the logger's EventLogger if available."""
+    return getattr(bot, '_logger_event_logger', None)
 
 # ==================== UNIFIED CONTEXT ====================
 
@@ -82,24 +84,26 @@ class ModContext:
     Wraps either a discord.Interaction (slash) or commands.Context (prefix)
     into a single interface so command logic never has to branch on which one it got.
     """
-
     def __init__(self, source):
-        self._source  = source
+        self._source = source
         self._replied = False
 
         if isinstance(source, discord.Interaction):
-            self.guild   = source.guild
+            self.guild = source.guild
             self.channel = source.channel
-            self.author  = source.user
-            self.bot     = source.client
+            self.author = source.user
+            self.bot = source.client
+            self.message = None # Interactions don't have a message object in the same way
         else:
-            self.guild   = source.guild
+            self.guild = source.guild
             self.channel = source.channel
-            self.author  = source.author
-            self.bot     = source.bot
+            self.author = source.author
+            self.bot = source.bot
+            self.message = source.message
 
     async def reply(self, content=None, *, embed=None, ephemeral=False, delete_after=None):
         """Send a response. Returns the message ID if available."""
+        msg_obj = None
         if isinstance(self._source, discord.Interaction):
             if not self._replied:
                 self._replied = True
@@ -107,22 +111,21 @@ class ModContext:
                     content=content, embed=embed, ephemeral=ephemeral)
                 if not ephemeral:
                     try:
-                        resp = await self._source.original_response()
-                        return resp.id
+                        msg_obj = await self._source.original_response()
                     except Exception:
-                        return None
+                        pass
             else:
-                msg = await self._source.followup.send(
+                msg_obj = await self._source.followup.send(
                     content=content, embed=embed, ephemeral=ephemeral)
-                return msg.id if msg else None
         else:
-            msg = await self._source.send(content=content, embed=embed)
-            if delete_after and msg:
-                await msg.delete(delay=delete_after)
-            return msg.id if msg else None
+            msg_obj = await self._source.send(content=content, embed=embed)
+            if delete_after and msg_obj:
+                await msg_obj.delete(delay=delete_after)
+        
+        return msg_obj.id if msg_obj else None
 
     async def error(self, message: str):
-        """Send an ephemeral-style error (auto-deletes after 8s for prefix)."""
+        """Send an error message."""
         if isinstance(self._source, discord.Interaction):
             await self.reply(message, ephemeral=True)
         else:
@@ -142,8 +145,42 @@ class ModContext:
             msg = await self._source.send(content=content, embed=embed)
             return msg.id if msg else None
 
+# ==================== OVERSIGHT HELPERS ====================
 
-# ==================== VIEWS ====================
+async def log_to_oversight(ctx: ModContext, action: str, user_id: Optional[int],
+                           user_str: Optional[str], reason: str, inchat_msg_id: Optional[int],
+                           botlog_msg_id: Optional[int], duration: Optional[str] = None,
+                           additional: Optional[dict] = None) -> Optional[str]:
+    """Log to mod_oversight if available."""
+    if not hasattr(ctx.bot, 'mod_oversight'):
+        return None
+    
+    try:
+        action_id = await ctx.bot.mod_oversight.log_mod_action({
+            'action': action,
+            'moderator_id': ctx.author.id,
+            'moderator': str(ctx.author),
+            'user_id': user_id,
+            'user': user_str,
+            'reason': reason,
+            'guild_id': ctx.guild.id,
+            'channel_id': ctx.channel.id,
+            'message_id': ctx.message.id if ctx.message else None,
+            'duration': duration,
+            'additional': additional or {}
+        })
+        
+        if inchat_msg_id:
+            ctx.bot.mod_oversight.track_embed(inchat_msg_id, action_id, 'inchat')
+        if botlog_msg_id:
+            ctx.bot.mod_oversight.track_embed(botlog_msg_id, action_id, 'botlog')
+        
+        return action_id
+    except Exception as e:
+        ctx.bot.logger.error(MODULE_NAME, "Failed to log action to oversight", e)
+        return None
+
+# ==================== VIEWS & MANAGERS ====================
 
 class BanAppealView(ui.View):
     def __init__(self, guild_id: int):
@@ -152,17 +189,19 @@ class BanAppealView(ui.View):
 
     @ui.button(label="Submit Appeal", style=discord.ButtonStyle.primary, emoji="📝")
     async def appeal_button(self, interaction: discord.Interaction, button: ui.Button):
-        from mod_oversight import BanAppealModal
         if not hasattr(interaction.client, 'mod_oversight'):
             await interaction.response.send_message("❌ Appeal system not available.", ephemeral=True)
             return
-        modal = BanAppealModal(interaction.client.mod_oversight, self.guild_id)
-        await interaction.response.send_modal(modal)
-
-
-# ==================== MANAGERS ====================
+        # Dynamically import to avoid circular dependency issues if any
+        try:
+            from mod_oversight import BanAppealModal
+            modal = BanAppealModal(interaction.client.mod_oversight, self.guild_id)
+            await interaction.response.send_modal(modal)
+        except ImportError:
+            await interaction.response.send_message("❌ Appeal modal not found.", ephemeral=True)
 
 class RolePersistenceManager:
+    """Manages role persistence (from OG file)"""
     def __init__(self, bot):
         self.bot = bot
         data_dir = Path(__file__).parent / "data"
@@ -213,8 +252,8 @@ class RolePersistenceManager:
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, f"Failed to restore roles for {member}", e)
 
-
 class StrikeSystem:
+    """Manages strikes (from OG file)"""
     def __init__(self, bot):
         self.bot = bot
         data_dir = Path(__file__).parent / "data"
@@ -263,8 +302,8 @@ class StrikeSystem:
             return True
         return False
 
-
 class MuteManager:
+    """Manages Mutes (from OG file)"""
     def __init__(self, bot):
         self.bot = bot
         data_dir = Path(__file__).parent / "data"
@@ -328,7 +367,6 @@ class MuteManager:
                         pass
         return expired
 
-
 class ModerationManager:
     def __init__(self, bot):
         self.bot = bot
@@ -336,9 +374,7 @@ class ModerationManager:
         self.mute_manager     = MuteManager(bot)
         self.role_persistence = RolePersistenceManager(bot)
 
-
-# ==================== COMMAND LOGIC ====================
-# One function per command. Both /slash and ?prefix call the same function.
+# ==================== UNIFIED COMMAND LOGIC ====================
 
 async def _do_ban(ctx: ModContext, mgr: ModerationManager,
                   user: discord.User, reason: str, delete_days: int = 0):
@@ -357,6 +393,7 @@ async def _do_ban(ctx: ModContext, mgr: ModerationManager,
 
     delete_days = max(0, min(7, delete_days))
     try:
+        # Send Appeal DM
         try:
             dm = discord.Embed(title="🔨 You have been banned",
                                description=f"You have been banned from **{ctx.guild.name}**",
@@ -371,27 +408,27 @@ async def _do_ban(ctx: ModContext, mgr: ModerationManager,
         except discord.Forbidden:
             pass
 
+        # Perform Action
         await ctx.guild.ban(user, reason=f"{reason} - By {ctx.author}",
                             delete_message_days=delete_days)
 
+        # In-Chat Response
         embed = discord.Embed(title="✅ User Banned",
                               description=f"{user.mention} has been banned.",
                               color=0x992d22, timestamp=datetime.utcnow())
         embed.add_field(name="Reason", value=reason, inline=False)
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
         embed.add_field(name="Messages Deleted", value=f"{delete_days} days", inline=True)
-        await ctx.reply(embed=embed)
+        inchat_msg_id = await ctx.reply(embed=embed)
 
-        el = getattr(ctx.bot, '_logger_event_logger', None)
+        # Logs
+        el = get_event_logger(ctx.bot)
+        botlog_msg_id = None
         if el:
-            await el.log_ban(ctx.guild, user, ctx.author, reason, delete_days, ctx.channel)
-        if hasattr(ctx.bot, 'mod_oversight'):
-            await ctx.bot.mod_oversight.log_mod_action({
-                'action': 'ban', 'moderator_id': ctx.author.id, 'moderator': str(ctx.author),
-                'user_id': user.id, 'user': str(user), 'reason': reason,
-                'guild_id': ctx.guild.id, 'channel_id': ctx.channel.id,
-                'additional': {'delete_days': delete_days}
-            })
+            botlog_msg_id = await el.log_ban(ctx.guild, user, ctx.author, reason, delete_days, ctx.channel)
+        
+        await log_to_oversight(ctx, 'ban', user.id, str(user), reason, inchat_msg_id, botlog_msg_id,
+                               additional={'delete_days': delete_days})
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} banned {user}")
 
     except discord.Forbidden:
@@ -399,7 +436,6 @@ async def _do_ban(ctx: ModContext, mgr: ModerationManager,
     except Exception as e:
         await ctx.error("❌ An error occurred while trying to ban the user.")
         ctx.bot.logger.error(MODULE_NAME, "Ban failed", e)
-
 
 async def _do_unban(ctx: ModContext, mgr: ModerationManager,
                     user_id: str, reason: str = "No reason provided"):
@@ -422,7 +458,6 @@ async def _do_unban(ctx: ModContext, mgr: ModerationManager,
     except Exception as e:
         await ctx.error("❌ An error occurred while trying to unban.")
         ctx.bot.logger.error(MODULE_NAME, "Unban failed", e)
-
 
 async def _do_kick(ctx: ModContext, mgr: ModerationManager,
                    member: discord.Member, reason: str):
@@ -456,23 +491,19 @@ async def _do_kick(ctx: ModContext, mgr: ModerationManager,
                               color=0xe67e22, timestamp=datetime.utcnow())
         embed.add_field(name="Reason", value=reason, inline=False)
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        await ctx.reply(embed=embed)
+        inchat_msg_id = await ctx.reply(embed=embed)
 
-        el = getattr(ctx.bot, '_logger_event_logger', None)
+        el = get_event_logger(ctx.bot)
+        botlog_msg_id = None
         if el:
-            await el.log_kick(ctx.guild, member, ctx.author, reason, ctx.channel)
-        if hasattr(ctx.bot, 'mod_oversight'):
-            await ctx.bot.mod_oversight.log_mod_action({
-                'action': 'kick', 'moderator_id': ctx.author.id, 'moderator': str(ctx.author),
-                'user_id': member.id, 'user': str(member), 'reason': reason,
-                'guild_id': ctx.guild.id, 'channel_id': ctx.channel.id
-            })
+            botlog_msg_id = await el.log_kick(ctx.guild, member, ctx.author, reason, ctx.channel)
+        
+        await log_to_oversight(ctx, 'kick', member.id, str(member), reason, inchat_msg_id, botlog_msg_id)
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} kicked {member}")
 
     except Exception as e:
         await ctx.error("❌ An error occurred while trying to kick the member.")
         ctx.bot.logger.error(MODULE_NAME, "Kick failed", e)
-
 
 async def _do_timeout(ctx: ModContext, mgr: ModerationManager,
                       member: discord.Member, duration: int, reason: str):
@@ -496,25 +527,21 @@ async def _do_timeout(ctx: ModContext, mgr: ModerationManager,
         embed.add_field(name="Reason", value=reason, inline=False)
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
         embed.add_field(name="Duration", value=f"{duration} minutes", inline=True)
-        await ctx.reply(embed=embed)
+        inchat_msg_id = await ctx.reply(embed=embed)
 
-        el = getattr(ctx.bot, '_logger_event_logger', None)
+        el = get_event_logger(ctx.bot)
+        botlog_msg_id = None
         if el:
-            await el.log_timeout(ctx.guild, member, ctx.author, reason,
+            botlog_msg_id = await el.log_timeout(ctx.guild, member, ctx.author, reason,
                                  f"{duration} minutes", ctx.channel)
-        if hasattr(ctx.bot, 'mod_oversight'):
-            await ctx.bot.mod_oversight.log_mod_action({
-                'action': 'timeout', 'moderator_id': ctx.author.id, 'moderator': str(ctx.author),
-                'user_id': member.id, 'user': str(member), 'reason': reason,
-                'guild_id': ctx.guild.id, 'channel_id': ctx.channel.id,
-                'duration': f"{duration} minutes"
-            })
+        
+        await log_to_oversight(ctx, 'timeout', member.id, str(member), reason, inchat_msg_id, botlog_msg_id,
+                               duration=f"{duration} minutes")
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} timed out {member} for {duration}m")
 
     except Exception as e:
         await ctx.error("❌ An error occurred while trying to timeout the member.")
         ctx.bot.logger.error(MODULE_NAME, "Timeout failed", e)
-
 
 async def _do_untimeout(ctx: ModContext, mgr: ModerationManager, member: discord.Member):
     if not ctx.author.guild_permissions.moderate_members and not has_elevated_role(ctx.author):
@@ -534,7 +561,6 @@ async def _do_untimeout(ctx: ModContext, mgr: ModerationManager, member: discord
     except Exception as e:
         await ctx.error("❌ An error occurred while trying to remove the timeout.")
         ctx.bot.logger.error(MODULE_NAME, "Untimeout failed", e)
-
 
 async def _do_mute(ctx: ModContext, mgr: ModerationManager,
                    member: discord.Member, reason: str = "No reason provided",
@@ -579,17 +605,15 @@ async def _do_mute(ctx: ModContext, mgr: ModerationManager,
         embed.add_field(name="Reason", value=reason, inline=False)
         embed.add_field(name="Duration", value=duration_str, inline=True)
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        await ctx.reply(embed=embed)
+        inchat_msg_id = await ctx.reply(embed=embed)
 
-        el = getattr(ctx.bot, '_logger_event_logger', None)
+        el = get_event_logger(ctx.bot)
+        botlog_msg_id = None
         if el:
-            await el.log_mute(ctx.guild, member, ctx.author, reason, duration_str, ctx.channel)
-        if hasattr(ctx.bot, 'mod_oversight'):
-            await ctx.bot.mod_oversight.log_mod_action({
-                'action': 'mute', 'moderator_id': ctx.author.id, 'moderator': str(ctx.author),
-                'user_id': member.id, 'user': str(member), 'reason': reason,
-                'guild_id': ctx.guild.id, 'channel_id': ctx.channel.id, 'duration': duration_str
-            })
+            botlog_msg_id = await el.log_mute(ctx.guild, member, ctx.author, reason, duration_str, ctx.channel)
+        
+        await log_to_oversight(ctx, 'mute', member.id, str(member), reason, inchat_msg_id, botlog_msg_id,
+                               duration=duration_str)
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} muted {member} for {duration_str}")
 
     except discord.Forbidden:
@@ -597,7 +621,6 @@ async def _do_mute(ctx: ModContext, mgr: ModerationManager,
     except Exception as e:
         await ctx.error("❌ An error occurred while trying to mute the member.")
         ctx.bot.logger.error(MODULE_NAME, "Mute failed", e)
-
 
 async def _do_unmute(ctx: ModContext, mgr: ModerationManager, member: discord.Member):
     if not ctx.author.guild_permissions.manage_roles and not has_elevated_role(ctx.author):
@@ -617,7 +640,6 @@ async def _do_unmute(ctx: ModContext, mgr: ModerationManager, member: discord.Me
     except Exception as e:
         await ctx.error("❌ An error occurred while trying to unmute the member.")
         ctx.bot.logger.error(MODULE_NAME, "Unmute failed", e)
-
 
 async def _do_softban(ctx: ModContext, mgr: ModerationManager,
                       member: discord.Member, reason: str, delete_days: int = 7):
@@ -646,24 +668,20 @@ async def _do_softban(ctx: ModContext, mgr: ModerationManager,
         embed.add_field(name="Reason", value=reason, inline=False)
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
         embed.add_field(name="Messages Deleted", value=f"{delete_days} days", inline=True)
-        await ctx.reply(embed=embed)
+        inchat_msg_id = await ctx.reply(embed=embed)
 
-        el = getattr(ctx.bot, '_logger_event_logger', None)
+        el = get_event_logger(ctx.bot)
+        botlog_msg_id = None
         if el:
-            await el.log_softban(ctx.guild, member, ctx.author, reason, delete_days, ctx.channel)
-        if hasattr(ctx.bot, 'mod_oversight'):
-            await ctx.bot.mod_oversight.log_mod_action({
-                'action': 'softban', 'moderator_id': ctx.author.id, 'moderator': str(ctx.author),
-                'user_id': member.id, 'user': str(member), 'reason': reason,
-                'guild_id': ctx.guild.id, 'channel_id': ctx.channel.id,
-                'additional': {'delete_days': delete_days}
-            })
+            botlog_msg_id = await el.log_softban(ctx.guild, member, ctx.author, reason, delete_days, ctx.channel)
+        
+        await log_to_oversight(ctx, 'softban', member.id, str(member), reason, inchat_msg_id, botlog_msg_id,
+                               additional={'delete_days': delete_days})
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} softbanned {member}")
 
     except Exception as e:
         await ctx.error("❌ An error occurred while trying to softban the member.")
         ctx.bot.logger.error(MODULE_NAME, "Softban failed", e)
-
 
 async def _do_warn(ctx: ModContext, mgr: ModerationManager,
                    member: discord.Member, reason: str):
@@ -695,30 +713,27 @@ async def _do_warn(ctx: ModContext, mgr: ModerationManager,
         embed.add_field(name="Reason", value=reason, inline=False)
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
         embed.add_field(name="Total Warnings", value=str(strike_count), inline=True)
-        await ctx.reply(embed=embed)
+        inchat_msg_id = await ctx.reply(embed=embed)
 
-        el = getattr(ctx.bot, '_logger_event_logger', None)
+        el = get_event_logger(ctx.bot)
+        botlog_msg_id = None
         if el:
-            await el.log_warn(ctx.guild, member, ctx.author, reason, strike_count, ctx.channel)
-        if hasattr(ctx.bot, 'mod_oversight'):
-            await ctx.bot.mod_oversight.log_mod_action({
-                'action': 'warn', 'moderator_id': ctx.author.id, 'moderator': str(ctx.author),
-                'user_id': member.id, 'user': str(member), 'reason': reason,
-                'guild_id': ctx.guild.id, 'channel_id': ctx.channel.id
-            })
+            botlog_msg_id = await el.log_warn(ctx.guild, member, ctx.author, reason, strike_count, ctx.channel)
+        
+        await log_to_oversight(ctx, 'warn', member.id, str(member), reason, inchat_msg_id, botlog_msg_id,
+                               additional={'strike_count': strike_count})
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} warned {member}")
 
     except Exception as e:
         await ctx.error("❌ An error occurred while trying to warn the member.")
         ctx.bot.logger.error(MODULE_NAME, "Warn failed", e)
 
-
 async def _do_warnings(ctx: ModContext, mgr: ModerationManager, member: discord.Member):
     if not ctx.author.guild_permissions.manage_messages and not has_elevated_role(ctx.author):
         return await ctx.error("❌ You don't have permission to view warnings.")
     strikes = mgr.strike_system.get_strike_details(member.id)
     if not strikes:
-        return await ctx.reply(f"✅ **{member}** has no warnings.")
+        return await ctx.reply(f"✅ **{member}** has no warnings.", ephemeral=True)
     embed = discord.Embed(title=f"⚠️ Warnings for {member}",
                           description=f"Total warnings: **{len(strikes)}**",
                           color=0xf39c12, timestamp=datetime.utcnow())
@@ -728,8 +743,7 @@ async def _do_warnings(ctx: ModContext, mgr: ModerationManager, member: discord.
                         value=f"**Reason:** {s['reason']}\n**Date:** {ts}", inline=False)
     if len(strikes) > 10:
         embed.set_footer(text=f"Showing last 10 of {len(strikes)} warnings")
-    await ctx.reply(embed=embed)
-
+    await ctx.reply(embed=embed, ephemeral=True)
 
 async def _do_clearwarnings(ctx: ModContext, mgr: ModerationManager, member: discord.Member):
     if not ctx.author.guild_permissions.administrator:
@@ -742,8 +756,7 @@ async def _do_clearwarnings(ctx: ModContext, mgr: ModerationManager, member: dis
         await ctx.reply(embed=embed)
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} cleared warnings for {member}")
     else:
-        await ctx.reply(f"**{member}** has no warnings to clear.")
-
+        await ctx.reply(f"**{member}** has no warnings to clear.", ephemeral=True)
 
 async def _do_purge(ctx: ModContext, mgr: ModerationManager,
                     amount: int, target: Optional[discord.Member] = None):
@@ -763,6 +776,7 @@ async def _do_purge(ctx: ModContext, mgr: ModerationManager,
         check = (lambda m: m.author.id == target.id) if target else (lambda m: True)
         deleted = await ctx.channel.purge(limit=amount, check=check)
 
+        reason = f"Purged {len(deleted)} message(s)" + (f" from {target}" if target else "")
         embed = discord.Embed(
             title="✅ Messages Purged",
             description=f"Deleted **{len(deleted)}** messages"
@@ -770,17 +784,21 @@ async def _do_purge(ctx: ModContext, mgr: ModerationManager,
             color=0x2ecc71, timestamp=datetime.utcnow())
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
         embed.add_field(name="Channel", value=ctx.channel.mention, inline=True)
-        await ctx.followup(embed=embed)
+        inchat_msg_id = await ctx.followup(embed=embed)
 
-        el = getattr(ctx.bot, '_logger_event_logger', None)
+        el = get_event_logger(ctx.bot)
+        botlog_msg_id = None
         if el:
-            await el.log_purge(ctx.guild, ctx.author, len(deleted), ctx.channel, target)
+            botlog_msg_id = await el.log_purge(ctx.guild, ctx.author, len(deleted), ctx.channel, target)
+        
+        await log_to_oversight(ctx, 'purge', target.id if target else None, 
+                               str(target) if target else None, reason, inchat_msg_id, botlog_msg_id,
+                               additional={'amount': len(deleted)})
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} purged {len(deleted)} messages")
 
     except Exception as e:
         await ctx.followup("❌ An error occurred while trying to purge messages.", ephemeral=True)
         ctx.bot.logger.error(MODULE_NAME, "Purge failed", e)
-
 
 async def _do_slowmode(ctx: ModContext, mgr: ModerationManager,
                        seconds: int, channel: Optional[discord.TextChannel] = None):
@@ -806,7 +824,6 @@ async def _do_slowmode(ctx: ModContext, mgr: ModerationManager,
         await ctx.error("❌ An error occurred while trying to set slowmode.")
         ctx.bot.logger.error(MODULE_NAME, "Slowmode failed", e)
 
-
 async def _do_lock(ctx: ModContext, mgr: ModerationManager,
                    reason: str, channel: Optional[discord.TextChannel] = None):
     if not has_elevated_role(ctx.author):
@@ -823,24 +840,20 @@ async def _do_lock(ctx: ModContext, mgr: ModerationManager,
                               color=0xe74c3c, timestamp=datetime.utcnow())
         embed.add_field(name="Reason", value=reason, inline=False)
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        await ctx.reply(embed=embed)
+        inchat_msg_id = await ctx.reply(embed=embed)
 
-        el = getattr(ctx.bot, '_logger_event_logger', None)
+        el = get_event_logger(ctx.bot)
+        botlog_msg_id = None
         if el:
-            await el.log_lock(ctx.guild, ctx.author, reason, target)
-        if hasattr(ctx.bot, 'mod_oversight'):
-            await ctx.bot.mod_oversight.log_mod_action({
-                'action': 'lock', 'moderator_id': ctx.author.id, 'moderator': str(ctx.author),
-                'user_id': None, 'user': None, 'reason': reason,
-                'guild_id': ctx.guild.id, 'channel_id': ctx.channel.id,
-                'additional': {'channel': target.id}
-            })
+            botlog_msg_id = await el.log_lock(ctx.guild, ctx.author, reason, target)
+        
+        await log_to_oversight(ctx, 'lock', None, None, reason, inchat_msg_id, botlog_msg_id,
+                               additional={'channel': target.id})
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} locked {target.name}")
 
     except Exception as e:
         await ctx.error("❌ An error occurred while trying to lock the channel.")
         ctx.bot.logger.error(MODULE_NAME, "Lock failed", e)
-
 
 async def _do_unlock(ctx: ModContext, mgr: ModerationManager,
                      channel: Optional[discord.TextChannel] = None):
@@ -859,7 +872,6 @@ async def _do_unlock(ctx: ModContext, mgr: ModerationManager,
     except Exception as e:
         await ctx.error("❌ An error occurred while trying to unlock the channel.")
         ctx.bot.logger.error(MODULE_NAME, "Unlock failed", e)
-
 
 # ==================== SETUP ====================
 
@@ -1103,6 +1115,7 @@ def setup(bot):
 
         content_lower = message.content.lower()
 
+        # Child Safety
         for word in CHILD_SAFETY:
             if word.lower() in content_lower:
                 try:
@@ -1110,7 +1123,7 @@ def setup(bot):
                     await message.guild.ban(message.author,
                                             reason=f"Auto-ban: Child safety violation - '{word}'")
                     bot.logger.log(MODULE_NAME, f"AUTO-BAN: {message.author} child safety", "WARNING")
-                    el = getattr(bot, '_logger_event_logger', None)
+                    el = get_event_logger(bot)
                     if el:
                         await el.log_autoban(message.guild, message.author,
                                              "Child safety violation", message.channel)
@@ -1118,6 +1131,7 @@ def setup(bot):
                     bot.logger.error(MODULE_NAME, "Auto-ban failed", e)
                 return
 
+        # Racial Slurs
         for word in RACIAL_SLURS:
             if word.lower() in content_lower:
                 try:
@@ -1129,7 +1143,7 @@ def setup(bot):
                             message.author, reason="Auto-ban: Repeated racial slurs (2 strikes)")
                         bot.logger.log(MODULE_NAME,
                                        f"AUTO-BAN: {message.author} repeated slurs", "WARNING")
-                        el = getattr(bot, '_logger_event_logger', None)
+                        el = get_event_logger(bot)
                         if el:
                             await el.log_autoban_strike(
                                 message.guild, message.author, count,
@@ -1150,6 +1164,7 @@ def setup(bot):
                     bot.logger.error(MODULE_NAME, "Auto-mod slur handling failed", e)
                 return
 
+        # Banned Words
         for word in BANNED_WORDS:
             if word.lower() in content_lower:
                 try:
@@ -1200,4 +1215,4 @@ def setup(bot):
 
     check_expired_mutes.start()
     bot.logger.log(MODULE_NAME, "Started background mute expiry checker")
-    bot.logger.log(MODULE_NAME, "Moderation module setup complete")
+    bot.logger.log(MODULE_NAME, "Moderation setup complete")

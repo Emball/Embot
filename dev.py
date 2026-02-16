@@ -162,6 +162,9 @@ class DevManager:
         # Log development features
         self._log_dev_features()
         
+        # Perform initial scan to detect any changes since last run
+        self.check_for_changes()
+        
         # Start file monitoring for version detection
         self._start_file_monitoring()
     

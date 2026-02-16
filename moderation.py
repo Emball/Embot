@@ -1578,4 +1578,367 @@ def setup(bot):
     check_expired_mutes.start()
     bot.logger.log(MODULE_NAME, "Started background mute expiry checker")
     
+    # ==================== PREFIX COMMAND BRIDGE (?ban, ?kick, etc.) ====================
+    # These are thin wrappers so mods can use ?command in addition to /command slash commands.
+    # Usage: ?ban @user reason | ?kick @user reason | ?mute @user [duration] [reason]
+    #        ?timeout @user <minutes> reason | ?warn @user reason | ?purge <amount> [@user]
+    #        ?softban @user reason | ?unmute @user | ?untimeout @user
+
+    async def _prefix_error(ctx, msg):
+        """Send a short error and delete the invoking message cleanly."""
+        await ctx.send(msg, delete_after=8)
+
+    @bot.command(name="ban")
+    async def prefix_ban(ctx, user: discord.User = None, *, reason: str = None):
+        """?ban @user <reason> [delete_days=0]"""
+        if not has_elevated_role(ctx.author):
+            return await _prefix_error(ctx, ERROR_NO_PERMISSION)
+        if not user:
+            return await _prefix_error(ctx, "❌ Usage: `?ban @user <reason>`")
+
+        # Allow trailing delete_days number: ?ban @user spamming 2
+        delete_days = 0
+        if reason:
+            parts = reason.rsplit(None, 1)
+            if len(parts) == 2 and parts[-1].isdigit() and int(parts[-1]) <= 7:
+                delete_days = int(parts[-1])
+                reason = parts[0]
+
+        valid, err = await validate_reason(reason)
+        if not valid:
+            return await _prefix_error(ctx, err)
+        if user == ctx.author:
+            return await _prefix_error(ctx, ERROR_CANNOT_ACTION_SELF)
+        if user == bot.user:
+            return await _prefix_error(ctx, ERROR_CANNOT_ACTION_BOT)
+
+        member = ctx.guild.get_member(user.id)
+        if member and member.top_role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
+            return await _prefix_error(ctx, ERROR_HIGHER_ROLE)
+
+        try:
+            try:
+                dm_embed = discord.Embed(title="🔨 You have been banned",
+                    description=f"You have been banned from **{ctx.guild.name}**", color=0x992d22)
+                dm_embed.add_field(name="Reason", value=reason, inline=False)
+                dm_embed.add_field(name="Moderator", value=str(ctx.author), inline=True)
+                appeal_view = BanAppealView(ctx.guild.id)
+                await user.send(embed=dm_embed, view=appeal_view)
+            except discord.Forbidden:
+                pass
+
+            await ctx.guild.ban(user, reason=f"{reason} - By {ctx.author}", delete_message_days=delete_days)
+
+            embed = discord.Embed(title="✅ User Banned",
+                description=f"{user.mention} has been banned.", color=0x992d22, timestamp=datetime.utcnow())
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+            embed.add_field(name="Messages Deleted", value=f"{delete_days} days", inline=True)
+            await ctx.send(embed=embed)
+
+            if _mod_log(bot):
+                await _mod_log(bot).log_ban(ctx.guild, user, ctx.author, reason, delete_days, ctx.channel)
+            bot.logger.log(MODULE_NAME, f"{ctx.author} (?ban) banned {user}")
+        except discord.Forbidden:
+            await _prefix_error(ctx, "❌ I don't have permission to ban this user.")
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "?ban failed", e)
+
+    @bot.command(name="unban")
+    async def prefix_unban(ctx, user_id: str = None, *, reason: str = "No reason provided"):
+        """?unban <user_id> [reason]"""
+        if not ctx.author.guild_permissions.ban_members:
+            return await _prefix_error(ctx, "❌ You don't have permission to unban members.")
+        if not user_id:
+            return await _prefix_error(ctx, "❌ Usage: `?unban <user_id> [reason]`")
+        try:
+            user = await bot.fetch_user(int(user_id))
+            await ctx.guild.unban(user, reason=f"{reason} - By {ctx.author}")
+            embed = discord.Embed(title="✅ User Unbanned",
+                description=f"{user.mention} has been unbanned.", color=0x2ecc71, timestamp=datetime.utcnow())
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+            await ctx.send(embed=embed)
+            bot.logger.log(MODULE_NAME, f"{ctx.author} (?unban) unbanned {user}")
+        except (ValueError, discord.NotFound):
+            await _prefix_error(ctx, "❌ User not found or not banned.")
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "?unban failed", e)
+
+    @bot.command(name="kick")
+    async def prefix_kick(ctx, member: discord.Member = None, *, reason: str = None):
+        """?kick @member <reason>"""
+        if not has_elevated_role(ctx.author):
+            return await _prefix_error(ctx, ERROR_NO_PERMISSION)
+        if not member:
+            return await _prefix_error(ctx, "❌ Usage: `?kick @member <reason>`")
+        valid, err = await validate_reason(reason)
+        if not valid:
+            return await _prefix_error(ctx, err)
+        if member == ctx.author:
+            return await _prefix_error(ctx, ERROR_CANNOT_ACTION_SELF)
+        if member == bot.user:
+            return await _prefix_error(ctx, ERROR_CANNOT_ACTION_BOT)
+        if member.top_role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
+            return await _prefix_error(ctx, ERROR_HIGHER_ROLE)
+        try:
+            try:
+                dm_embed = discord.Embed(title="👢 You have been kicked",
+                    description=f"You have been kicked from **{ctx.guild.name}**", color=0xe67e22)
+                dm_embed.add_field(name="Reason", value=reason, inline=False)
+                await member.send(embed=dm_embed)
+            except discord.Forbidden:
+                pass
+            await member.kick(reason=f"{reason} - By {ctx.author}")
+            embed = discord.Embed(title="✅ Member Kicked",
+                description=f"{member.mention} has been kicked.", color=0xe67e22, timestamp=datetime.utcnow())
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+            await ctx.send(embed=embed)
+            if _mod_log(bot):
+                await _mod_log(bot).log_kick(ctx.guild, member, ctx.author, reason, ctx.channel)
+            bot.logger.log(MODULE_NAME, f"{ctx.author} (?kick) kicked {member}")
+        except discord.Forbidden:
+            await _prefix_error(ctx, "❌ I don't have permission to kick this member.")
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "?kick failed", e)
+
+    @bot.command(name="timeout")
+    async def prefix_timeout(ctx, member: discord.Member = None, duration: int = None, *, reason: str = None):
+        """?timeout @member <minutes> <reason>"""
+        if not has_elevated_role(ctx.author):
+            return await _prefix_error(ctx, ERROR_NO_PERMISSION)
+        if not member or duration is None:
+            return await _prefix_error(ctx, "❌ Usage: `?timeout @member <minutes> <reason>`")
+        valid, err = await validate_reason(reason)
+        if not valid:
+            return await _prefix_error(ctx, err)
+        if member == ctx.author:
+            return await _prefix_error(ctx, ERROR_CANNOT_ACTION_SELF)
+        if not (1 <= duration <= 40320):
+            return await _prefix_error(ctx, "❌ Duration must be between 1 and 40320 minutes.")
+        try:
+            timeout_until = datetime.utcnow() + timedelta(minutes=duration)
+            await member.timeout(timeout_until, reason=f"{reason} - By {ctx.author}")
+            embed = discord.Embed(title="✅ Member Timed Out",
+                description=f"{member.mention} timed out for **{duration}** minutes.", color=0xe74c3c, timestamp=datetime.utcnow())
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+            await ctx.send(embed=embed)
+            bot.logger.log(MODULE_NAME, f"{ctx.author} (?timeout) timed out {member} for {duration}m")
+        except discord.Forbidden:
+            await _prefix_error(ctx, "❌ I don't have permission to timeout this member.")
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "?timeout failed", e)
+
+    @bot.command(name="untimeout")
+    async def prefix_untimeout(ctx, member: discord.Member = None):
+        """?untimeout @member"""
+        if not has_elevated_role(ctx.author):
+            return await _prefix_error(ctx, ERROR_NO_PERMISSION)
+        if not member:
+            return await _prefix_error(ctx, "❌ Usage: `?untimeout @member`")
+        try:
+            await member.timeout(None, reason=f"Timeout removed by {ctx.author}")
+            embed = discord.Embed(title="✅ Timeout Removed",
+                description=f"{member.mention}'s timeout has been removed.", color=0x2ecc71, timestamp=datetime.utcnow())
+            embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+            await ctx.send(embed=embed)
+            bot.logger.log(MODULE_NAME, f"{ctx.author} (?untimeout) removed timeout from {member}")
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "?untimeout failed", e)
+
+    @bot.command(name="mute")
+    async def prefix_mute(ctx, member: discord.Member = None, *, args: str = ""):
+        """?mute @member [duration] [reason]  — duration like 10m, 1h, 1d"""
+        if not ctx.author.guild_permissions.manage_roles and not has_elevated_role(ctx.author):
+            return await _prefix_error(ctx, "❌ You don't have permission to mute members.")
+        if not member:
+            return await _prefix_error(ctx, "❌ Usage: `?mute @member [duration] [reason]`")
+        if member == ctx.author:
+            return await _prefix_error(ctx, ERROR_CANNOT_ACTION_SELF)
+        if member == bot.user:
+            return await _prefix_error(ctx, ERROR_CANNOT_ACTION_BOT)
+
+        # Parse optional leading duration token (e.g. "10m some reason")
+        duration = None
+        reason = args or "No reason provided"
+        parts = args.split(None, 1)
+        if parts:
+            dur_match = re.match(r'^(\d+)([smhd])$', parts[0].lower())
+            if dur_match:
+                duration = parts[0]
+                reason = parts[1] if len(parts) > 1 else "No reason provided"
+
+        duration_seconds = None
+        duration_str = "Permanent"
+        if duration:
+            duration = duration.lower()
+            m = re.match(r'^(\d+)([smhd])$', duration)
+            if m:
+                v, u = int(m.group(1)), m.group(2)
+                multipliers = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}
+                labels = {'s': 'second', 'm': 'minute', 'h': 'hour', 'd': 'day'}
+                duration_seconds = v * multipliers[u]
+                duration_str = f"{v} {labels[u]}{'s' if v != 1 else ''}"
+
+        muted_role = discord.utils.get(ctx.guild.roles, name=moderation_manager.mute_manager.muted_role_name)
+        if not muted_role:
+            return await _prefix_error(ctx, f"❌ '{moderation_manager.mute_manager.muted_role_name}' role not found.")
+        if muted_role in member.roles:
+            return await _prefix_error(ctx, f"❌ {member.mention} is already muted.")
+
+        try:
+            await member.add_roles(muted_role, reason=f"{reason} - By {ctx.author}")
+            moderation_manager.mute_manager.add_mute(ctx.guild.id, member.id, reason, ctx.author, duration_seconds)
+            embed = discord.Embed(title="🔇 Member Muted",
+                description=f"{member.mention} has been muted.", color=0xe74c3c, timestamp=datetime.utcnow())
+            embed.add_field(name="Duration", value=duration_str, inline=True)
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+            await ctx.send(embed=embed)
+            bot.logger.log(MODULE_NAME, f"{ctx.author} (?mute) muted {member}")
+        except discord.Forbidden:
+            await _prefix_error(ctx, "❌ I don't have permission to mute this member.")
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "?mute failed", e)
+
+    @bot.command(name="unmute")
+    async def prefix_unmute(ctx, member: discord.Member = None):
+        """?unmute @member"""
+        if not ctx.author.guild_permissions.manage_roles and not has_elevated_role(ctx.author):
+            return await _prefix_error(ctx, "❌ You don't have permission to unmute members.")
+        if not member:
+            return await _prefix_error(ctx, "❌ Usage: `?unmute @member`")
+        muted_role = discord.utils.get(ctx.guild.roles, name=moderation_manager.mute_manager.muted_role_name)
+        if not muted_role or muted_role not in member.roles:
+            return await _prefix_error(ctx, f"❌ {member.mention} is not muted.")
+        try:
+            await member.remove_roles(muted_role, reason=f"Unmuted by {ctx.author}")
+            moderation_manager.mute_manager.remove_mute(ctx.guild.id, member.id)
+            embed = discord.Embed(title="🔊 Member Unmuted",
+                description=f"{member.mention} has been unmuted.", color=0x2ecc71, timestamp=datetime.utcnow())
+            embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+            await ctx.send(embed=embed)
+            bot.logger.log(MODULE_NAME, f"{ctx.author} (?unmute) unmuted {member}")
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "?unmute failed", e)
+
+    @bot.command(name="warn")
+    async def prefix_warn(ctx, member: discord.Member = None, *, reason: str = None):
+        """?warn @member <reason>"""
+        if not has_elevated_role(ctx.author):
+            return await _prefix_error(ctx, ERROR_NO_PERMISSION)
+        if not member:
+            return await _prefix_error(ctx, "❌ Usage: `?warn @member <reason>`")
+        valid, err = await validate_reason(reason)
+        if not valid:
+            return await _prefix_error(ctx, err)
+        if member == ctx.author:
+            return await _prefix_error(ctx, ERROR_CANNOT_ACTION_SELF)
+        if member == bot.user:
+            return await _prefix_error(ctx, ERROR_CANNOT_ACTION_BOT)
+
+        if not hasattr(bot, 'mod_oversight'):
+            return await _prefix_error(ctx, "❌ Oversight system unavailable.")
+        try:
+            from mod_oversight import WarnModal  # noqa — oversight handles storage
+        except ImportError:
+            pass
+
+        # Store warning directly via oversight
+        try:
+            warning_id = await bot.mod_oversight.log_mod_action({
+                'action': 'warn',
+                'moderator_id': ctx.author.id,
+                'moderator': str(ctx.author),
+                'user_id': member.id,
+                'user': str(member),
+                'reason': reason,
+                'guild_id': ctx.guild.id,
+                'channel_id': ctx.channel.id,
+                'message_id': ctx.message.id,
+            })
+            try:
+                dm_embed = discord.Embed(title="⚠️ You have been warned",
+                    description=f"You have been warned in **{ctx.guild.name}**", color=0xf39c12)
+                dm_embed.add_field(name="Reason", value=reason, inline=False)
+                await member.send(embed=dm_embed)
+            except discord.Forbidden:
+                pass
+            embed = discord.Embed(title="⚠️ Member Warned",
+                description=f"{member.mention} has been warned.", color=0xf39c12, timestamp=datetime.utcnow())
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+            if warning_id:
+                embed.set_footer(text=f"Warning ID: {warning_id}")
+            await ctx.send(embed=embed)
+            bot.logger.log(MODULE_NAME, f"{ctx.author} (?warn) warned {member}")
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "?warn failed", e)
+            await _prefix_error(ctx, "❌ Failed to issue warning.")
+
+    @bot.command(name="purge")
+    async def prefix_purge(ctx, amount: int = None, member: discord.Member = None):
+        """?purge <amount> [@member]"""
+        if not has_elevated_role(ctx.author):
+            return await _prefix_error(ctx, ERROR_NO_PERMISSION)
+        if amount is None:
+            return await _prefix_error(ctx, "❌ Usage: `?purge <amount> [@member]`")
+        if not (1 <= amount <= 100):
+            return await _prefix_error(ctx, "❌ Amount must be between 1 and 100.")
+        try:
+            await ctx.message.delete()
+            def check(m):
+                return m.author.id == member.id if member else True
+            deleted = await ctx.channel.purge(limit=amount, check=check)
+            embed = discord.Embed(title="✅ Messages Purged",
+                description=f"Deleted **{len(deleted)}** messages{f' from {member.mention}' if member else ''}.",
+                color=0x2ecc71, timestamp=datetime.utcnow())
+            embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+            confirm = await ctx.send(embed=embed)
+            await confirm.delete(delay=5)
+            bot.logger.log(MODULE_NAME, f"{ctx.author} (?purge) deleted {len(deleted)} messages")
+        except discord.Forbidden:
+            await _prefix_error(ctx, "❌ I don't have permission to delete messages.")
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "?purge failed", e)
+
+    @bot.command(name="softban")
+    async def prefix_softban(ctx, member: discord.Member = None, *, reason: str = None):
+        """?softban @member <reason>  — bans then immediately unbans to delete messages"""
+        if not has_elevated_role(ctx.author):
+            return await _prefix_error(ctx, ERROR_NO_PERMISSION)
+        if not member:
+            return await _prefix_error(ctx, "❌ Usage: `?softban @member <reason>`")
+        valid, err = await validate_reason(reason)
+        if not valid:
+            return await _prefix_error(ctx, err)
+        if member == ctx.author:
+            return await _prefix_error(ctx, ERROR_CANNOT_ACTION_SELF)
+        if member.top_role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
+            return await _prefix_error(ctx, ERROR_HIGHER_ROLE)
+        try:
+            try:
+                dm_embed = discord.Embed(title="🔨 You have been softbanned",
+                    description=f"You have been softbanned from **{ctx.guild.name}** (messages deleted, you may rejoin).",
+                    color=0xe67e22)
+                dm_embed.add_field(name="Reason", value=reason, inline=False)
+                await member.send(embed=dm_embed)
+            except discord.Forbidden:
+                pass
+            await ctx.guild.ban(member, reason=f"Softban: {reason} - By {ctx.author}", delete_message_days=7)
+            await ctx.guild.unban(member, reason="Softban complete")
+            embed = discord.Embed(title="✅ Member Softbanned",
+                description=f"{member.mention} has been softbanned (messages deleted, not permanently banned).",
+                color=0xe67e22, timestamp=datetime.utcnow())
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+            await ctx.send(embed=embed)
+            bot.logger.log(MODULE_NAME, f"{ctx.author} (?softban) softbanned {member}")
+        except discord.Forbidden:
+            await _prefix_error(ctx, "❌ I don't have permission to softban this member.")
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "?softban failed", e)
+
     bot.logger.log(MODULE_NAME, "Moderation module setup complete with oversight integration")

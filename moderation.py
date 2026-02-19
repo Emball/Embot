@@ -97,6 +97,19 @@ def get_event_logger(bot):
     """Return the logger's EventLogger if available."""
     return getattr(bot, '_logger_event_logger', None)
 
+def matches_banned_term(term: str, content_lower: str) -> bool:
+    """
+    Match a banned term against lowercased message content.
+    - URLs (contain '://' or 'www.') use a plain substring match since word
+      boundaries don't apply to URLs.
+    - Everything else uses \\b word-boundary matching so that 'embis' won't
+      fire on 'fembis', and 'mbis' won't fire on 'crumbs'.
+    """
+    term_lower = term.lower()
+    if "://" in term_lower or "www." in term_lower:
+        return term_lower in content_lower
+    return bool(re.search(r'\b' + re.escape(term_lower) + r'\b', content_lower))
+
 # ==================== UNIFIED CONTEXT ====================
 
 class ModContext:
@@ -1838,7 +1851,7 @@ def setup(bot):
 
         # Auto-mod: Child Safety
         for word in CHILD_SAFETY:
-            if word.lower() in content_lower:
+            if matches_banned_term(word, content_lower):
                 try:
                     await message.delete()
                     await message.guild.ban(message.author,
@@ -1854,7 +1867,7 @@ def setup(bot):
 
         # Auto-mod: Racial Slurs
         for word in RACIAL_SLURS:
-            if word.lower() in content_lower:
+            if matches_banned_term(word, content_lower):
                 try:
                     await message.delete()
                     count = mod_system.add_strike(
@@ -1887,7 +1900,7 @@ def setup(bot):
 
         # Auto-mod: Banned Words
         for word in BANNED_WORDS:
-            if word.lower() in content_lower:
+            if matches_banned_term(word, content_lower):
                 try:
                     await message.delete()
                     bot.logger.log(MODULE_NAME, f"Deleted banned word from {message.author}")

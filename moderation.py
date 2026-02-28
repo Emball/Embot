@@ -375,14 +375,25 @@ class MediaScanner:
         async with self._load_lock:
             if self._models_loaded:
                 return
+            self.bot.logger.log(MODULE_NAME,
+                f"[SCANNER] Loading models — NudeNet: {_nudenet_model is not None}, "
+                f"DeepFace ready: {_deepface_ready}")
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, _load_nudenet)
             await loop.run_in_executor(None, _load_deepface)
             self._models_loaded = True
+            self.bot.logger.log(MODULE_NAME,
+                f"[SCANNER] Models loaded — NudeNet: {_nudenet_model is not None}, "
+                f"DeepFace ready: {_deepface_ready}")
 
     async def scan_files(self, files_data: list, guild=None, context: str = "") -> ScanVerdict:
         """Scan a files_data list ({'filename', 'data'}) before re-hosting. Returns ScanVerdict."""
+        self.bot.logger.log(MODULE_NAME,
+            f"[SCANNER] scan_files called: {len(files_data)} file(s), context={context!r}")
         await self._ensure_models()
+        self.bot.logger.log(MODULE_NAME,
+            f"[SCANNER] Model state — NudeNet: {_nudenet_model is not None}, "
+            f"DeepFace: {_deepface_ready}")
         loop   = asyncio.get_event_loop()
         safe, blocked = [], []
 
@@ -392,30 +403,61 @@ class MediaScanner:
             ext = os.path.splitext(filename.lower())[1]
 
             if ext not in _SCAN_IMAGE_EXTS and ext not in _SCAN_VIDEO_EXTS:
+                self.bot.logger.log(MODULE_NAME,
+                    f"[SCANNER] '{filename}' — ext '{ext}' not scannable, passing through as safe")
                 safe.append(entry)
                 continue
 
+            self.bot.logger.log(MODULE_NAME,
+                f"[SCANNER] Scanning '{filename}' ({len(data)} bytes, ext={ext})")
             result = _FileScanResult(filename=filename, scannable=True)
             try:
-                is_explicit = await loop.run_in_executor(None, self._nudenet_scan, data, ext)
+                if _nudenet_model is None:
+                    self.bot.logger.log(MODULE_NAME,
+                        f"[SCANNER] '{filename}' — NudeNet not available, skipping nudity check")
+                    is_explicit = False
+                else:
+                    is_explicit = await loop.run_in_executor(None, self._nudenet_scan, data, ext)
+                    self.bot.logger.log(MODULE_NAME,
+                        f"[SCANNER] '{filename}' — NudeNet result: explicit={is_explicit}")
                 result.explicit = is_explicit
                 if is_explicit:
+                    if not _deepface_ready:
+                        self.bot.logger.log(MODULE_NAME,
+                            f"[SCANNER] '{filename}' — explicit but DeepFace not available, "
+                            f"skipping age check (will NOT block without age confirmation)")
                     min_age = await loop.run_in_executor(None, self._deepface_age, data)
                     result.min_age = min_age
+                    self.bot.logger.log(MODULE_NAME,
+                        f"[SCANNER] '{filename}' — DeepFace min_age={min_age} "
+                        f"(threshold={_AGE_THRESHOLD})")
                     if min_age is not None and min_age < _AGE_THRESHOLD:
                         result.blocked = True
                         result.reason  = f"Explicit + apparent age {min_age:.1f} < {_AGE_THRESHOLD}"
+                else:
+                    self.bot.logger.log(MODULE_NAME,
+                        f"[SCANNER] '{filename}' — not explicit, skipping age check")
             except Exception as e:
                 result.blocked = True
                 result.reason  = f"Scan error (blocked as precaution): {e}"
+                self.bot.logger.log(MODULE_NAME,
+                    f"[SCANNER] '{filename}' — EXCEPTION during scan (blocked as precaution): {e}", "WARNING")
                 _scanner_log.error(f"Scan error [{filename}]: {e}")
 
             if result.blocked:
                 blocked.append(result)
+                self.bot.logger.log(MODULE_NAME,
+                    f"[SCANNER] '{filename}' — BLOCKED: {result.reason}", "WARNING")
                 _scanner_log.warning(f"BLOCKED [{filename}]: {result.reason}")
             else:
+                self.bot.logger.log(MODULE_NAME,
+                    f"[SCANNER] '{filename}' — SAFE (explicit={result.explicit}, "
+                    f"min_age={result.min_age})")
                 safe.append(entry)
 
+        self.bot.logger.log(MODULE_NAME,
+            f"[SCANNER] scan_files complete: safe={len(safe)}, blocked={len(blocked)}, "
+            f"context={context!r}")
         verdict = ScanVerdict(blocked=bool(blocked), safe_files=safe, blocked_files=blocked)
         if verdict.blocked:
             await self._alert(verdict, guild, context)
@@ -425,6 +467,7 @@ class MediaScanner:
 
     def _nudenet_scan(self, data: bytes, ext: str) -> bool:
         if _nudenet_model is None:
+            _scanner_log.debug("[SCANNER] _nudenet_scan: model not loaded, returning False")
             return False
         import tempfile
         if ext in _SCAN_VIDEO_EXTS:
@@ -438,10 +481,11 @@ class MediaScanner:
         try:
             result = _nudenet_model.classify(path)
             preds  = list(result.values())[0] if result else {}
-            return any(
-                lbl in _EXPLICIT_LABELS and conf >= _NUDENET_THRESHOLD
-                for lbl, conf in preds.items()
-            )
+            triggered = [(lbl, conf) for lbl, conf in preds.items()
+                         if lbl in _EXPLICIT_LABELS and conf >= _NUDENET_THRESHOLD]
+            _scanner_log.info(f"[SCANNER] NudeNet preds for '{filename}': "
+                              f"triggered={triggered}, all_scores={dict(preds)}")
+            return bool(triggered)
         finally:
             try:
                 os.unlink(path)
@@ -561,6 +605,8 @@ class ModerationSystem:
         self.oversight_file = data_dir / "mod_oversight_data.json"
         self.appeals_file = data_dir / "ban_appeals.json"
         self.invites_file = data_dir / "ban_reversal_invites.json"
+        self.bot_log_cache_file = data_dir / "bot_log_cache.json"
+        self.deletion_warnings_file = data_dir / "deletion_warnings.json"
 
         # Load all data
         self.role_cache = self._load_json(self.roles_file, {})
@@ -571,16 +617,29 @@ class ModerationSystem:
         self.invites = self._load_json(self.invites_file, {})
 
         # Bot-log cache: tracks last 500 messages sent to bot-logs so deletions can be countered.
-        # bot_log_cache maps discord message_id -> log record dict
-        # bot_log_order is a deque of message_ids in insertion order for LRU eviction
+        # Persisted to disk so it survives bot restarts.
+        # Keys are stored as strings in JSON and converted back to int on load.
         BOT_LOG_CACHE_SIZE = 500
-        self._bot_log_cache: Dict[int, Dict] = {}
-        self._bot_log_order: deque = deque()
         self._bot_log_cache_size = BOT_LOG_CACHE_SIZE
+        _raw_blc = self._load_json(self.bot_log_cache_file, {})
+        # Convert string keys -> int, and strip any files_data (bytes don't survive JSON)
+        self._bot_log_cache: Dict[int, Dict] = {}
+        for k, v in _raw_blc.items():
+            v.pop('files_data', None)  # bytes can't round-trip through JSON
+            self._bot_log_cache[int(k)] = v
+        # Rebuild insertion-order deque from persisted timestamps so eviction is correct
+        _sorted_ids = sorted(
+            self._bot_log_cache.keys(),
+            key=lambda mid: self._bot_log_cache[mid].get('timestamp', '')
+        )
+        self._bot_log_order: deque = deque(_sorted_ids)
+        self.bot.logger.log(MODULE_NAME,
+            f"Loaded {len(self._bot_log_cache)} bot-log cache entries from disk")
 
-        # Tracks message_ids of deletion-warning messages (perpetual resend on delete)
-        # warning_message_id -> original_log_id
-        self._deletion_warnings: Dict[int, str] = {}
+        # Deletion-warning tracking: persisted so warnings survive restarts.
+        # warning_message_id -> original_log_id  (string keys in JSON -> int keys in memory)
+        _raw_dw = self._load_json(self.deletion_warnings_file, {})
+        self._deletion_warnings: Dict[int, str] = {int(k): v for k, v in _raw_dw.items()}
 
         # Deletion attempt log: list of dicts for daily report
         # Each: {'log_id', 'deleter', 'deleter_id', 'timestamp', 'original_title'}
@@ -1165,6 +1224,23 @@ class ModerationSystem:
         while len(self._bot_log_order) > self._bot_log_cache_size:
             oldest_id = self._bot_log_order.popleft()
             self._bot_log_cache.pop(oldest_id, None)
+        # Persist to disk — strip files_data (bytes) so JSON serialisation works
+        try:
+            serialisable = {
+                str(mid): {k: v for k, v in rec.items() if k != 'files_data'}
+                for mid, rec in self._bot_log_cache.items()
+            }
+            self._save_json(self.bot_log_cache_file, serialisable)
+        except Exception as _e:
+            self.bot.logger.log(MODULE_NAME, f"Failed to persist bot_log_cache: {_e}", "WARNING")
+
+    def _save_deletion_warnings(self):
+        """Persist _deletion_warnings to disk (string keys for JSON compatibility)."""
+        try:
+            self._save_json(self.deletion_warnings_file,
+                            {str(k): v for k, v in self._deletion_warnings.items()})
+        except Exception as _e:
+            self.bot.logger.log(MODULE_NAME, f"Failed to persist deletion_warnings: {_e}", "WARNING")
 
     async def send_bot_log(self, guild: discord.Guild, embed: discord.Embed,
                            files_data: list = None, log_id: str = None) -> Optional[int]:
@@ -1258,6 +1334,7 @@ class ModerationSystem:
                                               log_id=log_id)
         if new_msg_id:
             self._deletion_warnings[new_msg_id] = log_id
+            self._save_deletion_warnings()
 
     # ==================== OVERSIGHT: APPEALS ====================
 
@@ -2506,7 +2583,13 @@ def setup(bot):
             # ── Cached media re-hosting — runs for ALL channels including bot-logs ──
             # Must happen before the bot-log protection block so that user messages
             # sent directly in #bot-logs are still re-hosted on deletion.
+            # IMPORTANT: mark as handled synchronously BEFORE any await so the logger's
+            # on_message_delete listener (which may run concurrently) sees the flag
+            # immediately and doesn't send a duplicate fallback log.
             if not message.author.bot and message.id in mod_system.media_cache:
+                if not hasattr(bot, '_deletion_log_handled'):
+                    bot._deletion_log_handled = set()
+                bot._deletion_log_handled.add(message.id)
                 guild_id = str(message.guild.id)
                 channel_id = str(message.channel.id)
                 cached = mod_system.media_cache.get(message.id)
@@ -2534,10 +2617,6 @@ def setup(bot):
                 mod_system.message_cache[guild_id][channel_id] = [
                     m for m in channel_msgs if m['id'] != message.id
                 ]
-                # Mark this message as handled so logger.py's on_message_delete skips it
-                if not hasattr(bot, '_deletion_log_handled'):
-                    bot._deletion_log_handled = set()
-                bot._deletion_log_handled.add(message.id)
                 # Directly invoke the logger with the re-hosted files — avoids the race
                 # condition where logger's listener fires before this one populates
                 # _pending_rehosted_media, causing the log to use the original (expiring) URL.
@@ -2561,54 +2640,46 @@ def setup(bot):
             bot_logs_channel = mod_system._get_bot_logs_channel(message.guild)
             if bot_logs_channel and message.channel.id == bot_logs_channel.id:
                 if message.id in mod_system._bot_log_cache:
-                    # Determine who deleted it via audit log
-                    deleter = None
-                    try:
-                        await asyncio.sleep(0.75)  # give audit log time to populate
-                        async for entry in message.guild.audit_logs(
-                            limit=10, action=discord.AuditLogAction.message_delete
-                        ):
-                            age = (discord.utils.utcnow() - entry.created_at).total_seconds()
-                            if age < 15 and entry.target.id == message.author.id:
-                                deleter = entry.user
-                                break
-                    except Exception as e:
-                        mod_system.bot.logger.log(MODULE_NAME, f"Audit log fetch failed: {e}", "WARNING")
-
-                    # If the bot deleted it itself (e.g. purge command), ignore
-                    if deleter and deleter.id == message.guild.me.id:
+                    # Only the bot itself or elevated users can delete bot-log messages,
+                    # so no audit log lookup is needed. Just check if the bot deleted it
+                    # itself (e.g. purge command) via the cached author field — if the
+                    # message author is the bot, it was a self-delete; ignore it.
+                    # In all other cases (elevated user deleted it), repost.
+                    cached_record = mod_system._bot_log_cache.get(message.id, {})
+                    if message.author and message.author.id == message.guild.me.id:
+                        # Bot deleted its own log (purge) — don't repost
+                        mod_system.bot.logger.log(MODULE_NAME,
+                            f"Bot-log msg {message.id} deleted by bot itself — ignoring")
                         return
-
-                    # Act if elevated user deleted it, OR if we couldn't identify the deleter
-                    # (fail-safe: unknown = treat as suspicious)
-                    if deleter is None or has_elevated_role(deleter):
-                        await mod_system.handle_bot_log_deletion(
-                            message.id, deleter or message.guild.me, message.guild
+                    await mod_system.handle_bot_log_deletion(
+                        message.id, message.guild.me, message.guild
+                    )
+                elif message.id in mod_system._deletion_warnings:
+                    # This was a deletion-warning message — resend regardless of who deleted it
+                    original_log_id = mod_system._deletion_warnings.pop(message.id)
+                    mod_system._save_deletion_warnings()
+                    # Rebuild and resend the warning perpetually
+                    warning_embed = discord.Embed(
+                        title="🚨 Bot-Log Deletion Warning — REPOSTED",
+                        description=(
+                            f"A deletion warning for log `{original_log_id}` was itself deleted.\n"
+                            f"This report will continue to reappear every time it is deleted."
+                        ),
+                        color=0xff0000,
+                        timestamp=discord.utils.utcnow(),
+                    )
+                    warning_embed.add_field(name="Original Log ID", value=original_log_id, inline=True)
+                    warning_embed.set_footer(text="Deleting this message will cause it to repost again.")
+                    try:
+                        new_warn_msg = await bot_logs_channel.send(embed=warning_embed)
+                        mod_system._register_bot_log(
+                            new_warn_msg.id, f"WARN-{original_log_id}", warning_embed,
+                            is_warning=True, warning_for_log_id=original_log_id
                         )
-                    elif message.id in mod_system._deletion_warnings:
-                        # This was a deletion-warning message — resend regardless of who deleted it
-                        original_log_id = mod_system._deletion_warnings.pop(message.id)
-                        # Rebuild and resend the warning perpetually
-                        warning_embed = discord.Embed(
-                            title="🚨 Bot-Log Deletion Warning — REPOSTED",
-                            description=(
-                                f"A deletion warning for log `{original_log_id}` was itself deleted.\n"
-                                f"This report will continue to reappear every time it is deleted."
-                            ),
-                            color=0xff0000,
-                            timestamp=discord.utils.utcnow(),
-                        )
-                        warning_embed.add_field(name="Original Log ID", value=original_log_id, inline=True)
-                        warning_embed.set_footer(text="Deleting this message will cause it to repost again.")
-                        try:
-                            new_warn_msg = await bot_logs_channel.send(embed=warning_embed)
-                            mod_system._register_bot_log(
-                                new_warn_msg.id, f"WARN-{original_log_id}", warning_embed,
-                                is_warning=True, warning_for_log_id=original_log_id
-                            )
-                            mod_system._deletion_warnings[new_warn_msg.id] = original_log_id
-                        except Exception as e:
-                            mod_system.bot.logger.error(MODULE_NAME, f"Failed to repost deletion warning: {e}")
+                        mod_system._deletion_warnings[new_warn_msg.id] = original_log_id
+                        mod_system._save_deletion_warnings()
+                    except Exception as e:
+                        mod_system.bot.logger.error(MODULE_NAME, f"Failed to repost deletion warning: {e}")
 
         except Exception as _e:
             import traceback as _tb

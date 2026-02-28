@@ -93,6 +93,14 @@ class EventLogger:
         mod_sys = getattr(self.bot, '_mod_system', None)
         if mod_sys and hasattr(mod_sys, 'scanner'):
             self._scanner = mod_sys.scanner
+            self.bot.logger.log(MODULE_NAME,
+                f"[SCANNER] _get_scanner: acquired scanner from bot._mod_system")
+        else:
+            self.bot.logger.log(MODULE_NAME,
+                f"[SCANNER] _get_scanner: scanner NOT available — "
+                f"bot._mod_system={mod_sys is not None}, "
+                f"has scanner attr={hasattr(mod_sys, 'scanner') if mod_sys else 'N/A'}",
+                "WARNING")
         return self._scanner
     
     async def log_to_channel(self, channel, embed, file: discord.File = None, files: list = None) -> Optional[int]:
@@ -127,22 +135,13 @@ class EventLogger:
     async def log_message_delete(self, message, rehosted_files: list = None):
         """Log when a message is deleted. rehosted_files is a list of dicts with 'filename' and 'data' (bytes)."""
         if not self.config.get("log_message_deletes"):
-            self.bot.logger.log(MODULE_NAME,
-                f"[DELETE-LOG] Skipping msg {message.id} — log_message_deletes is disabled")
             return
         if message.author.bot:
             return
         
         channel = self.get_bot_logs_channel(message.guild)
         if not channel:
-            self.bot.logger.log(MODULE_NAME,
-                f"[DELETE-LOG] WARN: No bot-logs channel configured — cannot log deletion of msg {message.id}", "WARNING")
             return
-
-        self.bot.logger.log(MODULE_NAME,
-            f"[DELETE-LOG] Building deletion log for msg {message.id} — "
-            f"rehosted_files={'YES (' + str(len(rehosted_files)) + ' files)' if rehosted_files else 'None'}, "
-            f"original attachments={len(message.attachments)}")
         
         # Build description
         description = f"**Message sent by {message.author.mention} deleted in {message.channel.mention}**"
@@ -167,25 +166,14 @@ class EventLogger:
         if rehosted_files:
             # Scan through MediaScanner before uploading to Discord CDN
             scanner = self._get_scanner()
-            self.bot.logger.log(MODULE_NAME,
-                f"[DELETE-LOG] scanner available: {scanner is not None} for msg {message.id}")
             if scanner:
-                self.bot.logger.log(MODULE_NAME,
-                    f"[DELETE-LOG] Running MediaScanner on {len(rehosted_files)} file(s) for msg {message.id}")
                 verdict = await scanner.scan_files(
                     rehosted_files,
                     guild=message.guild,
                     context=f"deleted message {message.id} by {message.author}",
                 )
-                self.bot.logger.log(MODULE_NAME,
-                    f"[DELETE-LOG] MediaScanner verdict for msg {message.id}: "
-                    f"blocked={verdict.blocked}, "
-                    f"safe_files={len(verdict.safe_files)}, "
-                    f"blocked_files={len(verdict.blocked_files)}")
                 if verdict.blocked and not verdict.safe_files:
                     # All files blocked — log embed only with a note
-                    self.bot.logger.log(MODULE_NAME,
-                        f"[DELETE-LOG] All files blocked by scanner for msg {message.id} — sending embed only")
                     embed.add_field(
                         name="⚠️ Attachment(s) Withheld",
                         value="One or more files were blocked by MediaScanner. The server owner has been alerted.",
@@ -193,19 +181,11 @@ class EventLogger:
                     )
                     await self.log_to_channel(channel, embed)
                     return
-                if verdict.blocked:
-                    self.bot.logger.log(MODULE_NAME,
-                        f"[DELETE-LOG] Some files blocked by scanner for msg {message.id} — "
-                        f"uploading {len(verdict.safe_files)} safe file(s) only")
                 rehosted_files = verdict.safe_files
 
             # Separate images from audio/other
             image_files = [f for f in rehosted_files if f['filename'].lower().endswith(image_exts)]
             other_files = [f for f in rehosted_files if not f['filename'].lower().endswith(image_exts)]
-            self.bot.logger.log(MODULE_NAME,
-                f"[DELETE-LOG] msg {message.id} file breakdown after scan: "
-                f"image_files={[f['filename'] for f in image_files]}, "
-                f"other_files={[f['filename'] for f in other_files]}")
 
             discord_files = [
                 discord.File(fp=__import__('io').BytesIO(f['data']), filename=f['filename'])
@@ -213,17 +193,13 @@ class EventLogger:
             ]
 
             if image_files and not other_files:
-                self.bot.logger.log(MODULE_NAME,
-                    f"[DELETE-LOG] msg {message.id}: sending as image embed "
-                    f"(set_image → attachment://{image_files[0]['filename']})")
                 # All images — first image goes in the embed, all sent together
                 embed.set_image(url=f"attachment://{image_files[0]['filename']}")
                 await self.log_to_channel(channel, embed, files=discord_files)
             elif other_files:
+                # Has audio/other — send files above embed with a note
                 has_audio = any(f['filename'].lower().endswith(audio_exts) for f in other_files)
                 label = "audio" if has_audio else "file"
-                self.bot.logger.log(MODULE_NAME,
-                    f"[DELETE-LOG] msg {message.id}: sending as {label} (files above embed)")
                 embed.add_field(name="Attachment", value=f"*{label} hosted above*", inline=False)
                 # Send files first, then embed as a follow-up so files appear above
                 try:
@@ -232,23 +208,13 @@ class EventLogger:
                 except Exception as e:
                     self.bot.logger.error(MODULE_NAME, f"Failed to send deletion log with files: {e}")
             else:
-                self.bot.logger.log(MODULE_NAME,
-                    f"[DELETE-LOG] WARN: msg {message.id} — rehosted_files was non-empty but both "
-                    f"image_files and other_files are empty after scan filtering; sending embed only. "
-                    f"rehosted_files filenames: {[f['filename'] for f in rehosted_files]}", "WARNING")
                 await self.log_to_channel(channel, embed)
         else:
             # No cached media — fall back to original URL for images (may expire)
-            self.bot.logger.log(MODULE_NAME,
-                f"[DELETE-LOG] msg {message.id}: no rehosted_files — "
-                f"falling back to original URL (attachments: "
-                f"{[att.filename for att in message.attachments]})")
             if message.attachments:
                 for att in message.attachments:
                     if att.filename.lower().endswith(image_exts):
                         embed.set_image(url=att.url)
-                        self.bot.logger.log(MODULE_NAME,
-                            f"[DELETE-LOG] msg {message.id}: set_image to original URL for '{att.filename}'")
                         break
             await self.log_to_channel(channel, embed)
     
@@ -1008,20 +974,12 @@ def setup(bot):
     async def on_message_delete(message):
         """Called when a message is deleted"""
         if message.guild:
-            # If moderation.py already handled this deletion (it had cached media and
-            # called log_message_delete directly), skip it here to avoid a duplicate
-            # log with the stale/expiring original attachment URL.
-            handled = getattr(bot, '_deletion_log_handled', set())
-            if message.id in handled:
-                handled.discard(message.id)
-                bot.logger.log(MODULE_NAME,
-                    f"[DELETE-LOG] msg {message.id} already handled by moderation.py — skipping logger listener")
-                return
-            bot.logger.log(MODULE_NAME,
-                f"[DELETE-LOG] msg {message.id} not in _deletion_log_handled — "
-                f"handling in logger listener (no cached media or moderation didn't fire first). "
-                f"Has attachments: {len(message.attachments)}")
-            await event_logger.log_message_delete(message, rehosted_files=None)
+            # Pick up any pre-decrypted media stashed by the moderation module
+            rehosted_files = None
+            pending = getattr(bot, '_pending_rehosted_media', {})
+            if message.id in pending:
+                rehosted_files = pending.pop(message.id)
+            await event_logger.log_message_delete(message, rehosted_files=rehosted_files)
     
     @bot.listen()
     async def on_message_edit(before, after):

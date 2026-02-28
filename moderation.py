@@ -547,6 +547,10 @@ class ModerationSystem:
         # Per-process Fernet key — generated fresh each run.
         self._fernet = Fernet(Fernet.generate_key())
 
+        # Encrypted media staging directory
+        self.media_dir = data_dir / "media_cache"
+        self.media_dir.mkdir(exist_ok=True)
+
         # Pre-upload safety scanner
         self.scanner = MediaScanner(bot, OWNER_ID, self._get_bot_logs_channel)
 
@@ -1196,15 +1200,10 @@ class ModerationSystem:
         if not record:
             return
 
-        bot_logs = self._get_bot_logs_channel(guild)
-        if not bot_logs:
-            return
-
         log_id = record['log_id']
         original_embed_data = record['embed']
         timestamp = datetime.utcnow()
 
-        # Log the deletion attempt
         self.deletion_attempts.append({
             'log_id': log_id,
             'deleter': str(deleter),
@@ -1217,52 +1216,32 @@ class ModerationSystem:
         self.bot.logger.log(MODULE_NAME,
             f"⚠️ Bot-log deletion attempted by {deleter} (ID: {deleter.id}) for log {log_id}", "WARNING")
 
-        # Rebuild and resend the original log embed
-        orig_embed = discord.Embed(
+        # Rebuild original embed, turn it red, append deletion attempt info — one single message
+        embed = discord.Embed(
             title=original_embed_data.get('title'),
             description=original_embed_data.get('description'),
-            color=original_embed_data.get('color', 0xff4500),
-        )
-        for field in original_embed_data.get('fields', []):
-            orig_embed.add_field(name=field['name'], value=field['value'], inline=field['inline'])
-        if original_embed_data.get('footer'):
-            orig_embed.set_footer(text=original_embed_data['footer'])
-        if original_embed_data.get('author_name'):
-            orig_embed.set_author(name=original_embed_data['author_name'],
-                                  icon_url=original_embed_data.get('author_icon') or discord.Embed.Empty)
-        if original_embed_data.get('image_url'):
-            orig_embed.set_image(url=original_embed_data['image_url'])
-
-        # Resend original log (re-registers under a new message id with same log_id)
-        new_orig_msg_id = await self.send_bot_log(guild, orig_embed,
-                                                   files_data=record.get('files_data'),
-                                                   log_id=log_id)
-
-        # Build deletion warning embed
-        warning_embed = discord.Embed(
-            title="🚨 Bot-Log Deletion Attempted",
-            description=(
-                f"**{deleter.mention}** (`{deleter}` | ID: `{deleter.id}`) attempted to delete a bot-log.\n"
-                f"The original log has been reposted above."
-            ),
             color=0xff0000,
             timestamp=timestamp,
         )
-        warning_embed.add_field(name="Log ID", value=log_id, inline=True)
-        warning_embed.add_field(name="Original Title",
-                                value=original_embed_data.get('title') or '*(no title)*', inline=True)
-        warning_embed.add_field(name="Deleted By",
-                                value=f"{deleter.mention} ({deleter.id})", inline=False)
-        warning_embed.set_footer(text=f"Deleting this warning will cause it to perpetually repost.")
+        for field in original_embed_data.get('fields', []):
+            embed.add_field(name=field['name'], value=field['value'], inline=field['inline'])
+        if original_embed_data.get('author_name'):
+            embed.set_author(
+                name=original_embed_data['author_name'],
+                icon_url=original_embed_data.get('author_icon') or discord.Embed.Empty,
+            )
+        if original_embed_data.get('image_url'):
+            embed.set_image(url=original_embed_data['image_url'])
+        embed.add_field(name="🚨 Deletion Attempted By",
+                        value=f"{deleter.mention} (`{deleter}` | `{deleter.id}`)", inline=False)
+        original_footer = original_embed_data.get('footer') or ''
+        embed.set_footer(text=f"{original_footer + ' • ' if original_footer else ''}Log ID: {log_id} • Deleting this will cause it to repost")
 
-        try:
-            warning_msg = await bot_logs.send(embed=warning_embed)
-            # Register the warning — if deleted, its warning_for_log_id points to the original log_id
-            self._register_bot_log(warning_msg.id, f"WARN-{log_id}", warning_embed,
-                                   is_warning=True, warning_for_log_id=log_id)
-            self._deletion_warnings[warning_msg.id] = log_id
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, f"Failed to send deletion warning: {e}")
+        new_msg_id = await self.send_bot_log(guild, embed,
+                                              files_data=record.get('files_data'),
+                                              log_id=log_id)
+        if new_msg_id:
+            self._deletion_warnings[new_msg_id] = log_id
 
     # ==================== OVERSIGHT: APPEALS ====================
 
@@ -1554,7 +1533,7 @@ class ModerationSystem:
 # ==================== UNIFIED COMMAND LOGIC ====================
 
 async def _do_ban(ctx: ModContext, mod_system: ModerationSystem,
-                  user: discord.User, reason: str, delete_days: int = 0):
+                  user: discord.User, reason: str, delete_days: int = 0, fake: bool = False):
     if not has_elevated_role(ctx.author):
         return await ctx.error(ERROR_NO_PERMISSION)
     ok, err = validate_reason(reason)
@@ -1586,8 +1565,9 @@ async def _do_ban(ctx: ModContext, mod_system: ModerationSystem,
             pass
 
         # Perform Action
-        await ctx.guild.ban(user, reason=f"{reason} - By {ctx.author}",
-                            delete_message_days=delete_days)
+        if not fake:
+            await ctx.guild.ban(user, reason=f"{reason} - By {ctx.author}",
+                                delete_message_days=delete_days)
 
         # In-Chat Response
         embed = discord.Embed(title="✅ User Banned",
@@ -1632,13 +1612,14 @@ async def _do_ban(ctx: ModContext, mod_system: ModerationSystem,
         ctx.bot.logger.error(MODULE_NAME, "Ban failed", e)
 
 async def _do_unban(ctx: ModContext, mod_system: ModerationSystem,
-                    user_id: str, reason: str = "No reason provided"):
+                    user_id: str, reason: str = "No reason provided", fake: bool = False):
     if not ctx.author.guild_permissions.ban_members:
         return await ctx.error("❌ You don't have permission to unban members.")
     try:
         user = await ctx.bot.fetch_user(int(user_id))
-        await ctx.guild.unban(user, reason=f"{reason} - By {ctx.author}")
-        mod_system.resolve_pending_action(user.id, 'ban')
+        if not fake:
+            await ctx.guild.unban(user, reason=f"{reason} - By {ctx.author}")
+            mod_system.resolve_pending_action(user.id, 'ban')
         embed = discord.Embed(title="✅ User Unbanned",
                               description=f"{user.mention} has been unbanned.",
                               color=0x2ecc71, timestamp=datetime.utcnow())
@@ -1655,7 +1636,7 @@ async def _do_unban(ctx: ModContext, mod_system: ModerationSystem,
         ctx.bot.logger.error(MODULE_NAME, "Unban failed", e)
 
 async def _do_kick(ctx: ModContext, mod_system: ModerationSystem,
-                   member: discord.Member, reason: str):
+                   member: discord.Member, reason: str, fake: bool = False):
     if not has_elevated_role(ctx.author):
         return await ctx.error(ERROR_NO_PERMISSION)
     ok, err = validate_reason(reason)
@@ -1679,7 +1660,8 @@ async def _do_kick(ctx: ModContext, mod_system: ModerationSystem,
         except discord.Forbidden:
             pass
 
-        await member.kick(reason=f"{reason} - By {ctx.author}")
+        if not fake:
+            await member.kick(reason=f"{reason} - By {ctx.author}")
 
         embed = discord.Embed(title="✅ Member Kicked",
                               description=f"{member.mention} has been kicked.",
@@ -1716,7 +1698,7 @@ async def _do_kick(ctx: ModContext, mod_system: ModerationSystem,
         ctx.bot.logger.error(MODULE_NAME, "Kick failed", e)
 
 async def _do_timeout(ctx: ModContext, mod_system: ModerationSystem,
-                      member: discord.Member, duration: int, reason: str):
+                      member: discord.Member, duration: int, reason: str, fake: bool = False):
     if not has_elevated_role(ctx.author):
         return await ctx.error(ERROR_NO_PERMISSION)
     ok, err = validate_reason(reason)
@@ -1729,8 +1711,9 @@ async def _do_timeout(ctx: ModContext, mod_system: ModerationSystem,
     if not (1 <= duration <= 40320):
         return await ctx.error("❌ Duration must be between 1 and 40320 minutes.")
     try:
-        await member.timeout(datetime.utcnow() + timedelta(minutes=duration),
-                             reason=f"{reason} - By {ctx.author}")
+        if not fake:
+            await member.timeout(datetime.utcnow() + timedelta(minutes=duration),
+                                 reason=f"{reason} - By {ctx.author}")
         embed = discord.Embed(title="✅ Member Timed Out",
                               description=f"{member.mention} timed out for **{duration}** minutes.",
                               color=0xe74c3c, timestamp=datetime.utcnow())
@@ -1755,7 +1738,7 @@ async def _do_timeout(ctx: ModContext, mod_system: ModerationSystem,
         await ctx.error("❌ An error occurred while trying to timeout the member.")
         ctx.bot.logger.error(MODULE_NAME, "Timeout failed", e)
 
-async def _do_untimeout(ctx: ModContext, mod_system: ModerationSystem, member: discord.Member):
+async def _do_untimeout(ctx: ModContext, mod_system: ModerationSystem, member: discord.Member, fake: bool = False):
     if not ctx.author.guild_permissions.moderate_members and not has_elevated_role(ctx.author):
         return await ctx.error("❌ You don't have permission to moderate members.")
     if member == ctx.author:
@@ -1763,7 +1746,8 @@ async def _do_untimeout(ctx: ModContext, mod_system: ModerationSystem, member: d
     if member == ctx.bot.user:
         return await ctx.error(ERROR_CANNOT_ACTION_BOT)
     try:
-        await member.timeout(None, reason=f"Timeout removed by {ctx.author}")
+        if not fake:
+            await member.timeout(None, reason=f"Timeout removed by {ctx.author}")
         embed = discord.Embed(title="✅ Timeout Removed",
                               description=f"{member.mention}'s timeout has been removed.",
                               color=0x2ecc71, timestamp=datetime.utcnow())
@@ -1776,7 +1760,7 @@ async def _do_untimeout(ctx: ModContext, mod_system: ModerationSystem, member: d
 
 async def _do_mute(ctx: ModContext, mod_system: ModerationSystem,
                    member: discord.Member, reason: str = "No reason provided",
-                   duration: Optional[str] = None):
+                   duration: Optional[str] = None, fake: bool = False):
     if not ctx.author.guild_permissions.manage_roles and not has_elevated_role(ctx.author):
         return await ctx.error("❌ You don't have permission to mute members.")
     if member == ctx.author:
@@ -1797,8 +1781,9 @@ async def _do_mute(ctx: ModContext, mod_system: ModerationSystem,
                 except Exception:
                     pass
 
-        await member.add_roles(muted_role, reason=reason)
-        mod_system.add_mute(ctx.guild.id, member.id, reason, ctx.author, duration_seconds)
+        if not fake:
+            await member.add_roles(muted_role, reason=reason)
+            mod_system.add_mute(ctx.guild.id, member.id, reason, ctx.author, duration_seconds)
 
         try:
             dm = discord.Embed(title="🔇 You Have Been Muted",
@@ -1835,15 +1820,16 @@ async def _do_mute(ctx: ModContext, mod_system: ModerationSystem,
         await ctx.error("❌ An error occurred while trying to mute the member.")
         ctx.bot.logger.error(MODULE_NAME, "Mute failed", e)
 
-async def _do_unmute(ctx: ModContext, mod_system: ModerationSystem, member: discord.Member):
+async def _do_unmute(ctx: ModContext, mod_system: ModerationSystem, member: discord.Member, fake: bool = False):
     if not ctx.author.guild_permissions.manage_roles and not has_elevated_role(ctx.author):
         return await ctx.error("❌ You don't have permission to manage roles.")
     muted_role = discord.utils.get(ctx.guild.roles, name=MUTED_ROLE_NAME)
     if not muted_role or muted_role not in member.roles:
         return await ctx.error("❌ This member is not muted.")
     try:
-        await member.remove_roles(muted_role, reason=f"Unmuted by {ctx.author}")
-        mod_system.remove_mute(ctx.guild.id, member.id)
+        if not fake:
+            await member.remove_roles(muted_role, reason=f"Unmuted by {ctx.author}")
+            mod_system.remove_mute(ctx.guild.id, member.id)
         embed = discord.Embed(title="✅ Member Unmuted",
                               description=f"{member.mention} has been unmuted.",
                               color=0x2ecc71, timestamp=datetime.utcnow())
@@ -1855,7 +1841,7 @@ async def _do_unmute(ctx: ModContext, mod_system: ModerationSystem, member: disc
         ctx.bot.logger.error(MODULE_NAME, "Unmute failed", e)
 
 async def _do_softban(ctx: ModContext, mod_system: ModerationSystem,
-                      member: discord.Member, reason: str, delete_days: int = 7):
+                      member: discord.Member, reason: str, delete_days: int = 7, fake: bool = False):
     if not has_elevated_role(ctx.author):
         return await ctx.error(ERROR_NO_PERMISSION)
     ok, err = validate_reason(reason)
@@ -1870,9 +1856,10 @@ async def _do_softban(ctx: ModContext, mod_system: ModerationSystem,
 
     delete_days = max(0, min(7, delete_days))
     try:
-        await member.ban(reason=f"Softban: {reason} - By {ctx.author}",
-                         delete_message_days=delete_days)
-        await ctx.guild.unban(member, reason=f"Softban unban - By {ctx.author}")
+        if not fake:
+            await member.ban(reason=f"Softban: {reason} - By {ctx.author}",
+                             delete_message_days=delete_days)
+            await ctx.guild.unban(member, reason=f"Softban unban - By {ctx.author}")
 
         embed = discord.Embed(
             title="✅ Member Softbanned",
@@ -1913,7 +1900,7 @@ async def _do_softban(ctx: ModContext, mod_system: ModerationSystem,
         ctx.bot.logger.error(MODULE_NAME, "Softban failed", e)
 
 async def _do_warn(ctx: ModContext, mod_system: ModerationSystem,
-                   member: discord.Member, reason: str):
+                   member: discord.Member, reason: str, fake: bool = False):
     if not has_elevated_role(ctx.author):
         return await ctx.error(ERROR_NO_PERMISSION)
     ok, err = validate_reason(reason)
@@ -1924,7 +1911,7 @@ async def _do_warn(ctx: ModContext, mod_system: ModerationSystem,
     if member == ctx.bot.user:
         return await ctx.error(ERROR_CANNOT_ACTION_BOT)
     try:
-        strike_count = mod_system.add_strike(member.id, reason)
+        strike_count = mod_system.get_strikes(member.id) + 1 if fake else mod_system.add_strike(member.id, reason)
         try:
             dm = discord.Embed(title="⚠️ Warning",
                                description=f"You have been warned in **{ctx.guild.name}**",
@@ -1988,7 +1975,7 @@ async def _do_clearwarnings(ctx: ModContext, mod_system: ModerationSystem, membe
         await ctx.reply(f"**{member}** has no warnings to clear.", ephemeral=True)
 
 async def _do_purge(ctx: ModContext, mod_system: ModerationSystem,
-                    amount: int, target: Optional[discord.Member] = None):
+                    amount: int, target: Optional[discord.Member] = None, fake: bool = False):
     if not has_elevated_role(ctx.author):
         return await ctx.error(ERROR_NO_PERMISSION)
     if not (1 <= amount <= 100):
@@ -2003,7 +1990,9 @@ async def _do_purge(ctx: ModContext, mod_system: ModerationSystem,
     await ctx.defer()
     try:
         check = (lambda m: m.author.id == target.id) if target else (lambda m: True)
-        deleted = await ctx.channel.purge(limit=amount, check=check)
+        deleted = [] if fake else await ctx.channel.purge(limit=amount, check=check)
+        if fake:
+            deleted = [None] * amount  # simulate deleted count for embed
 
         reason = f"Purged {len(deleted)} message(s)" + (f" from {target}" if target else "")
         embed = discord.Embed(
@@ -2069,7 +2058,7 @@ async def _do_slowmode(ctx: ModContext, mod_system: ModerationSystem,
         ctx.bot.logger.error(MODULE_NAME, "Slowmode failed", e)
 
 async def _do_lock(ctx: ModContext, mod_system: ModerationSystem,
-                   reason: str, channel: Optional[discord.TextChannel] = None):
+                   reason: str, channel: Optional[discord.TextChannel] = None, fake: bool = False):
     if not has_elevated_role(ctx.author):
         return await ctx.error(ERROR_NO_PERMISSION)
     ok, err = validate_reason(reason)
@@ -2077,8 +2066,9 @@ async def _do_lock(ctx: ModContext, mod_system: ModerationSystem,
         return await ctx.error(err)
     target = channel or ctx.channel
     try:
-        await target.set_permissions(ctx.guild.default_role, send_messages=False,
-                                     reason=f"{reason} - By {ctx.author}")
+        if not fake:
+            await target.set_permissions(ctx.guild.default_role, send_messages=False,
+                                         reason=f"{reason} - By {ctx.author}")
         embed = discord.Embed(title="🔒 Channel Locked",
                               description=f"{target.mention} has been locked.",
                               color=0xe74c3c, timestamp=datetime.utcnow())
@@ -2149,66 +2139,78 @@ def setup(bot):
     # ---- SLASH COMMANDS ----
     @bot.tree.command(name="ban", description="Ban a user from the server")
     @app_commands.describe(user="User to ban", reason="Reason (min 10 chars)",
-                           delete_days="Days of messages to delete (0-7, default 0)")
+                           delete_days="Days of messages to delete (0-7, default 0)",
+                           fake="Simulate without executing")
     @app_commands.default_permissions(ban_members=True)
     async def slash_ban(interaction: discord.Interaction, user: discord.User,
-                        reason: str, delete_days: Optional[int] = 0):
-        await _do_ban(ModContext(interaction), mod_system, user, reason, delete_days)
+                        reason: str, delete_days: Optional[int] = 0, fake: bool = False):
+        await _do_ban(ModContext(interaction), mod_system, user, reason, delete_days, fake=fake)
 
     @bot.tree.command(name="unban", description="Unban a user from the server")
-    @app_commands.describe(user_id="User ID to unban", reason="Reason for unban")
+    @app_commands.describe(user_id="User ID to unban", reason="Reason for unban",
+                           fake="Simulate without executing")
     @app_commands.default_permissions(ban_members=True)
     async def slash_unban(interaction: discord.Interaction, user_id: str,
-                          reason: Optional[str] = "No reason provided"):
-        await _do_unban(ModContext(interaction), mod_system, user_id, reason)
+                          reason: Optional[str] = "No reason provided", fake: bool = False):
+        await _do_unban(ModContext(interaction), mod_system, user_id, reason, fake=fake)
 
     @bot.tree.command(name="kick", description="Kick a member from the server")
-    @app_commands.describe(member="Member to kick", reason="Reason (min 10 chars)")
+    @app_commands.describe(member="Member to kick", reason="Reason (min 10 chars)",
+                           fake="Simulate without executing")
     @app_commands.default_permissions(kick_members=True)
-    async def slash_kick(interaction: discord.Interaction, member: discord.Member, reason: str):
-        await _do_kick(ModContext(interaction), mod_system, member, reason)
+    async def slash_kick(interaction: discord.Interaction, member: discord.Member,
+                         reason: str, fake: bool = False):
+        await _do_kick(ModContext(interaction), mod_system, member, reason, fake=fake)
 
     @bot.tree.command(name="timeout", description="Timeout a member")
     @app_commands.describe(member="Member to timeout", duration="Duration in minutes",
-                           reason="Reason (min 10 chars)")
+                           reason="Reason (min 10 chars)", fake="Simulate without executing")
     @app_commands.default_permissions(moderate_members=True)
     async def slash_timeout(interaction: discord.Interaction, member: discord.Member,
-                            duration: int, reason: str):
-        await _do_timeout(ModContext(interaction), mod_system, member, duration, reason)
+                            duration: int, reason: str, fake: bool = False):
+        await _do_timeout(ModContext(interaction), mod_system, member, duration, reason, fake=fake)
 
     @bot.tree.command(name="untimeout", description="Remove timeout from a member")
-    @app_commands.describe(member="Member to remove timeout from")
+    @app_commands.describe(member="Member to remove timeout from",
+                           fake="Simulate without executing")
     @app_commands.default_permissions(moderate_members=True)
-    async def slash_untimeout(interaction: discord.Interaction, member: discord.Member):
-        await _do_untimeout(ModContext(interaction), mod_system, member)
+    async def slash_untimeout(interaction: discord.Interaction, member: discord.Member,
+                               fake: bool = False):
+        await _do_untimeout(ModContext(interaction), mod_system, member, fake=fake)
 
     @bot.tree.command(name="mute", description="Mute a member")
     @app_commands.describe(member="Member to mute", reason="Reason for mute",
-                           duration="Duration e.g. 10m, 1h, 1d (empty = permanent)")
+                           duration="Duration e.g. 10m, 1h, 1d (empty = permanent)",
+                           fake="Simulate without executing")
     @app_commands.default_permissions(manage_roles=True)
     async def slash_mute(interaction: discord.Interaction, member: discord.Member,
-                         reason: str = "No reason provided", duration: Optional[str] = None):
-        await _do_mute(ModContext(interaction), mod_system, member, reason, duration)
+                         reason: str = "No reason provided", duration: Optional[str] = None,
+                         fake: bool = False):
+        await _do_mute(ModContext(interaction), mod_system, member, reason, duration, fake=fake)
 
     @bot.tree.command(name="unmute", description="Unmute a member")
-    @app_commands.describe(member="Member to unmute")
+    @app_commands.describe(member="Member to unmute", fake="Simulate without executing")
     @app_commands.default_permissions(manage_roles=True)
-    async def slash_unmute(interaction: discord.Interaction, member: discord.Member):
-        await _do_unmute(ModContext(interaction), mod_system, member)
+    async def slash_unmute(interaction: discord.Interaction, member: discord.Member,
+                            fake: bool = False):
+        await _do_unmute(ModContext(interaction), mod_system, member, fake=fake)
 
     @bot.tree.command(name="softban", description="Softban a member (ban+unban to delete messages)")
     @app_commands.describe(member="Member to softban", reason="Reason (min 10 chars)",
-                           delete_days="Days of messages to delete (0-7, default 7)")
+                           delete_days="Days of messages to delete (0-7, default 7)",
+                           fake="Simulate without executing")
     @app_commands.default_permissions(ban_members=True)
     async def slash_softban(interaction: discord.Interaction, member: discord.Member,
-                            reason: str, delete_days: Optional[int] = 7):
-        await _do_softban(ModContext(interaction), mod_system, member, reason, delete_days)
+                            reason: str, delete_days: Optional[int] = 7, fake: bool = False):
+        await _do_softban(ModContext(interaction), mod_system, member, reason, delete_days, fake=fake)
 
     @bot.tree.command(name="warn", description="Warn a member")
-    @app_commands.describe(member="Member to warn", reason="Reason (min 10 chars)")
+    @app_commands.describe(member="Member to warn", reason="Reason (min 10 chars)",
+                           fake="Simulate without executing")
     @app_commands.default_permissions(manage_messages=True)
-    async def slash_warn(interaction: discord.Interaction, member: discord.Member, reason: str):
-        await _do_warn(ModContext(interaction), mod_system, member, reason)
+    async def slash_warn(interaction: discord.Interaction, member: discord.Member,
+                         reason: str, fake: bool = False):
+        await _do_warn(ModContext(interaction), mod_system, member, reason, fake=fake)
 
     @bot.tree.command(name="warnings", description="View warnings for a member")
     @app_commands.describe(member="Member to check")
@@ -2224,11 +2226,12 @@ def setup(bot):
 
     @bot.tree.command(name="purge", description="Delete multiple messages")
     @app_commands.describe(amount="Number of messages to delete (1-100)",
-                           user="Only delete messages from this user (optional)")
+                           user="Only delete messages from this user (optional)",
+                           fake="Simulate without executing")
     @app_commands.default_permissions(manage_messages=True)
     async def slash_purge(interaction: discord.Interaction, amount: int,
-                          user: Optional[discord.Member] = None):
-        await _do_purge(ModContext(interaction), mod_system, amount, user)
+                          user: Optional[discord.Member] = None, fake: bool = False):
+        await _do_purge(ModContext(interaction), mod_system, amount, user, fake=fake)
 
     @bot.tree.command(name="slowmode", description="Set channel slowmode")
     @app_commands.describe(seconds="Slowmode delay in seconds (0 to disable)",
@@ -2240,11 +2243,12 @@ def setup(bot):
 
     @bot.tree.command(name="lock", description="Lock a channel")
     @app_commands.describe(reason="Reason for locking (min 10 chars)",
-                           channel="Channel to lock (default: current)")
+                           channel="Channel to lock (default: current)",
+                           fake="Simulate without executing")
     @app_commands.default_permissions(manage_channels=True)
     async def slash_lock(interaction: discord.Interaction, reason: str,
-                         channel: Optional[discord.TextChannel] = None):
-        await _do_lock(ModContext(interaction), mod_system, reason, channel)
+                         channel: Optional[discord.TextChannel] = None, fake: bool = False):
+        await _do_lock(ModContext(interaction), mod_system, reason, channel, fake=fake)
 
     @bot.tree.command(name="unlock", description="Unlock a channel")
     @app_commands.describe(channel="Channel to unlock (default: current)")
@@ -2257,39 +2261,51 @@ def setup(bot):
     @bot.command(name="ban")
     async def prefix_ban(ctx, user: discord.User = None, *, args: str = ""):
         if not user:
-            return await ctx.send("❌ Usage: `?ban @user <reason> [delete_days]`", delete_after=8)
+            return await ctx.send("❌ Usage: `?ban @user <reason> [delete_days] [fake]`", delete_after=8)
+        parts_all = args.split()
+        fake = parts_all[-1].lower() == "fake" if parts_all else False
+        if fake: args = " ".join(parts_all[:-1])
         delete_days = 0
         reason = args
         parts = args.rsplit(None, 1)
         if len(parts) == 2 and parts[-1].isdigit() and int(parts[-1]) <= 7:
             delete_days = int(parts[-1])
             reason = parts[0]
-        await _do_ban(ModContext(ctx), mod_system, user, reason, delete_days)
+        await _do_ban(ModContext(ctx), mod_system, user, reason, delete_days, fake=fake)
 
     @bot.command(name="unban")
     async def prefix_unban(ctx, user_id: str = None, *, reason: str = "No reason provided"):
         if not user_id:
             return await ctx.send("❌ Usage: `?unban <user_id> [reason]`", delete_after=8)
-        await _do_unban(ModContext(ctx), mod_system, user_id, reason)
+        parts_all = reason.split()
+        fake = parts_all[-1].lower() == "fake" if parts_all else False
+        if fake: reason = " ".join(parts_all[:-1]) or "No reason provided"
+        await _do_unban(ModContext(ctx), mod_system, user_id, reason, fake=fake)
 
     @bot.command(name="kick")
     async def prefix_kick(ctx, member: discord.Member = None, *, reason: str = ""):
         if not member:
             return await ctx.send("❌ Usage: `?kick @member <reason>`", delete_after=8)
-        await _do_kick(ModContext(ctx), mod_system, member, reason)
+        parts_all = reason.split()
+        fake = parts_all[-1].lower() == "fake" if parts_all else False
+        if fake: reason = " ".join(parts_all[:-1])
+        await _do_kick(ModContext(ctx), mod_system, member, reason, fake=fake)
 
     @bot.command(name="timeout")
     async def prefix_timeout(ctx, member: discord.Member = None,
                               duration: int = None, *, reason: str = ""):
         if not member or duration is None:
             return await ctx.send("❌ Usage: `?timeout @member <minutes> <reason>`", delete_after=8)
-        await _do_timeout(ModContext(ctx), mod_system, member, duration, reason)
+        parts_all = reason.split()
+        fake = parts_all[-1].lower() == "fake" if parts_all else False
+        if fake: reason = " ".join(parts_all[:-1])
+        await _do_timeout(ModContext(ctx), mod_system, member, duration, reason, fake=fake)
 
     @bot.command(name="untimeout")
-    async def prefix_untimeout(ctx, member: discord.Member = None):
+    async def prefix_untimeout(ctx, member: discord.Member = None, fake: str = ""):
         if not member:
             return await ctx.send("❌ Usage: `?untimeout @member`", delete_after=8)
-        await _do_untimeout(ModContext(ctx), mod_system, member)
+        await _do_untimeout(ModContext(ctx), mod_system, member, fake=fake.lower() == "fake")
 
     @bot.command(name="mute")
     async def prefix_mute(ctx, member: discord.Member = None, *, args: str = ""):
@@ -2301,25 +2317,33 @@ def setup(bot):
         if parts and re.match(r'^\d+[smhd]$', parts[0].lower()):
             duration = parts[0]
             reason = parts[1] if len(parts) > 1 else "No reason provided"
-        await _do_mute(ModContext(ctx), mod_system, member, reason, duration)
+        fake = reason.split()[-1].lower() == "fake" if reason.split() else False
+        if fake: reason = " ".join(reason.split()[:-1]) or "No reason provided"
+        await _do_mute(ModContext(ctx), mod_system, member, reason, duration, fake=fake)
 
     @bot.command(name="unmute")
-    async def prefix_unmute(ctx, member: discord.Member = None):
+    async def prefix_unmute(ctx, member: discord.Member = None, fake: str = ""):
         if not member:
             return await ctx.send("❌ Usage: `?unmute @member`", delete_after=8)
-        await _do_unmute(ModContext(ctx), mod_system, member)
+        await _do_unmute(ModContext(ctx), mod_system, member, fake=fake.lower() == "fake")
 
     @bot.command(name="softban")
     async def prefix_softban(ctx, member: discord.Member = None, *, reason: str = ""):
         if not member:
             return await ctx.send("❌ Usage: `?softban @member <reason>`", delete_after=8)
-        await _do_softban(ModContext(ctx), mod_system, member, reason)
+        parts_all = reason.split()
+        fake = parts_all[-1].lower() == "fake" if parts_all else False
+        if fake: reason = " ".join(parts_all[:-1])
+        await _do_softban(ModContext(ctx), mod_system, member, reason, fake=fake)
 
     @bot.command(name="warn")
     async def prefix_warn(ctx, member: discord.Member = None, *, reason: str = ""):
         if not member:
             return await ctx.send("❌ Usage: `?warn @member <reason>`", delete_after=8)
-        await _do_warn(ModContext(ctx), mod_system, member, reason)
+        parts_all = reason.split()
+        fake = parts_all[-1].lower() == "fake" if parts_all else False
+        if fake: reason = " ".join(parts_all[:-1])
+        await _do_warn(ModContext(ctx), mod_system, member, reason, fake=fake)
 
     @bot.command(name="warnings")
     async def prefix_warnings(ctx, member: discord.Member = None):
@@ -2334,10 +2358,10 @@ def setup(bot):
         await _do_clearwarnings(ModContext(ctx), mod_system, member)
 
     @bot.command(name="purge")
-    async def prefix_purge(ctx, amount: int = None, member: discord.Member = None):
+    async def prefix_purge(ctx, amount: int = None, member: discord.Member = None, fake: str = ""):
         if amount is None:
             return await ctx.send("❌ Usage: `?purge <amount> [@member]`", delete_after=8)
-        await _do_purge(ModContext(ctx), mod_system, amount, member)
+        await _do_purge(ModContext(ctx), mod_system, amount, member, fake=fake.lower() == "fake")
 
     @bot.command(name="slowmode")
     async def prefix_slowmode(ctx, seconds: int = None,
@@ -2348,7 +2372,10 @@ def setup(bot):
 
     @bot.command(name="lock")
     async def prefix_lock(ctx, channel: Optional[discord.TextChannel] = None, *, reason: str = ""):
-        await _do_lock(ModContext(ctx), mod_system, reason, channel)
+        parts_all = reason.split()
+        fake = parts_all[-1].lower() == "fake" if parts_all else False
+        if fake: reason = " ".join(parts_all[:-1])
+        await _do_lock(ModContext(ctx), mod_system, reason, channel, fake=fake)
 
     @bot.command(name="unlock")
     async def prefix_unlock(ctx, channel: discord.TextChannel = None):

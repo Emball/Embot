@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from typing import Optional
 import json
 import os
-from embaldna import EmbалDNA
 
 MODULE_NAME = "LOGGER"
 
@@ -20,8 +19,8 @@ class EventLogger:
         self.config_file = str(data_dir / "logger_config.json")
         self.config = self.load_config()
 
-        # EmbалDNA pre-upload safety scanner (shares config with moderation module if available)
-        self._scanner: Optional[EmbалDNA] = None
+        # Pre-upload safety scanner — borrowed from ModerationSystem via bot._mod_system
+        self._scanner = None  # MediaScanner, set lazily
         
     def load_config(self):
         """Load logger configuration"""
@@ -87,19 +86,13 @@ class EventLogger:
             return None
         return guild.get_channel(self.config["bot_logs_channel_id"])
 
-    def _get_scanner(self) -> Optional[EmbалDNA]:
-        """Return EmbалDNA scanner — borrows from moderation module if available, else creates own."""
+    def _get_scanner(self):
+        """Return MediaScanner — borrows from ModerationSystem if available, else None."""
         if self._scanner is not None:
             return self._scanner
-        # Try to borrow the scanner already instantiated by ModerationSystem
         mod_sys = getattr(self.bot, '_mod_system', None)
         if mod_sys and hasattr(mod_sys, 'scanner'):
             self._scanner = mod_sys.scanner
-            return self._scanner
-        # Fallback: create our own (requires owner_id from config or env)
-        owner_id = getattr(self.bot, '_owner_id', None)
-        if owner_id:
-            self._scanner = EmbалDNA(self.bot, owner_id, self.get_bot_logs_channel)
         return self._scanner
     
     async def log_to_channel(self, channel, embed, file: discord.File = None, files: list = None) -> Optional[int]:
@@ -113,6 +106,13 @@ class EventLogger:
             elif file:
                 kwargs["file"] = file
             msg = await channel.send(**kwargs)
+            # Register in mod_system bot-log cache so deletion protection covers all logs
+            mod_sys = getattr(self.bot, '_mod_system', None)
+            if mod_sys and hasattr(mod_sys, '_register_bot_log'):
+                try:
+                    mod_sys._register_bot_log(msg.id, f"LOG-{msg.id}", embed)
+                except Exception:
+                    pass
             return msg.id
         except discord.Forbidden:
             self.bot.logger.error(MODULE_NAME, f"No permission to send logs to {channel.name}")
@@ -156,7 +156,7 @@ class EventLogger:
         audio_exts = ('.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.opus', '.mp4', '.mov', '.webm')
 
         if rehosted_files:
-            # Scan through EmbалDNA before uploading to Discord CDN
+            # Scan through MediaScanner before uploading to Discord CDN
             scanner = self._get_scanner()
             if scanner:
                 verdict = await scanner.scan_files(
@@ -168,7 +168,7 @@ class EventLogger:
                     # All files blocked — log embed only with a note
                     embed.add_field(
                         name="⚠️ Attachment(s) Withheld",
-                        value="One or more files were blocked by EmbалDNA. The server owner has been alerted.",
+                        value="One or more files were blocked by MediaScanner. The server owner has been alerted.",
                         inline=False,
                     )
                     await self.log_to_channel(channel, embed)

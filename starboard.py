@@ -8,7 +8,9 @@ No slash commands — all settings live here in the file.
 import discord
 from discord.ext import commands
 from pathlib import Path
+from datetime import datetime, timezone
 import json
+import asyncio
 
 MODULE_NAME = "STARBOARD"
 
@@ -21,10 +23,10 @@ MODULE_NAME = "STARBOARD"
 CONFIG = {
     # ID of the channel where starred messages will be posted
     # Example: 1234567890123456789
-    "channel_id": 1357896154276429984,
+    "channel_id": None,
 
     # Number of ⭐ reactions required to post a message to the starboard
-    "threshold": 3,
+    "threshold": 6,
 
     # The emoji to watch for (standard unicode or custom emoji string)
     "emoji": "⭐",
@@ -39,34 +41,72 @@ CONFIG = {
 
 _data_dir = Path(__file__).parent / "data"
 _data_dir.mkdir(exist_ok=True)
-_db_path = _data_dir / "starboard_entries.json"
+_db_path = _data_dir / "starboard_cache.json"
+
+# ── Persistent cache schema ───────────────────────────────────────────────
+#
+# {
+#   "entries": {
+#     "<source_msg_id>": {
+#       "starboard_msg_id": str,       # ID of the posted starboard message
+#       "channel_id":       str,       # source channel ID
+#       "author_id":        str,       # source message author ID
+#       "author_name":      str,       # display name at time of first star
+#       "peak_stars":       int,       # highest star count ever reached
+#       "current_stars":    int,       # last known star count
+#       "first_starred_at": str,       # ISO timestamp when first posted
+#       "last_updated_at":  str,       # ISO timestamp of last edit
+#       "content_preview":  str,       # first 100 chars of message content
+#     }
+#   }
+# }
+
+_cache: dict = {"entries": {}}
+
+# Per-message-id asyncio locks so unrelated messages never block each other.
+# A single global lock would cause every reaction to queue behind every other.
+_msg_locks: dict[str, asyncio.Lock] = {}
 
 
-def _load_entries() -> dict:
-    """Load the message-id → starboard-id mapping from disk."""
+def _get_msg_lock(msg_id: str) -> asyncio.Lock:
+    if msg_id not in _msg_locks:
+        _msg_locks[msg_id] = asyncio.Lock()
+    return _msg_locks[msg_id]
+
+
+# ── Disk I/O ──────────────────────────────────────────────────────────────
+
+def _load_cache() -> None:
+    global _cache
     if _db_path.exists():
         try:
             with open(_db_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                # Migrate old flat format (just msg_id → sb_msg_id strings)
+                if data and isinstance(next(iter(data.values()), None), str):
+                    _cache = {"entries": {k: {"starboard_msg_id": v} for k, v in data.items()}}
+                else:
+                    _cache = data
+                if "entries" not in _cache:
+                    _cache = {"entries": _cache}
+                return
         except Exception:
             pass
-    return {}
+    _cache = {"entries": {}}
 
 
-def _save_entries(entries: dict) -> None:
+def _save_cache() -> None:
     with open(_db_path, "w", encoding="utf-8") as f:
-        json.dump(entries, f, indent=2)
+        json.dump(_cache, f, indent=2)
 
 
-def _count_reactions(message: discord.Message, emoji: str) -> int:
-    for reaction in message.reactions:
-        if str(reaction.emoji) == emoji:
-            return reaction.count
-    return 0
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
+
+# ── Embed / content builders ──────────────────────────────────────────────
 
 def _star_label(count: int) -> str:
-    """Progressive star emoji based on reaction count (mirrors Dyno behaviour)."""
     if count >= 15:
         return "🌟"
     elif count >= 10:
@@ -77,7 +117,11 @@ def _star_label(count: int) -> str:
         return "✨"
 
 
-def _build_embed(message: discord.Message) -> discord.Embed:
+def _build_content(count: int, source_channel: discord.TextChannel) -> str:
+    return f"{_star_label(count)} **{count}** | {source_channel.mention}"
+
+
+def _build_embed(message: discord.Message, count: int) -> discord.Embed:
     embed = discord.Embed(
         description=message.content or "",
         color=discord.Color.gold(),
@@ -109,16 +153,18 @@ def _build_embed(message: discord.Message) -> discord.Embed:
     return embed
 
 
-def _build_content(count: int, source_channel: discord.TextChannel) -> str:
-    return f"{_star_label(count)} **{count}** | {source_channel.mention}"
+def _count_reactions(message: discord.Message, emoji: str) -> int:
+    for reaction in message.reactions:
+        if str(reaction.emoji) == emoji:
+            return reaction.count
+    return 0
 
+
+# ── Core handler ──────────────────────────────────────────────────────────
 
 async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionActionEvent):
-    """Called on every reaction add or remove."""
     if payload.guild_id is None:
         return
-
-    # Validate config
     if not CONFIG["channel_id"]:
         return
     if str(payload.emoji) != CONFIG["emoji"]:
@@ -130,10 +176,10 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
 
     starboard_channel = guild.get_channel(CONFIG["channel_id"])
     if starboard_channel is None:
-        bot.logger.log(MODULE_NAME, f"Starboard channel {CONFIG['channel_id']} not found in guild {guild}", "WARNING")
+        bot.logger.log(MODULE_NAME, f"Starboard channel {CONFIG['channel_id']} not found", "WARNING")
         return
 
-    # Ignore reactions that happen inside the starboard channel itself
+    # Never process reactions inside the starboard channel itself
     if payload.channel_id == CONFIG["channel_id"]:
         return
 
@@ -141,62 +187,100 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
     if source_channel is None:
         return
 
-    try:
-        message = await source_channel.fetch_message(payload.message_id)
-    except (discord.NotFound, discord.Forbidden):
-        return
+    msg_key = str(payload.message_id)
 
-    # Self-star guard
-    if not CONFIG["self_star"] and payload.user_id == message.author.id:
-        return
+    # Per-message lock — serialises concurrent reactions for the SAME message
+    # without blocking reactions on completely different messages.
+    async with _get_msg_lock(msg_key):
 
-    count = _count_reactions(message, CONFIG["emoji"])
-    entries = _load_entries()
-    msg_key = str(message.id)
-    existing_id = entries.get(msg_key)
+        # Always fetch fresh so reaction count is accurate at this exact moment.
+        try:
+            message = await source_channel.fetch_message(payload.message_id)
+        except (discord.NotFound, discord.Forbidden):
+            return
 
-    # ── Below threshold: remove if already posted ──
-    if count < CONFIG["threshold"]:
-        if existing_id:
+        # Self-star guard
+        if not CONFIG["self_star"] and payload.user_id == message.author.id:
+            return
+
+        count = _count_reactions(message, CONFIG["emoji"])
+        entry = _cache["entries"].get(msg_key)
+
+        # ── Below threshold ──────────────────────────────────────────────
+        if count < CONFIG["threshold"]:
+            if entry:
+                try:
+                    sb_msg = await starboard_channel.fetch_message(int(entry["starboard_msg_id"]))
+                    await sb_msg.delete()
+                except (discord.NotFound, discord.Forbidden):
+                    pass
+                del _cache["entries"][msg_key]
+                _save_cache()
+            return
+
+        # ── At or above threshold ────────────────────────────────────────
+        content = _build_content(count, source_channel)
+        embed = _build_embed(message, count)
+
+        if entry:
+            # ── Update existing starboard post ───────────────────────────
+            # Only edit if the count actually changed to avoid redundant API calls.
+            if count == entry.get("current_stars") and entry.get("starboard_msg_id"):
+                return
+
             try:
-                sb_msg = await starboard_channel.fetch_message(int(existing_id))
-                await sb_msg.delete()
-            except (discord.NotFound, discord.Forbidden):
-                pass
-            del entries[msg_key]
-            _save_entries(entries)
-        return
+                sb_msg = await starboard_channel.fetch_message(int(entry["starboard_msg_id"]))
+                await sb_msg.edit(content=content, embed=embed)
+            except discord.NotFound:
+                # Was manually deleted — recreate it, update cache
+                sb_msg = await starboard_channel.send(content=content, embed=embed)
+                entry["starboard_msg_id"] = str(sb_msg.id)
+            except discord.Forbidden:
+                bot.logger.log(MODULE_NAME, "Missing permissions to edit starboard message", "WARNING")
+                return
 
-    # ── At or above threshold ──
-    content = _build_content(count, source_channel)
-    embed = _build_embed(message)
+            entry["current_stars"] = count
+            entry["peak_stars"] = max(entry.get("peak_stars", count), count)
+            entry["last_updated_at"] = _now_iso()
+            _save_cache()
 
-    if existing_id:
-        try:
-            sb_msg = await starboard_channel.fetch_message(int(existing_id))
-            await sb_msg.edit(content=content, embed=embed)
-        except discord.NotFound:
-            # Was manually deleted — recreate
-            sb_msg = await starboard_channel.send(content=content, embed=embed)
-            entries[msg_key] = str(sb_msg.id)
-            _save_entries(entries)
-        except discord.Forbidden:
-            bot.logger.log(MODULE_NAME, "Missing permissions to edit starboard message", "WARNING")
-    else:
-        try:
-            sb_msg = await starboard_channel.send(content=content, embed=embed)
-            entries[msg_key] = str(sb_msg.id)
-            _save_entries(entries)
-        except discord.Forbidden:
-            bot.logger.log(MODULE_NAME, "Missing permissions to post to starboard channel", "WARNING")
+        else:
+            # ── First time hitting threshold — post to starboard ─────────
+            try:
+                sb_msg = await starboard_channel.send(content=content, embed=embed)
+            except discord.Forbidden:
+                bot.logger.log(MODULE_NAME, "Missing permissions to post to starboard channel", "WARNING")
+                return
 
+            _cache["entries"][msg_key] = {
+                "starboard_msg_id": str(sb_msg.id),
+                "channel_id":       str(source_channel.id),
+                "author_id":        str(message.author.id),
+                "author_name":      message.author.display_name,
+                "peak_stars":       count,
+                "current_stars":    count,
+                "first_starred_at": _now_iso(),
+                "last_updated_at":  _now_iso(),
+                "content_preview":  (message.content or "")[:100],
+            }
+            _save_cache()
+            bot.logger.log(MODULE_NAME, f"Posted to starboard: msg {msg_key} by {message.author} ({count} stars)")
+
+
+# ── Setup ─────────────────────────────────────────────────────────────────
 
 def setup(bot: commands.Bot):
-    # Validate config at load time
+    _load_cache()
+
     if not CONFIG["channel_id"]:
         bot.logger.log(MODULE_NAME, "⚠️  channel_id is not set in CONFIG — starboard will not post until configured", "WARNING")
     else:
-        bot.logger.log(MODULE_NAME, f"Starboard → channel {CONFIG['channel_id']} | threshold {CONFIG['threshold']} | emoji {CONFIG['emoji']}")
+        bot.logger.log(
+            MODULE_NAME,
+            f"Starboard → channel {CONFIG['channel_id']} | "
+            f"threshold {CONFIG['threshold']} | emoji {CONFIG['emoji']} | "
+            f"entries loaded: {len(_cache['entries'])}"
+        )
 
     @bot.listen("on_raw_reaction_add")
     async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
@@ -208,7 +292,7 @@ def setup(bot: commands.Bot):
 
     @bot.listen("on_raw_message_delete")
     async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
-        """Clean up the starboard post when the source message is deleted."""
+        """Remove the starboard post when the source message is deleted."""
         if payload.guild_id is None or not CONFIG["channel_id"]:
             return
 
@@ -216,20 +300,22 @@ def setup(bot: commands.Bot):
         if guild is None:
             return
 
-        entries = _load_entries()
         msg_key = str(payload.message_id)
-        if msg_key not in entries:
-            return
 
-        starboard_channel = guild.get_channel(CONFIG["channel_id"])
-        if starboard_channel:
-            try:
-                sb_msg = await starboard_channel.fetch_message(int(entries[msg_key]))
-                await sb_msg.delete()
-            except (discord.NotFound, discord.Forbidden):
-                pass
+        async with _get_msg_lock(msg_key):
+            entry = _cache["entries"].get(msg_key)
+            if not entry:
+                return
 
-        del entries[msg_key]
-        _save_entries(entries)
+            starboard_channel = guild.get_channel(CONFIG["channel_id"])
+            if starboard_channel:
+                try:
+                    sb_msg = await starboard_channel.fetch_message(int(entry["starboard_msg_id"]))
+                    await sb_msg.delete()
+                except (discord.NotFound, discord.Forbidden):
+                    pass
+
+            del _cache["entries"][msg_key]
+            _save_cache()
 
     bot.logger.log(MODULE_NAME, "Starboard module loaded.")

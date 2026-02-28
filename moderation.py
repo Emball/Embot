@@ -13,6 +13,7 @@ import io
 from PIL import Image, ImageDraw, ImageFont
 import pytz
 import tempfile
+from cryptography.fernet import Fernet
 
 MODULE_NAME = "MODERATION"
 
@@ -314,6 +315,14 @@ class ModerationSystem:
         data_dir = Path(__file__).parent / "data"
         data_dir.mkdir(exist_ok=True)
 
+        # Encrypted media staging directory (files deleted on eviction or after re-host)
+        self.media_dir = data_dir / "media_cache"
+        self.media_dir.mkdir(exist_ok=True)
+
+        # Per-process Fernet key — generated fresh each run so cached files from a
+        # previous session (if any remain) cannot be decrypted without the key.
+        self._fernet = Fernet(Fernet.generate_key())
+
         # Data files
         self.roles_file = data_dir / "member_roles.json"
         self.strikes_file = data_dir / "moderation_strikes.json"
@@ -332,6 +341,10 @@ class ModerationSystem:
 
         # Message cache for context (guild_id -> channel_id -> list)
         self.message_cache = {}
+
+        # Media cache index: message_id -> {'files': [{'filename': str, 'path': Path, 'content_type': str}], 'author_id': int, 'guild_id': int}
+        # Actual file bytes are stored AES-encrypted on disk under self.media_dir and deleted on eviction/re-host.
+        self.media_cache = {}
 
         # Tracked embeds for deletion monitoring
         self.tracked_embeds = {}  # message_id -> {'action_id': str, 'type': str}
@@ -461,8 +474,32 @@ class ModerationSystem:
 
     # ==================== OVERSIGHT: CONTEXT & CACHE ====================
 
+    # ==================== MEDIA CACHE HELPERS ====================
+
+    def _encrypt_to_disk(self, message_id: int, index: int, data: bytes) -> Path:
+        """Encrypt raw attachment bytes and write to a uniquely named file on disk."""
+        encrypted = self._fernet.encrypt(data)
+        path = self.media_dir / f"{message_id}_{index}.enc"
+        path.write_bytes(encrypted)
+        return path
+
+    def _decrypt_from_disk(self, path: Path) -> bytes:
+        """Read an encrypted file from disk and return the original bytes."""
+        return self._fernet.decrypt(path.read_bytes())
+
+    def _delete_media_files(self, message_id: int):
+        """Delete all encrypted files on disk for a given message and remove from index."""
+        entry = self.media_cache.pop(message_id, None)
+        if not entry:
+            return
+        for f in entry['files']:
+            try:
+                f['path'].unlink(missing_ok=True)
+            except Exception:
+                pass
+
     async def cache_message(self, message: discord.Message):
-        """Cache a message for context logging."""
+        """Cache a message for context logging and encrypt any media attachments to disk."""
         if message.guild is None or message.author.bot:
             return
         guild_id = str(message.guild.id)
@@ -471,6 +508,29 @@ class ModerationSystem:
             self.message_cache[guild_id] = {}
         if channel_id not in self.message_cache[guild_id]:
             self.message_cache[guild_id][channel_id] = []
+
+        # Download and encrypt each attachment to disk
+        downloaded = []
+        for idx, att in enumerate(message.attachments):
+            try:
+                data = await att.read()
+                path = self._encrypt_to_disk(message.id, idx, data)
+                downloaded.append({
+                    'filename': att.filename,
+                    'path': path,
+                    'content_type': att.content_type or 'application/octet-stream',
+                    'url': att.url,
+                })
+            except Exception as e:
+                self.bot.logger.log(MODULE_NAME, f"Failed to cache attachment {att.filename}: {e}", "WARNING")
+
+        if downloaded:
+            self.media_cache[message.id] = {
+                'files': downloaded,
+                'author_id': message.author.id,
+                'guild_id': message.guild.id,
+            }
+
         msg_data = {
             'id': message.id,
             'author': str(message.author),
@@ -481,9 +541,12 @@ class ModerationSystem:
             'embeds': len(message.embeds)
         }
         self.message_cache[guild_id][channel_id].append(msg_data)
-        # Keep only last 100 messages per channel
+        # Keep only last 100 messages per channel; evict + delete encrypted files for pushed-out message
         if len(self.message_cache[guild_id][channel_id]) > 100:
-            self.message_cache[guild_id][channel_id].pop(0)
+            evicted = self.message_cache[guild_id][channel_id].pop(0)
+            evicted_id = evicted.get('id')
+            if evicted_id:
+                self._delete_media_files(evicted_id)
 
     def get_context_messages(self, guild_id: int, channel_id: int, around_message_id: int, count: int = None) -> List[Dict]:
         """Get messages around a specific message ID."""
@@ -596,6 +659,38 @@ class ModerationSystem:
             self.bot.logger.log(MODULE_NAME, f"Resolved {len(to_delete)} pending {action_type} for user {user_id}")
             return True
         return False
+
+    async def send_cached_media_to_logs(self, guild: discord.Guild, message_id: int, author_str: str, reason: str, extra_content: str = None):
+        """Decrypt cached media from disk and upload to bot-logs with fresh Discord-hosted links."""
+        bot_logs = self._get_bot_logs_channel(guild)
+        if not bot_logs:
+            return
+        cached = self.media_cache.get(message_id)
+        if not cached or not cached['files']:
+            return
+        files = []
+        for f in cached['files']:
+            try:
+                data = self._decrypt_from_disk(f['path'])
+                files.append(discord.File(fp=io.BytesIO(data), filename=f['filename']))
+            except Exception as e:
+                self.bot.logger.log(MODULE_NAME, f"Failed to decrypt cached file {f['filename']}: {e}", "WARNING")
+        if not files:
+            return
+        embed = discord.Embed(
+            title=reason,
+            color=discord.Color.orange(),
+            timestamp=__import__('datetime').datetime.utcnow(),
+        )
+        embed.add_field(name="User", value=author_str, inline=True)
+        embed.add_field(name="Message ID", value=str(message_id), inline=True)
+        if extra_content:
+            embed.add_field(name="Message Content", value=extra_content[:1024] or "*empty*", inline=False)
+        embed.set_footer(text=f"{len(files)} attachment(s) re-hosted below")
+        try:
+            await bot_logs.send(embed=embed, files=files)
+        except Exception as e:
+            self.bot.logger.log(MODULE_NAME, f"Failed to send cached media to bot-logs: {e}", "WARNING")
 
     def track_embed(self, message_id: int, action_id: str, embed_type: str):
         """Track an embed for deletion monitoring."""
@@ -1910,8 +2005,121 @@ def setup(bot):
 
     @bot.listen()
     async def on_message_delete(message):
-        """Track when moderation embeds are deleted"""
+        """Track when moderation embeds are deleted, and re-host any cached media."""
         await mod_system.handle_embed_deletion(message.id)
+
+        # Re-host cached media for this message if any
+        if message.guild and not message.author.bot and message.id in mod_system.media_cache:
+            guild_id = str(message.guild.id)
+            channel_id = str(message.channel.id)
+            # Find author string from cache or message object
+            author_str = f"{message.author} ({message.author.id})"
+            content = message.content or "*no text*"
+            await mod_system.send_cached_media_to_logs(
+                message.guild,
+                message.id,
+                author_str,
+                "🗑️ Message with Attachment Deleted",
+                content,
+            )
+            # Clean up encrypted files from disk now that we've re-hosted them
+            mod_system._delete_media_files(message.id)
+            # Remove from message cache too
+            channel_msgs = mod_system.message_cache.get(guild_id, {}).get(channel_id, [])
+            mod_system.message_cache[guild_id][channel_id] = [
+                m for m in channel_msgs if m['id'] != message.id
+            ]
+
+    @bot.listen()
+    async def on_message_edit(before, after):
+        """Detect when a user removes attachments from a message after sending."""
+        if not after.guild or after.author.bot:
+            return
+
+        before_att_ids = {att.id for att in before.attachments}
+        after_att_ids = {att.id for att in after.attachments}
+        removed_ids = before_att_ids - after_att_ids
+
+        if not removed_ids:
+            return
+
+        # Find which attachments were removed (by id match from cached data)
+        guild_id = str(after.guild.id)
+        channel_id = str(after.channel.id)
+
+        # Update the message cache to reflect new attachment list
+        channel_msgs = mod_system.message_cache.get(guild_id, {}).get(channel_id, [])
+        for msg in channel_msgs:
+            if msg['id'] == after.id:
+                msg['attachments'] = [att.url for att in after.attachments]
+                break
+
+        # Collect removed files from media_cache and decrypt them for re-hosting
+        cached = mod_system.media_cache.get(after.id)
+        removed_files = []
+        if cached:
+            removed_filenames = {
+                att.filename for att in before.attachments if att.id in removed_ids
+            }
+            kept = []
+            for f in cached['files']:
+                if f['filename'] in removed_filenames:
+                    try:
+                        data = mod_system._decrypt_from_disk(f['path'])
+                        removed_files.append({'filename': f['filename'], 'data': data})
+                    except Exception as e:
+                        mod_system.bot.logger.log(MODULE_NAME, f"Failed to decrypt removed attachment {f['filename']}: {e}", "WARNING")
+                    finally:
+                        f['path'].unlink(missing_ok=True)
+                else:
+                    kept.append(f)
+            # Update cache index to only reflect remaining files
+            if kept:
+                mod_system.media_cache[after.id]['files'] = kept
+            else:
+                mod_system.media_cache.pop(after.id, None)
+
+        if not removed_files:
+            # No locally cached copies, just log what we know from before
+            bot_logs = mod_system._get_bot_logs_channel(after.guild)
+            if bot_logs:
+                embed = discord.Embed(
+                    title="✂️ Attachment Removed from Message",
+                    color=discord.Color.yellow(),
+                    timestamp=__import__('datetime').datetime.utcnow(),
+                )
+                embed.add_field(name="User", value=f"{after.author} ({after.author.id})", inline=True)
+                embed.add_field(name="Message ID", value=str(after.id), inline=True)
+                embed.add_field(name="Remaining Text", value=after.content[:1024] or "*empty*", inline=False)
+                removed_names = ", ".join(
+                    att.filename for att in before.attachments if att.id in removed_ids
+                )
+                embed.add_field(name="Removed Attachment(s)", value=removed_names or "unknown", inline=False)
+                embed.add_field(name="Note", value="File was not in local cache; original URLs may be expired.", inline=False)
+                await bot_logs.send(embed=embed)
+            return
+
+        # We have the cached files — re-host them
+        bot_logs = mod_system._get_bot_logs_channel(after.guild)
+        if not bot_logs:
+            return
+        files = [
+            discord.File(
+                fp=io.BytesIO(f['data']),
+                filename=f['filename'],
+            )
+            for f in removed_files
+        ]
+        embed = discord.Embed(
+            title="✂️ Attachment Removed from Message",
+            color=discord.Color.yellow(),
+            timestamp=__import__('datetime').datetime.utcnow(),
+        )
+        embed.add_field(name="User", value=f"{after.author} ({after.author.id})", inline=True)
+        embed.add_field(name="Message ID", value=str(after.id), inline=True)
+        embed.add_field(name="Remaining Text", value=after.content[:1024] or "*empty*", inline=False)
+        embed.set_footer(text=f"{len(files)} removed attachment(s) re-hosted below")
+        await bot_logs.send(embed=embed, files=files)
 
     @bot.listen()
     async def on_member_remove(member):

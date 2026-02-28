@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional
 import json
 import os
+from embaldna import EmbалDNA
 
 MODULE_NAME = "LOGGER"
 
@@ -18,6 +19,9 @@ class EventLogger:
         data_dir.mkdir(exist_ok=True)
         self.config_file = str(data_dir / "logger_config.json")
         self.config = self.load_config()
+
+        # EmbалDNA pre-upload safety scanner (shares config with moderation module if available)
+        self._scanner: Optional[EmbалDNA] = None
         
     def load_config(self):
         """Load logger configuration"""
@@ -82,13 +86,33 @@ class EventLogger:
         if not self.config.get("bot_logs_channel_id"):
             return None
         return guild.get_channel(self.config["bot_logs_channel_id"])
+
+    def _get_scanner(self) -> Optional[EmbалDNA]:
+        """Return EmbалDNA scanner — borrows from moderation module if available, else creates own."""
+        if self._scanner is not None:
+            return self._scanner
+        # Try to borrow the scanner already instantiated by ModerationSystem
+        mod_sys = getattr(self.bot, '_mod_system', None)
+        if mod_sys and hasattr(mod_sys, 'scanner'):
+            self._scanner = mod_sys.scanner
+            return self._scanner
+        # Fallback: create our own (requires owner_id from config or env)
+        owner_id = getattr(self.bot, '_owner_id', None)
+        if owner_id:
+            self._scanner = EmbалDNA(self.bot, owner_id, self.get_bot_logs_channel)
+        return self._scanner
     
-    async def log_to_channel(self, channel, embed) -> Optional[int]:
+    async def log_to_channel(self, channel, embed, file: discord.File = None, files: list = None) -> Optional[int]:
         """Send log embed to channel, returns message ID or None"""
         if not channel:
             return None
         try:
-            msg = await channel.send(embed=embed)
+            kwargs = {"embed": embed}
+            if files:
+                kwargs["files"] = files
+            elif file:
+                kwargs["file"] = file
+            msg = await channel.send(**kwargs)
             return msg.id
         except discord.Forbidden:
             self.bot.logger.error(MODULE_NAME, f"No permission to send logs to {channel.name}")
@@ -100,8 +124,8 @@ class EventLogger:
     # MESSAGE EVENTS
     # ====================
     
-    async def log_message_delete(self, message):
-        """Log when a message is deleted"""
+    async def log_message_delete(self, message, rehosted_files: list = None):
+        """Log when a message is deleted. rehosted_files is a list of dicts with 'filename' and 'data' (bytes)."""
         if not self.config.get("log_message_deletes"):
             return
         if message.author.bot:
@@ -122,24 +146,69 @@ class EventLogger:
             timestamp=datetime.now(timezone.utc)
         )
         
-        # Set author (user who sent the message)
         embed.set_author(
             name=str(message.author),
             icon_url=message.author.display_avatar.url
         )
-        
-        # Footer with IDs
         embed.set_footer(text=f"Author: {message.author.id} | Message ID: {message.id}")
-        
-        # If there's an image attachment, show it
-        if message.attachments:
-            image_exts = ('.png', '.jpg', '.jpeg', '.gif', '.webp')
-            for att in message.attachments:
-                if att.filename.lower().endswith(image_exts):
-                    embed.set_image(url=att.url)
-                    break
-        
-        await self.log_to_channel(channel, embed)
+
+        image_exts = ('.png', '.jpg', '.jpeg', '.gif', '.webp')
+        audio_exts = ('.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.opus', '.mp4', '.mov', '.webm')
+
+        if rehosted_files:
+            # Scan through EmbалDNA before uploading to Discord CDN
+            scanner = self._get_scanner()
+            if scanner:
+                verdict = await scanner.scan_files(
+                    rehosted_files,
+                    guild=message.guild,
+                    context=f"deleted message {message.id} by {message.author}",
+                )
+                if verdict.blocked and not verdict.safe_files:
+                    # All files blocked — log embed only with a note
+                    embed.add_field(
+                        name="⚠️ Attachment(s) Withheld",
+                        value="One or more files were blocked by EmbалDNA. The server owner has been alerted.",
+                        inline=False,
+                    )
+                    await self.log_to_channel(channel, embed)
+                    return
+                rehosted_files = verdict.safe_files
+
+            # Separate images from audio/other
+            image_files = [f for f in rehosted_files if f['filename'].lower().endswith(image_exts)]
+            other_files = [f for f in rehosted_files if not f['filename'].lower().endswith(image_exts)]
+
+            discord_files = [
+                discord.File(fp=__import__('io').BytesIO(f['data']), filename=f['filename'])
+                for f in rehosted_files
+            ]
+
+            if image_files and not other_files:
+                # All images — first image goes in the embed, all sent together
+                embed.set_image(url=f"attachment://{image_files[0]['filename']}")
+                await self.log_to_channel(channel, embed, files=discord_files)
+            elif other_files:
+                # Has audio/other — send files above embed with a note
+                has_audio = any(f['filename'].lower().endswith(audio_exts) for f in other_files)
+                label = "audio" if has_audio else "file"
+                embed.add_field(name="Attachment", value=f"*{label} hosted above*", inline=False)
+                # Send files first, then embed as a follow-up so files appear above
+                try:
+                    await channel.send(files=discord_files)
+                    await channel.send(embed=embed)
+                except Exception as e:
+                    self.bot.logger.error(MODULE_NAME, f"Failed to send deletion log with files: {e}")
+            else:
+                await self.log_to_channel(channel, embed)
+        else:
+            # No cached media — fall back to original URL for images (may expire)
+            if message.attachments:
+                for att in message.attachments:
+                    if att.filename.lower().endswith(image_exts):
+                        embed.set_image(url=att.url)
+                        break
+            await self.log_to_channel(channel, embed)
     
     async def log_message_edit(self, before, after):
         """Log when a message is edited"""
@@ -897,7 +966,12 @@ def setup(bot):
     async def on_message_delete(message):
         """Called when a message is deleted"""
         if message.guild:
-            await event_logger.log_message_delete(message)
+            # Pick up any pre-decrypted media stashed by the moderation module
+            rehosted_files = None
+            pending = getattr(bot, '_pending_rehosted_media', {})
+            if message.id in pending:
+                rehosted_files = pending.pop(message.id)
+            await event_logger.log_message_delete(message, rehosted_files=rehosted_files)
     
     @bot.listen()
     async def on_message_edit(before, after):

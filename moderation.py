@@ -15,7 +15,6 @@ import pytz
 import tempfile
 from collections import deque
 from cryptography.fernet import Fernet
-from embaldna import EmbалDNA
 
 MODULE_NAME = "MODERATION"
 
@@ -303,6 +302,234 @@ class BanAppealModal(ui.Modal, title="Ban Appeal"):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# ==================== MEDIA SAFETY SCANNER ====================
+
+from dataclasses import dataclass, field as _field
+
+# Labels NudeNet considers explicit
+_EXPLICIT_LABELS = {
+    "EXPOSED_ANUS", "EXPOSED_BUTTOCKS", "EXPOSED_BREAST_F",
+    "EXPOSED_GENITALIA_F", "EXPOSED_GENITALIA_M", "EXPOSED_BELLY",
+}
+_NUDENET_THRESHOLD = 0.45
+_AGE_THRESHOLD     = 20   # block if any face appears younger than this
+_SCAN_IMAGE_EXTS   = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff', '.tif'}
+_SCAN_VIDEO_EXTS   = {'.mp4', '.mov', '.webm', '.avi', '.mkv'}
+
+# Lazy model handles — loaded once on first scan
+_nudenet_model     = None
+_deepface_ready    = False
+
+def _load_nudenet():
+    global _nudenet_model
+    if _nudenet_model is None:
+        try:
+            from nudenet import NudeClassifier  # type: ignore
+            _nudenet_model = NudeClassifier()
+        except ImportError:
+            pass  # NudeNet not installed — scanner will fail-open for nudity stage
+        except Exception as e:
+            logging.getLogger("MediaScanner").error(f"NudeNet load failed: {e}")
+    return _nudenet_model
+
+def _load_deepface():
+    global _deepface_ready
+    try:
+        import deepface  # noqa  type: ignore
+        _deepface_ready = True
+    except ImportError:
+        _deepface_ready = False
+    return _deepface_ready
+
+import logging as _logging
+_scanner_log = _logging.getLogger("MediaScanner")
+
+@dataclass
+class _FileScanResult:
+    filename: str
+    scannable: bool
+    explicit: bool = False
+    min_age: Optional[float] = None
+    blocked: bool = False
+    reason: str = ""
+
+@dataclass
+class ScanVerdict:
+    blocked: bool
+    safe_files: list = _field(default_factory=list)
+    blocked_files: list = _field(default_factory=list)
+
+class MediaScanner:
+    """Pre-upload CSAM safety scanner. Instantiated once inside ModerationSystem."""
+
+    def __init__(self, bot, owner_id: int, get_bot_logs_fn):
+        self.bot          = bot
+        self.owner_id     = owner_id
+        self._get_bot_logs = get_bot_logs_fn
+        self._models_loaded = False
+        self._load_lock   = asyncio.Lock()
+
+    async def _ensure_models(self):
+        if self._models_loaded:
+            return
+        async with self._load_lock:
+            if self._models_loaded:
+                return
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, _load_nudenet)
+            await loop.run_in_executor(None, _load_deepface)
+            self._models_loaded = True
+
+    async def scan_files(self, files_data: list, guild=None, context: str = "") -> ScanVerdict:
+        """Scan a files_data list ({'filename', 'data'}) before re-hosting. Returns ScanVerdict."""
+        await self._ensure_models()
+        loop   = asyncio.get_event_loop()
+        safe, blocked = [], []
+
+        for entry in files_data:
+            filename: str = entry['filename']
+            data: bytes   = entry['data']
+            ext = os.path.splitext(filename.lower())[1]
+
+            if ext not in _SCAN_IMAGE_EXTS and ext not in _SCAN_VIDEO_EXTS:
+                safe.append(entry)
+                continue
+
+            result = _FileScanResult(filename=filename, scannable=True)
+            try:
+                is_explicit = await loop.run_in_executor(None, self._nudenet_scan, data, ext)
+                result.explicit = is_explicit
+                if is_explicit:
+                    min_age = await loop.run_in_executor(None, self._deepface_age, data)
+                    result.min_age = min_age
+                    if min_age is not None and min_age < _AGE_THRESHOLD:
+                        result.blocked = True
+                        result.reason  = f"Explicit + apparent age {min_age:.1f} < {_AGE_THRESHOLD}"
+            except Exception as e:
+                result.blocked = True
+                result.reason  = f"Scan error (blocked as precaution): {e}"
+                _scanner_log.error(f"Scan error [{filename}]: {e}")
+
+            if result.blocked:
+                blocked.append(result)
+                _scanner_log.warning(f"BLOCKED [{filename}]: {result.reason}")
+            else:
+                safe.append(entry)
+
+        verdict = ScanVerdict(blocked=bool(blocked), safe_files=safe, blocked_files=blocked)
+        if verdict.blocked:
+            await self._alert(verdict, guild, context)
+        return verdict
+
+    # ── Blocking model calls (run in executor) ─────────────────────────────────
+
+    def _nudenet_scan(self, data: bytes, ext: str) -> bool:
+        if _nudenet_model is None:
+            return False
+        import tempfile
+        if ext in _SCAN_VIDEO_EXTS:
+            data = self._first_frame(data)
+            if data is None:
+                return False
+            ext = '.jpg'
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp.write(data)
+            path = tmp.name
+        try:
+            result = _nudenet_model.classify(path)
+            preds  = list(result.values())[0] if result else {}
+            return any(
+                lbl in _EXPLICIT_LABELS and conf >= _NUDENET_THRESHOLD
+                for lbl, conf in preds.items()
+            )
+        finally:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+
+    def _deepface_age(self, data: bytes) -> Optional[float]:
+        if not _deepface_ready:
+            return None
+        try:
+            from deepface import DeepFace  # type: ignore
+            import numpy as np
+            from PIL import Image as _Image
+            arr     = np.array(_Image.open(io.BytesIO(data)).convert("RGB"))
+            results = DeepFace.analyze(arr, actions=["age"], enforce_detection=False, silent=True)
+            if isinstance(results, dict):
+                results = [results]
+            ages = [float(r["age"]) for r in results if r.get("age") is not None]
+            return min(ages) if ages else None
+        except Exception as e:
+            _scanner_log.warning(f"DeepFace age error: {e}")
+            return None
+
+    def _first_frame(self, video_data: bytes) -> Optional[bytes]:
+        try:
+            import cv2, numpy as np, tempfile  # type: ignore
+            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp:
+                tmp.write(video_data)
+                path = tmp.name
+            try:
+                cap = cv2.VideoCapture(path)
+                ret, frame = cap.read()
+                cap.release()
+                if not ret or frame is None:
+                    return None
+                _, buf = cv2.imencode('.jpg', frame)
+                return buf.tobytes()
+            finally:
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
+        except ImportError:
+            return None
+        except Exception as e:
+            _scanner_log.error(f"First-frame extraction failed: {e}")
+            return None
+
+    # ── Alert (no image content ever included) ─────────────────────────────────
+
+    async def _alert(self, verdict: ScanVerdict, guild, context: str):
+        summary = "\n".join(f"• `{r.filename}` — {r.reason}" for r in verdict.blocked_files)
+        embed = discord.Embed(
+            title="🚫 Re-host Blocked — Potential Illegal Content",
+            description=(
+                "One or more files were **blocked from re-hosting**. "
+                "Encrypted copies have been deleted. "
+                "**No image content is included in this report.**"
+            ),
+            color=0xff0000,
+            timestamp=datetime.utcnow(),
+        )
+        embed.add_field(name="Context",          value=context or "*(none)*",   inline=False)
+        embed.add_field(name=f"Blocked ({len(verdict.blocked_files)})", value=summary[:1024], inline=False)
+        embed.add_field(
+            name="Action Required",
+            value=(
+                "Review via Discord audit logs. If content is illegal, report to "
+                "Discord Trust & Safety and NCMEC CyberTipline (missingkids.org)."
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="No flagged content was uploaded to Discord CDN")
+        try:
+            owner = await self.bot.fetch_user(self.owner_id)
+            if owner:
+                await owner.send(embed=embed)
+        except Exception:
+            pass
+        if guild:
+            try:
+                ch = self._get_bot_logs(guild)
+                if ch:
+                    await ch.send(embed=embed)
+            except Exception:
+                pass
+
+
 # ==================== MODERATION SYSTEM (UNIFIED) ====================
 
 class ModerationSystem:
@@ -320,8 +547,8 @@ class ModerationSystem:
         # Per-process Fernet key — generated fresh each run.
         self._fernet = Fernet(Fernet.generate_key())
 
-        # EmbалDNA pre-upload safety scanner
-        self.scanner = EmbалDNA(bot, OWNER_ID, self._get_bot_logs_channel)
+        # Pre-upload safety scanner
+        self.scanner = MediaScanner(bot, OWNER_ID, self._get_bot_logs_channel)
 
         # Data files
         self.roles_file = data_dir / "member_roles.json"
@@ -922,14 +1149,14 @@ class ModerationSystem:
     async def send_bot_log(self, guild: discord.Guild, embed: discord.Embed,
                            files_data: list = None, log_id: str = None) -> Optional[int]:
         """Send an embed to bot-logs and register it in the cache. Returns message_id.
-        Any image/video files are scanned by EmbалDNA before upload."""
+        Any image/video files are scanned by MediaScanner before upload."""
         bot_logs = self._get_bot_logs_channel(guild)
         if not bot_logs:
             return None
         if log_id is None:
             log_id = f"LOG-{int(datetime.utcnow().timestamp() * 1000)}"
 
-        # Scan files through EmbалDNA before uploading
+        # Scan files through MediaScanner before uploading
         if files_data:
             verdict = await self.scanner.scan_files(
                 files_data,
@@ -940,7 +1167,7 @@ class ModerationSystem:
                 # All files blocked — send embed-only with a note, no files
                 embed.add_field(
                     name="⚠️ Attachment(s) Withheld",
-                    value="One or more files were blocked by EmbалDNA. The server owner has been alerted.",
+                    value="One or more files were blocked by MediaScanner. The server owner has been alerted.",
                     inline=False,
                 )
                 files_data = None
@@ -1912,7 +2139,7 @@ async def _do_unlock(ctx: ModContext, mod_system: ModerationSystem,
 def setup(bot):
     # Create unified moderation system
     mod_system = ModerationSystem(bot)
-    bot._mod_system = mod_system  # expose for EmbалDNA scanner sharing
+    bot._mod_system = mod_system  # expose for MediaScanner scanner sharing
 
     # Attach to bot for backward compatibility
     bot.moderation_manager = mod_system
@@ -2224,20 +2451,27 @@ def setup(bot):
                 # Determine who deleted it via audit log
                 deleter = None
                 try:
-                    await asyncio.sleep(0.5)  # brief wait for audit log to populate
+                    await asyncio.sleep(0.75)  # give audit log time to populate
                     async for entry in message.guild.audit_logs(
-                        limit=5, action=discord.AuditLogAction.message_delete
+                        limit=10, action=discord.AuditLogAction.message_delete
                     ):
-                        if entry.target.id == message.author.id and \
-                           (discord.utils.utcnow() - entry.created_at).total_seconds() < 10:
+                        age = (discord.utils.utcnow() - entry.created_at).total_seconds()
+                        if age < 15 and entry.target.id == message.author.id:
                             deleter = entry.user
                             break
-                except Exception:
-                    pass
+                except Exception as e:
+                    mod_system.bot.logger.log(MODULE_NAME, f"Audit log fetch failed: {e}", "WARNING")
 
-                # Only act if an elevated user (or anyone identifiable) deleted it
-                if deleter and has_elevated_role(deleter):
-                    await mod_system.handle_bot_log_deletion(message.id, deleter, message.guild)
+                # If the bot deleted it itself (e.g. purge command), ignore
+                if deleter and deleter.id == message.guild.me.id:
+                    return
+
+                # Act if elevated user deleted it, OR if we couldn't identify the deleter
+                # (fail-safe: unknown = treat as suspicious)
+                if deleter is None or has_elevated_role(deleter):
+                    await mod_system.handle_bot_log_deletion(
+                        message.id, deleter or message.guild.me, message.guild
+                    )
                 elif message.id in mod_system._deletion_warnings:
                     # This was a deletion-warning message — resend regardless of who deleted it
                     original_log_id = mod_system._deletion_warnings.pop(message.id)

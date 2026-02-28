@@ -2503,7 +2503,61 @@ def setup(bot):
             if not message.guild:
                 return
 
+            # ── Cached media re-hosting — runs for ALL channels including bot-logs ──
+            # Must happen before the bot-log protection block so that user messages
+            # sent directly in #bot-logs are still re-hosted on deletion.
+            if not message.author.bot and message.id in mod_system.media_cache:
+                guild_id = str(message.guild.id)
+                channel_id = str(message.channel.id)
+                cached = mod_system.media_cache.get(message.id)
+                mod_system.bot.logger.log(MODULE_NAME,
+                    f"[REHOST] Deletion detected for msg {message.id} — "
+                    f"found in media_cache with {len(cached['files']) if cached else 0} file(s)")
+                rehosted = []
+                if cached:
+                    for f in cached['files']:
+                        mod_system.bot.logger.log(MODULE_NAME,
+                            f"[REHOST] Decrypting '{f['filename']}' from {f['path']} for msg {message.id}")
+                        try:
+                            data = mod_system._decrypt_from_disk(f['path'])
+                            mod_system.bot.logger.log(MODULE_NAME,
+                                f"[REHOST] Decrypted {len(data)} bytes for '{f['filename']}' (msg {message.id})")
+                            rehosted.append({'filename': f['filename'], 'data': data})
+                        except Exception as e:
+                            mod_system.bot.logger.log(MODULE_NAME,
+                                f"[REHOST] FAILED to decrypt '{f['filename']}' for msg {message.id}: {e}", "WARNING")
+                mod_system.bot.logger.log(MODULE_NAME,
+                    f"[REHOST] {len(rehosted)} file(s) successfully decrypted for msg {message.id}; "
+                    f"passing to logger")
+                mod_system._delete_media_files(message.id)
+                channel_msgs = mod_system.message_cache.get(guild_id, {}).get(channel_id, [])
+                mod_system.message_cache[guild_id][channel_id] = [
+                    m for m in channel_msgs if m['id'] != message.id
+                ]
+                # Mark this message as handled so logger.py's on_message_delete skips it
+                if not hasattr(bot, '_deletion_log_handled'):
+                    bot._deletion_log_handled = set()
+                bot._deletion_log_handled.add(message.id)
+                # Directly invoke the logger with the re-hosted files — avoids the race
+                # condition where logger's listener fires before this one populates
+                # _pending_rehosted_media, causing the log to use the original (expiring) URL.
+                event_logger = get_event_logger(bot)
+                if event_logger:
+                    mod_system.bot.logger.log(MODULE_NAME,
+                        f"[REHOST] Calling event_logger.log_message_delete for msg {message.id} "
+                        f"with rehosted_files={'YES (' + str(len(rehosted)) + ' files)' if rehosted else 'None (fallback to original URL)'}")
+                    await event_logger.log_message_delete(message, rehosted_files=rehosted if rehosted else None)
+                else:
+                    mod_system.bot.logger.log(MODULE_NAME,
+                        f"[REHOST] WARN: event_logger not found on bot — deletion log for msg {message.id} will NOT be sent", "WARNING")
+            elif not message.author.bot and message.attachments:
+                mod_system.bot.logger.log(MODULE_NAME,
+                    f"[REHOST] msg {message.id} was deleted with {len(message.attachments)} attachment(s) "
+                    f"but was NOT in media_cache — original URL will be used as fallback")
+
             # ── Bot-log deletion protection ──
+            # Runs after media re-hosting so user messages in #bot-logs are handled above first.
+            # Only cares about messages that are actual bot-log entries (in _bot_log_cache).
             bot_logs_channel = mod_system._get_bot_logs_channel(message.guild)
             if bot_logs_channel and message.channel.id == bot_logs_channel.id:
                 if message.id in mod_system._bot_log_cache:
@@ -2555,57 +2609,6 @@ def setup(bot):
                             mod_system._deletion_warnings[new_warn_msg.id] = original_log_id
                         except Exception as e:
                             mod_system.bot.logger.error(MODULE_NAME, f"Failed to repost deletion warning: {e}")
-                return  # Don't process bot-log channel messages further below
-
-            # ── Cached media re-hosting for regular channel messages ──
-            if not message.author.bot and message.id in mod_system.media_cache:
-                guild_id = str(message.guild.id)
-                channel_id = str(message.channel.id)
-                cached = mod_system.media_cache.get(message.id)
-                mod_system.bot.logger.log(MODULE_NAME,
-                    f"[REHOST] Deletion detected for msg {message.id} — "
-                    f"found in media_cache with {len(cached['files']) if cached else 0} file(s)")
-                rehosted = []
-                if cached:
-                    for f in cached['files']:
-                        mod_system.bot.logger.log(MODULE_NAME,
-                            f"[REHOST] Decrypting '{f['filename']}' from {f['path']} for msg {message.id}")
-                        try:
-                            data = mod_system._decrypt_from_disk(f['path'])
-                            mod_system.bot.logger.log(MODULE_NAME,
-                                f"[REHOST] Decrypted {len(data)} bytes for '{f['filename']}' (msg {message.id})")
-                            rehosted.append({'filename': f['filename'], 'data': data})
-                        except Exception as e:
-                            mod_system.bot.logger.log(MODULE_NAME,
-                                f"[REHOST] FAILED to decrypt '{f['filename']}' for msg {message.id}: {e}", "WARNING")
-                mod_system.bot.logger.log(MODULE_NAME,
-                    f"[REHOST] {len(rehosted)} file(s) successfully decrypted for msg {message.id}; "
-                    f"passing to logger")
-                mod_system._delete_media_files(message.id)
-                channel_msgs = mod_system.message_cache.get(guild_id, {}).get(channel_id, [])
-                mod_system.message_cache[guild_id][channel_id] = [
-                    m for m in channel_msgs if m['id'] != message.id
-                ]
-                # Mark this message as handled so logger.py's on_message_delete skips it
-                if not hasattr(bot, '_deletion_log_handled'):
-                    bot._deletion_log_handled = set()
-                bot._deletion_log_handled.add(message.id)
-                # Directly invoke the logger with the re-hosted files — avoids the race
-                # condition where logger's listener fires before this one populates
-                # _pending_rehosted_media, causing the log to use the original (expiring) URL.
-                event_logger = get_event_logger(bot)
-                if event_logger:
-                    mod_system.bot.logger.log(MODULE_NAME,
-                        f"[REHOST] Calling event_logger.log_message_delete for msg {message.id} "
-                        f"with rehosted_files={'YES (' + str(len(rehosted)) + ' files)' if rehosted else 'None (fallback to original URL)'}")
-                    await event_logger.log_message_delete(message, rehosted_files=rehosted if rehosted else None)
-                else:
-                    mod_system.bot.logger.log(MODULE_NAME,
-                        f"[REHOST] WARN: event_logger not found on bot — deletion log for msg {message.id} will NOT be sent", "WARNING")
-            elif not message.author.bot and message.attachments:
-                mod_system.bot.logger.log(MODULE_NAME,
-                    f"[REHOST] msg {message.id} was deleted with {len(message.attachments)} attachment(s) "
-                    f"but was NOT in media_cache — original URL will be used as fallback")
 
         except Exception as _e:
             import traceback as _tb

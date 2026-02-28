@@ -23,10 +23,10 @@ MODULE_NAME = "STARBOARD"
 CONFIG = {
     # ID of the channel where starred messages will be posted
     # Example: 1234567890123456789
-    "channel_id": None,
+    "channel_id": 1357896154276429984,
 
     # Number of ⭐ reactions required to post a message to the starboard
-    "threshold": 6,
+    "threshold": 3,
 
     # The emoji to watch for (standard unicode or custom emoji string)
     "emoji": "⭐",

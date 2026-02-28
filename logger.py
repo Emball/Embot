@@ -966,12 +966,14 @@ def setup(bot):
     async def on_message_delete(message):
         """Called when a message is deleted"""
         if message.guild:
-            # Pick up any pre-decrypted media stashed by the moderation module
-            rehosted_files = None
-            pending = getattr(bot, '_pending_rehosted_media', {})
-            if message.id in pending:
-                rehosted_files = pending.pop(message.id)
-            await event_logger.log_message_delete(message, rehosted_files=rehosted_files)
+            # If moderation.py already handled this deletion (it had cached media and
+            # called log_message_delete directly), skip it here to avoid a duplicate
+            # log with the stale/expiring original attachment URL.
+            handled = getattr(bot, '_deletion_log_handled', set())
+            if message.id in handled:
+                handled.discard(message.id)
+                return
+            await event_logger.log_message_delete(message, rehosted_files=None)
     
     @bot.listen()
     async def on_message_edit(before, after):

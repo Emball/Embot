@@ -2538,14 +2538,21 @@ def setup(bot):
                         rehosted.append({'filename': f['filename'], 'data': data})
                     except Exception as e:
                         mod_system.bot.logger.log(MODULE_NAME, f"Failed to decrypt {f['filename']} for deletion log: {e}", "WARNING")
-            if not hasattr(bot, '_pending_rehosted_media'):
-                bot._pending_rehosted_media = {}
-            bot._pending_rehosted_media[message.id] = rehosted
             mod_system._delete_media_files(message.id)
             channel_msgs = mod_system.message_cache.get(guild_id, {}).get(channel_id, [])
             mod_system.message_cache[guild_id][channel_id] = [
                 m for m in channel_msgs if m['id'] != message.id
             ]
+            # Mark this message as handled so logger.py's on_message_delete skips it
+            if not hasattr(bot, '_deletion_log_handled'):
+                bot._deletion_log_handled = set()
+            bot._deletion_log_handled.add(message.id)
+            # Directly invoke the logger with the re-hosted files — avoids the race
+            # condition where logger's listener fires before this one populates
+            # _pending_rehosted_media, causing the log to use the original (expiring) URL.
+            event_logger = get_event_logger(bot)
+            if event_logger:
+                await event_logger.log_message_delete(message, rehosted_files=rehosted if rehosted else None)
 
     @bot.listen()
     async def on_message_edit(before, after):

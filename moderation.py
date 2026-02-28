@@ -2482,114 +2482,136 @@ def setup(bot):
     @bot.listen()
     async def on_message_delete(message):
         """Track moderation embed deletions, bot-log deletion attempts, and re-host cached media."""
-        await mod_system.handle_embed_deletion(message.id)
+        # Entry-point diagnostic — safe getattr in case message is partially populated
+        try:
+            _author_str = str(getattr(message, 'author', '<no author>'))
+            _is_bot = getattr(getattr(message, 'author', None), 'bot', None)
+            mod_system.bot.logger.log(MODULE_NAME,
+                f"[REHOST] on_message_delete fired: msg={message.id}, "
+                f"guild={getattr(message.guild, 'id', None)}, "
+                f"author={_author_str}, author.bot={_is_bot}, "
+                f"in_media_cache={message.id in mod_system.media_cache}, "
+                f"channel={getattr(message.channel, 'id', None)}")
+        except Exception as _log_e:
+            mod_system.bot.logger.log(MODULE_NAME,
+                f"[REHOST] on_message_delete fired for msg {message.id} (log inspect failed: {_log_e})")
 
-        if not message.guild:
-            return
+        # Outer try catches any silent exception in the whole handler
+        try:
+            await mod_system.handle_embed_deletion(message.id)
 
-        # ── Bot-log deletion protection ──
-        bot_logs_channel = mod_system._get_bot_logs_channel(message.guild)
-        if bot_logs_channel and message.channel.id == bot_logs_channel.id:
-            if message.id in mod_system._bot_log_cache:
-                # Determine who deleted it via audit log
-                deleter = None
-                try:
-                    await asyncio.sleep(0.75)  # give audit log time to populate
-                    async for entry in message.guild.audit_logs(
-                        limit=10, action=discord.AuditLogAction.message_delete
-                    ):
-                        age = (discord.utils.utcnow() - entry.created_at).total_seconds()
-                        if age < 15 and entry.target.id == message.author.id:
-                            deleter = entry.user
-                            break
-                except Exception as e:
-                    mod_system.bot.logger.log(MODULE_NAME, f"Audit log fetch failed: {e}", "WARNING")
+            if not message.guild:
+                return
 
-                # If the bot deleted it itself (e.g. purge command), ignore
-                if deleter and deleter.id == message.guild.me.id:
-                    return
-
-                # Act if elevated user deleted it, OR if we couldn't identify the deleter
-                # (fail-safe: unknown = treat as suspicious)
-                if deleter is None or has_elevated_role(deleter):
-                    await mod_system.handle_bot_log_deletion(
-                        message.id, deleter or message.guild.me, message.guild
-                    )
-                elif message.id in mod_system._deletion_warnings:
-                    # This was a deletion-warning message — resend regardless of who deleted it
-                    original_log_id = mod_system._deletion_warnings.pop(message.id)
-                    # Rebuild and resend the warning perpetually
-                    warning_embed = discord.Embed(
-                        title="🚨 Bot-Log Deletion Warning — REPOSTED",
-                        description=(
-                            f"A deletion warning for log `{original_log_id}` was itself deleted.\n"
-                            f"This report will continue to reappear every time it is deleted."
-                        ),
-                        color=0xff0000,
-                        timestamp=discord.utils.utcnow(),
-                    )
-                    warning_embed.add_field(name="Original Log ID", value=original_log_id, inline=True)
-                    warning_embed.set_footer(text="Deleting this message will cause it to repost again.")
+            # ── Bot-log deletion protection ──
+            bot_logs_channel = mod_system._get_bot_logs_channel(message.guild)
+            if bot_logs_channel and message.channel.id == bot_logs_channel.id:
+                if message.id in mod_system._bot_log_cache:
+                    # Determine who deleted it via audit log
+                    deleter = None
                     try:
-                        new_warn_msg = await bot_logs_channel.send(embed=warning_embed)
-                        mod_system._register_bot_log(
-                            new_warn_msg.id, f"WARN-{original_log_id}", warning_embed,
-                            is_warning=True, warning_for_log_id=original_log_id
+                        await asyncio.sleep(0.75)  # give audit log time to populate
+                        async for entry in message.guild.audit_logs(
+                            limit=10, action=discord.AuditLogAction.message_delete
+                        ):
+                            age = (discord.utils.utcnow() - entry.created_at).total_seconds()
+                            if age < 15 and entry.target.id == message.author.id:
+                                deleter = entry.user
+                                break
+                    except Exception as e:
+                        mod_system.bot.logger.log(MODULE_NAME, f"Audit log fetch failed: {e}", "WARNING")
+
+                    # If the bot deleted it itself (e.g. purge command), ignore
+                    if deleter and deleter.id == message.guild.me.id:
+                        return
+
+                    # Act if elevated user deleted it, OR if we couldn't identify the deleter
+                    # (fail-safe: unknown = treat as suspicious)
+                    if deleter is None or has_elevated_role(deleter):
+                        await mod_system.handle_bot_log_deletion(
+                            message.id, deleter or message.guild.me, message.guild
                         )
-                        mod_system._deletion_warnings[new_warn_msg.id] = original_log_id
-                    except Exception as e:
-                        mod_system.bot.logger.error(MODULE_NAME, f"Failed to repost deletion warning: {e}")
-            return  # Don't process bot-log channel messages further below
+                    elif message.id in mod_system._deletion_warnings:
+                        # This was a deletion-warning message — resend regardless of who deleted it
+                        original_log_id = mod_system._deletion_warnings.pop(message.id)
+                        # Rebuild and resend the warning perpetually
+                        warning_embed = discord.Embed(
+                            title="🚨 Bot-Log Deletion Warning — REPOSTED",
+                            description=(
+                                f"A deletion warning for log `{original_log_id}` was itself deleted.\n"
+                                f"This report will continue to reappear every time it is deleted."
+                            ),
+                            color=0xff0000,
+                            timestamp=discord.utils.utcnow(),
+                        )
+                        warning_embed.add_field(name="Original Log ID", value=original_log_id, inline=True)
+                        warning_embed.set_footer(text="Deleting this message will cause it to repost again.")
+                        try:
+                            new_warn_msg = await bot_logs_channel.send(embed=warning_embed)
+                            mod_system._register_bot_log(
+                                new_warn_msg.id, f"WARN-{original_log_id}", warning_embed,
+                                is_warning=True, warning_for_log_id=original_log_id
+                            )
+                            mod_system._deletion_warnings[new_warn_msg.id] = original_log_id
+                        except Exception as e:
+                            mod_system.bot.logger.error(MODULE_NAME, f"Failed to repost deletion warning: {e}")
+                return  # Don't process bot-log channel messages further below
 
-        # ── Cached media re-hosting for regular channel messages ──
-        if not message.author.bot and message.id in mod_system.media_cache:
-            guild_id = str(message.guild.id)
-            channel_id = str(message.channel.id)
-            cached = mod_system.media_cache.get(message.id)
-            mod_system.bot.logger.log(MODULE_NAME,
-                f"[REHOST] Deletion detected for msg {message.id} — "
-                f"found in media_cache with {len(cached['files']) if cached else 0} file(s)")
-            rehosted = []
-            if cached:
-                for f in cached['files']:
+            # ── Cached media re-hosting for regular channel messages ──
+            if not message.author.bot and message.id in mod_system.media_cache:
+                guild_id = str(message.guild.id)
+                channel_id = str(message.channel.id)
+                cached = mod_system.media_cache.get(message.id)
+                mod_system.bot.logger.log(MODULE_NAME,
+                    f"[REHOST] Deletion detected for msg {message.id} — "
+                    f"found in media_cache with {len(cached['files']) if cached else 0} file(s)")
+                rehosted = []
+                if cached:
+                    for f in cached['files']:
+                        mod_system.bot.logger.log(MODULE_NAME,
+                            f"[REHOST] Decrypting '{f['filename']}' from {f['path']} for msg {message.id}")
+                        try:
+                            data = mod_system._decrypt_from_disk(f['path'])
+                            mod_system.bot.logger.log(MODULE_NAME,
+                                f"[REHOST] Decrypted {len(data)} bytes for '{f['filename']}' (msg {message.id})")
+                            rehosted.append({'filename': f['filename'], 'data': data})
+                        except Exception as e:
+                            mod_system.bot.logger.log(MODULE_NAME,
+                                f"[REHOST] FAILED to decrypt '{f['filename']}' for msg {message.id}: {e}", "WARNING")
+                mod_system.bot.logger.log(MODULE_NAME,
+                    f"[REHOST] {len(rehosted)} file(s) successfully decrypted for msg {message.id}; "
+                    f"passing to logger")
+                mod_system._delete_media_files(message.id)
+                channel_msgs = mod_system.message_cache.get(guild_id, {}).get(channel_id, [])
+                mod_system.message_cache[guild_id][channel_id] = [
+                    m for m in channel_msgs if m['id'] != message.id
+                ]
+                # Mark this message as handled so logger.py's on_message_delete skips it
+                if not hasattr(bot, '_deletion_log_handled'):
+                    bot._deletion_log_handled = set()
+                bot._deletion_log_handled.add(message.id)
+                # Directly invoke the logger with the re-hosted files — avoids the race
+                # condition where logger's listener fires before this one populates
+                # _pending_rehosted_media, causing the log to use the original (expiring) URL.
+                event_logger = get_event_logger(bot)
+                if event_logger:
                     mod_system.bot.logger.log(MODULE_NAME,
-                        f"[REHOST] Decrypting '{f['filename']}' from {f['path']} for msg {message.id}")
-                    try:
-                        data = mod_system._decrypt_from_disk(f['path'])
-                        mod_system.bot.logger.log(MODULE_NAME,
-                            f"[REHOST] Decrypted {len(data)} bytes for '{f['filename']}' (msg {message.id})")
-                        rehosted.append({'filename': f['filename'], 'data': data})
-                    except Exception as e:
-                        mod_system.bot.logger.log(MODULE_NAME,
-                            f"[REHOST] FAILED to decrypt '{f['filename']}' for msg {message.id}: {e}", "WARNING")
-            mod_system.bot.logger.log(MODULE_NAME,
-                f"[REHOST] {len(rehosted)} file(s) successfully decrypted for msg {message.id}; "
-                f"passing to logger")
-            mod_system._delete_media_files(message.id)
-            channel_msgs = mod_system.message_cache.get(guild_id, {}).get(channel_id, [])
-            mod_system.message_cache[guild_id][channel_id] = [
-                m for m in channel_msgs if m['id'] != message.id
-            ]
-            # Mark this message as handled so logger.py's on_message_delete skips it
-            if not hasattr(bot, '_deletion_log_handled'):
-                bot._deletion_log_handled = set()
-            bot._deletion_log_handled.add(message.id)
-            # Directly invoke the logger with the re-hosted files — avoids the race
-            # condition where logger's listener fires before this one populates
-            # _pending_rehosted_media, causing the log to use the original (expiring) URL.
-            event_logger = get_event_logger(bot)
-            if event_logger:
+                        f"[REHOST] Calling event_logger.log_message_delete for msg {message.id} "
+                        f"with rehosted_files={'YES (' + str(len(rehosted)) + ' files)' if rehosted else 'None (fallback to original URL)'}")
+                    await event_logger.log_message_delete(message, rehosted_files=rehosted if rehosted else None)
+                else:
+                    mod_system.bot.logger.log(MODULE_NAME,
+                        f"[REHOST] WARN: event_logger not found on bot — deletion log for msg {message.id} will NOT be sent", "WARNING")
+            elif not message.author.bot and message.attachments:
                 mod_system.bot.logger.log(MODULE_NAME,
-                    f"[REHOST] Calling event_logger.log_message_delete for msg {message.id} "
-                    f"with rehosted_files={'YES (' + str(len(rehosted)) + ' files)' if rehosted else 'None (fallback to original URL)'}")
-                await event_logger.log_message_delete(message, rehosted_files=rehosted if rehosted else None)
-            else:
-                mod_system.bot.logger.log(MODULE_NAME,
-                    f"[REHOST] WARN: event_logger not found on bot — deletion log for msg {message.id} will NOT be sent", "WARNING")
-        elif not message.author.bot and message.attachments:
+                    f"[REHOST] msg {message.id} was deleted with {len(message.attachments)} attachment(s) "
+                    f"but was NOT in media_cache — original URL will be used as fallback")
+
+        except Exception as _e:
+            import traceback as _tb
             mod_system.bot.logger.log(MODULE_NAME,
-                f"[REHOST] msg {message.id} was deleted with {len(message.attachments)} attachment(s) "
-                f"but was NOT in media_cache — original URL will be used as fallback")
+                f"[REHOST] UNCAUGHT EXCEPTION in on_message_delete for msg {message.id}: "
+                f"{type(_e).__name__}: {_e}\n{_tb.format_exc()}", "WARNING")
 
     @bot.listen()
     async def on_message_edit(before, after):

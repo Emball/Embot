@@ -759,9 +759,17 @@ class ModerationSystem:
         # Download and encrypt each attachment to disk
         downloaded = []
         for idx, att in enumerate(message.attachments):
+            self.bot.logger.log(MODULE_NAME,
+                f"[MEDIA-CACHE] Attempting to cache attachment '{att.filename}' "
+                f"(id={att.id}, size={att.size}, content_type={att.content_type}) "
+                f"for msg {message.id}")
             try:
                 data = await att.read()
+                self.bot.logger.log(MODULE_NAME,
+                    f"[MEDIA-CACHE] Downloaded {len(data)} bytes for '{att.filename}' (msg {message.id})")
                 path = self._encrypt_to_disk(message.id, idx, data)
+                self.bot.logger.log(MODULE_NAME,
+                    f"[MEDIA-CACHE] Encrypted to disk: {path} for '{att.filename}' (msg {message.id})")
                 downloaded.append({
                     'filename': att.filename,
                     'path': path,
@@ -769,7 +777,9 @@ class ModerationSystem:
                     'url': att.url,
                 })
             except Exception as e:
-                self.bot.logger.log(MODULE_NAME, f"Failed to cache attachment {att.filename}: {e}", "WARNING")
+                self.bot.logger.log(MODULE_NAME,
+                    f"[MEDIA-CACHE] FAILED to cache attachment '{att.filename}' "
+                    f"for msg {message.id}: {e}", "WARNING")
 
         if downloaded:
             self.media_cache[message.id] = {
@@ -777,6 +787,12 @@ class ModerationSystem:
                 'author_id': message.author.id,
                 'guild_id': message.guild.id,
             }
+            self.bot.logger.log(MODULE_NAME,
+                f"[MEDIA-CACHE] Stored {len(downloaded)} file(s) in media_cache for msg {message.id}")
+        elif message.attachments:
+            self.bot.logger.log(MODULE_NAME,
+                f"[MEDIA-CACHE] msg {message.id} had {len(message.attachments)} attachment(s) "
+                f"but none were successfully cached", "WARNING")
 
         msg_data = {
             'id': message.id,
@@ -2530,14 +2546,25 @@ def setup(bot):
             guild_id = str(message.guild.id)
             channel_id = str(message.channel.id)
             cached = mod_system.media_cache.get(message.id)
+            mod_system.bot.logger.log(MODULE_NAME,
+                f"[REHOST] Deletion detected for msg {message.id} — "
+                f"found in media_cache with {len(cached['files']) if cached else 0} file(s)")
             rehosted = []
             if cached:
                 for f in cached['files']:
+                    mod_system.bot.logger.log(MODULE_NAME,
+                        f"[REHOST] Decrypting '{f['filename']}' from {f['path']} for msg {message.id}")
                     try:
                         data = mod_system._decrypt_from_disk(f['path'])
+                        mod_system.bot.logger.log(MODULE_NAME,
+                            f"[REHOST] Decrypted {len(data)} bytes for '{f['filename']}' (msg {message.id})")
                         rehosted.append({'filename': f['filename'], 'data': data})
                     except Exception as e:
-                        mod_system.bot.logger.log(MODULE_NAME, f"Failed to decrypt {f['filename']} for deletion log: {e}", "WARNING")
+                        mod_system.bot.logger.log(MODULE_NAME,
+                            f"[REHOST] FAILED to decrypt '{f['filename']}' for msg {message.id}: {e}", "WARNING")
+            mod_system.bot.logger.log(MODULE_NAME,
+                f"[REHOST] {len(rehosted)} file(s) successfully decrypted for msg {message.id}; "
+                f"passing to logger")
             mod_system._delete_media_files(message.id)
             channel_msgs = mod_system.message_cache.get(guild_id, {}).get(channel_id, [])
             mod_system.message_cache[guild_id][channel_id] = [
@@ -2552,7 +2579,17 @@ def setup(bot):
             # _pending_rehosted_media, causing the log to use the original (expiring) URL.
             event_logger = get_event_logger(bot)
             if event_logger:
+                mod_system.bot.logger.log(MODULE_NAME,
+                    f"[REHOST] Calling event_logger.log_message_delete for msg {message.id} "
+                    f"with rehosted_files={'YES (' + str(len(rehosted)) + ' files)' if rehosted else 'None (fallback to original URL)'}")
                 await event_logger.log_message_delete(message, rehosted_files=rehosted if rehosted else None)
+            else:
+                mod_system.bot.logger.log(MODULE_NAME,
+                    f"[REHOST] WARN: event_logger not found on bot — deletion log for msg {message.id} will NOT be sent", "WARNING")
+        elif not message.author.bot and message.attachments:
+            mod_system.bot.logger.log(MODULE_NAME,
+                f"[REHOST] msg {message.id} was deleted with {len(message.attachments)} attachment(s) "
+                f"but was NOT in media_cache — original URL will be used as fallback")
 
     @bot.listen()
     async def on_message_edit(before, after):

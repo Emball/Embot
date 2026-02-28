@@ -13,7 +13,9 @@ import io
 from PIL import Image, ImageDraw, ImageFont
 import pytz
 import tempfile
+from collections import deque
 from cryptography.fernet import Fernet
+from embaldna import EmbалDNA
 
 MODULE_NAME = "MODERATION"
 
@@ -315,13 +317,11 @@ class ModerationSystem:
         data_dir = Path(__file__).parent / "data"
         data_dir.mkdir(exist_ok=True)
 
-        # Encrypted media staging directory (files deleted on eviction or after re-host)
-        self.media_dir = data_dir / "media_cache"
-        self.media_dir.mkdir(exist_ok=True)
-
-        # Per-process Fernet key — generated fresh each run so cached files from a
-        # previous session (if any remain) cannot be decrypted without the key.
+        # Per-process Fernet key — generated fresh each run.
         self._fernet = Fernet(Fernet.generate_key())
+
+        # EmbалDNA pre-upload safety scanner
+        self.scanner = EmbалDNA(bot, OWNER_ID, self._get_bot_logs_channel)
 
         # Data files
         self.roles_file = data_dir / "member_roles.json"
@@ -338,6 +338,22 @@ class ModerationSystem:
         self.pending_actions = self._load_json(self.oversight_file, {})
         self.appeals = self._load_json(self.appeals_file, {})
         self.invites = self._load_json(self.invites_file, {})
+
+        # Bot-log cache: tracks last 500 messages sent to bot-logs so deletions can be countered.
+        # bot_log_cache maps discord message_id -> log record dict
+        # bot_log_order is a deque of message_ids in insertion order for LRU eviction
+        BOT_LOG_CACHE_SIZE = 500
+        self._bot_log_cache: Dict[int, Dict] = {}
+        self._bot_log_order: deque = deque()
+        self._bot_log_cache_size = BOT_LOG_CACHE_SIZE
+
+        # Tracks message_ids of deletion-warning messages (perpetual resend on delete)
+        # warning_message_id -> original_log_id
+        self._deletion_warnings: Dict[int, str] = {}
+
+        # Deletion attempt log: list of dicts for daily report
+        # Each: {'log_id', 'deleter', 'deleter_id', 'timestamp', 'original_title'}
+        self.deletion_attempts: list = []
 
         # Message cache for context (guild_id -> channel_id -> list)
         self.message_cache = {}
@@ -687,10 +703,7 @@ class ModerationSystem:
         if extra_content:
             embed.add_field(name="Message Content", value=extra_content[:1024] or "*empty*", inline=False)
         embed.set_footer(text=f"{len(files)} attachment(s) re-hosted below")
-        try:
-            await bot_logs.send(embed=embed, files=files)
-        except Exception as e:
-            self.bot.logger.log(MODULE_NAME, f"Failed to send cached media to bot-logs: {e}", "WARNING")
+        await self.send_bot_log(guild, embed, files_data=cached['files'])
 
     def track_embed(self, message_id: int, action_id: str, embed_type: str):
         """Track an embed for deletion monitoring."""
@@ -788,7 +801,7 @@ class ModerationSystem:
                 )
                 log_embed.add_field(name="Original Reason", value=action['reason'], inline=False)
                 log_embed.add_field(name="Original Moderator", value=action['moderator'], inline=True)
-                await bot_logs.send(embed=log_embed)
+                await self.send_bot_log(guild, log_embed)
             action['status'] = 'reverted'
             action['reviewed_at'] = datetime.utcnow().isoformat()
             del self.pending_actions[action['id']]
@@ -828,7 +841,7 @@ class ModerationSystem:
                 )
                 log_embed.add_field(name="Original Reason", value=action['reason'], inline=False)
                 log_embed.add_field(name="Original Moderator", value=action['moderator'], inline=True)
-                await bot_logs.send(embed=log_embed)
+                await self.send_bot_log(guild, log_embed)
             action['status'] = 'reverted'
             action['reviewed_at'] = datetime.utcnow().isoformat()
             del self.pending_actions[action['id']]
@@ -876,6 +889,153 @@ class ModerationSystem:
         if logger:
             return logger.get_bot_logs_channel(guild)
         return None
+
+    def _register_bot_log(self, message_id: int, log_id: str, embed: discord.Embed,
+                           files_data: list = None, is_warning: bool = False,
+                           warning_for_log_id: str = None):
+        """Register a sent bot-log message in the rolling cache."""
+        record = {
+            'log_id': log_id,
+            'message_id': message_id,
+            'embed': {
+                'title': embed.title,
+                'description': embed.description,
+                'color': embed.color.value if embed.color else 0,
+                'fields': [{'name': f.name, 'value': f.value, 'inline': f.inline} for f in embed.fields],
+                'footer': embed.footer.text if embed.footer else None,
+                'image_url': embed.image.url if embed.image else None,
+                'author_name': embed.author.name if embed.author else None,
+                'author_icon': embed.author.icon_url if embed.author else None,
+            },
+            'files_data': files_data or [],  # list of {'filename': str, 'data': bytes}
+            'is_warning': is_warning,
+            'warning_for_log_id': warning_for_log_id,
+            'timestamp': datetime.utcnow().isoformat(),
+        }
+        self._bot_log_cache[message_id] = record
+        self._bot_log_order.append(message_id)
+        # Evict oldest if over capacity
+        while len(self._bot_log_order) > self._bot_log_cache_size:
+            oldest_id = self._bot_log_order.popleft()
+            self._bot_log_cache.pop(oldest_id, None)
+
+    async def send_bot_log(self, guild: discord.Guild, embed: discord.Embed,
+                           files_data: list = None, log_id: str = None) -> Optional[int]:
+        """Send an embed to bot-logs and register it in the cache. Returns message_id.
+        Any image/video files are scanned by EmbалDNA before upload."""
+        bot_logs = self._get_bot_logs_channel(guild)
+        if not bot_logs:
+            return None
+        if log_id is None:
+            log_id = f"LOG-{int(datetime.utcnow().timestamp() * 1000)}"
+
+        # Scan files through EmbалDNA before uploading
+        if files_data:
+            verdict = await self.scanner.scan_files(
+                files_data,
+                guild=guild,
+                context=f"bot-log send (log_id={log_id})",
+            )
+            if verdict.blocked and not verdict.safe_files:
+                # All files blocked — send embed-only with a note, no files
+                embed.add_field(
+                    name="⚠️ Attachment(s) Withheld",
+                    value="One or more files were blocked by EmbалDNA. The server owner has been alerted.",
+                    inline=False,
+                )
+                files_data = None
+            elif verdict.blocked:
+                # Some files blocked — only upload the safe ones
+                files_data = verdict.safe_files
+
+        try:
+            if files_data:
+                discord_files = [
+                    discord.File(fp=io.BytesIO(f['data']), filename=f['filename'])
+                    for f in files_data
+                ]
+                msg = await bot_logs.send(embed=embed, files=discord_files)
+            else:
+                msg = await bot_logs.send(embed=embed)
+            self._register_bot_log(msg.id, log_id, embed, files_data=files_data)
+            return msg.id
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, f"Failed to send bot log: {e}")
+            return None
+
+    async def handle_bot_log_deletion(self, message_id: int, deleter: discord.Member, guild: discord.Guild):
+        """Called when a bot-logs message is deleted by an elevated user."""
+        record = self._bot_log_cache.get(message_id)
+        if not record:
+            return
+
+        bot_logs = self._get_bot_logs_channel(guild)
+        if not bot_logs:
+            return
+
+        log_id = record['log_id']
+        original_embed_data = record['embed']
+        timestamp = datetime.utcnow()
+
+        # Log the deletion attempt
+        self.deletion_attempts.append({
+            'log_id': log_id,
+            'deleter': str(deleter),
+            'deleter_id': deleter.id,
+            'timestamp': timestamp.isoformat(),
+            'original_title': original_embed_data.get('title') or '(no title)',
+            'is_warning': record.get('is_warning', False),
+        })
+
+        self.bot.logger.log(MODULE_NAME,
+            f"⚠️ Bot-log deletion attempted by {deleter} (ID: {deleter.id}) for log {log_id}", "WARNING")
+
+        # Rebuild and resend the original log embed
+        orig_embed = discord.Embed(
+            title=original_embed_data.get('title'),
+            description=original_embed_data.get('description'),
+            color=original_embed_data.get('color', 0xff4500),
+        )
+        for field in original_embed_data.get('fields', []):
+            orig_embed.add_field(name=field['name'], value=field['value'], inline=field['inline'])
+        if original_embed_data.get('footer'):
+            orig_embed.set_footer(text=original_embed_data['footer'])
+        if original_embed_data.get('author_name'):
+            orig_embed.set_author(name=original_embed_data['author_name'],
+                                  icon_url=original_embed_data.get('author_icon') or discord.Embed.Empty)
+        if original_embed_data.get('image_url'):
+            orig_embed.set_image(url=original_embed_data['image_url'])
+
+        # Resend original log (re-registers under a new message id with same log_id)
+        new_orig_msg_id = await self.send_bot_log(guild, orig_embed,
+                                                   files_data=record.get('files_data'),
+                                                   log_id=log_id)
+
+        # Build deletion warning embed
+        warning_embed = discord.Embed(
+            title="🚨 Bot-Log Deletion Attempted",
+            description=(
+                f"**{deleter.mention}** (`{deleter}` | ID: `{deleter.id}`) attempted to delete a bot-log.\n"
+                f"The original log has been reposted above."
+            ),
+            color=0xff0000,
+            timestamp=timestamp,
+        )
+        warning_embed.add_field(name="Log ID", value=log_id, inline=True)
+        warning_embed.add_field(name="Original Title",
+                                value=original_embed_data.get('title') or '*(no title)*', inline=True)
+        warning_embed.add_field(name="Deleted By",
+                                value=f"{deleter.mention} ({deleter.id})", inline=False)
+        warning_embed.set_footer(text=f"Deleting this warning will cause it to perpetually repost.")
+
+        try:
+            warning_msg = await bot_logs.send(embed=warning_embed)
+            # Register the warning — if deleted, its warning_for_log_id points to the original log_id
+            self._register_bot_log(warning_msg.id, f"WARN-{log_id}", warning_embed,
+                                   is_warning=True, warning_for_log_id=log_id)
+            self._deletion_warnings[warning_msg.id] = log_id
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, f"Failed to send deletion warning: {e}")
 
     # ==================== OVERSIGHT: APPEALS ====================
 
@@ -926,7 +1086,7 @@ class ModerationSystem:
                     timestamp=datetime.utcnow()
                 )
                 log_embed.add_field(name="Appeal Text", value=appeal['appeal_text'][:1024], inline=False)
-                await bot_logs.send(embed=log_embed)
+                await self.send_bot_log(guild, log_embed)
             appeal['status'] = 'approved'
             appeal['reviewed_at'] = datetime.utcnow().isoformat()
             del self.appeals[appeal_id]
@@ -1009,32 +1169,77 @@ class ModerationSystem:
         await owner.send(embed=embed, view=view)
 
     async def generate_daily_report(self):
-        """Generate and send the daily moderation report."""
+        """Generate and send the daily report: only covers deletion attempts."""
         try:
             owner = await self.bot.fetch_user(OWNER_ID)
             if not owner:
                 return
-            if not self.pending_actions and not self.appeals:
+
+            # ── Bot-log deletion attempts ──
+            botlog_attempts = list(self.deletion_attempts)
+            self.deletion_attempts.clear()  # Reset for next period
+
+            # ── Mod action deletion attempts (red/yellow flags from oversight) ──
+            red_flags = []
+            yellow_flags = []
+            for action_id, action in self.pending_actions.items():
+                flags = action.get('flags', [])
+                if 'red_flag' in flags:
+                    red_flags.append((action_id, action))
+                elif 'yellow_flag' in flags:
+                    yellow_flags.append((action_id, action))
+
+            total_issues = len(botlog_attempts) + len(red_flags) + len(yellow_flags)
+
+            if total_issues == 0:
                 embed = discord.Embed(
-                    title="📊 Daily Moderation Report",
-                    description="No pending moderation actions or appeals to review.",
+                    title="📊 Daily Integrity Report",
+                    description="✅ No deletion attempts or mod-action flags in the last 24 hours.",
                     color=0x2ecc71,
                     timestamp=datetime.utcnow()
                 )
                 await owner.send(embed=embed)
                 return
+
             embed = discord.Embed(
-                title="📊 Daily Moderation Report",
-                description=f"**{len(self.pending_actions)}** pending action(s) | **{len(self.appeals)}** appeal(s)",
-                color=0x5865f2,
+                title="📊 Daily Integrity Report",
+                description=(
+                    f"**{len(botlog_attempts)}** bot-log deletion attempt(s)\n"
+                    f"**{len(red_flags)}** 🚩 red-flag mod action(s)\n"
+                    f"**{len(yellow_flags)}** ⚠️ yellow-flag mod action(s)"
+                ),
+                color=0xff4500,
                 timestamp=datetime.utcnow()
             )
             await owner.send(embed=embed)
-            for action_id, action in list(self.pending_actions.items())[:10]:
-                await self.send_action_review(owner, action_id, action)
-            for appeal_id, appeal in list(self.appeals.items())[:10]:
-                await self.send_appeal_review(owner, appeal_id, appeal)
-            self.bot.logger.log(MODULE_NAME, "Daily report sent to owner")
+
+            # Detail: bot-log deletion attempts
+            if botlog_attempts:
+                detail = discord.Embed(
+                    title="🗑️ Bot-Log Deletion Attempts",
+                    color=0xff0000,
+                    timestamp=datetime.utcnow()
+                )
+                for attempt in botlog_attempts[:20]:  # cap at 20 fields
+                    detail.add_field(
+                        name=f"Log `{attempt['log_id']}`",
+                        value=(
+                            f"**By:** {attempt['deleter']} (`{attempt['deleter_id']}`)\n"
+                            f"**Original:** {attempt['original_title']}\n"
+                            f"**At:** {attempt['timestamp'][:19].replace('T', ' ')} UTC"
+                        ),
+                        inline=False
+                    )
+                if len(botlog_attempts) > 20:
+                    detail.set_footer(text=f"...and {len(botlog_attempts) - 20} more.")
+                await owner.send(embed=detail)
+
+            # Detail: red/yellow flag mod actions
+            if red_flags or yellow_flags:
+                for action_id, action in (red_flags + yellow_flags)[:10]:
+                    await self.send_action_review(owner, action_id, action)
+
+            self.bot.logger.log(MODULE_NAME, "Daily integrity report sent to owner")
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to generate daily report", e)
 
@@ -1707,6 +1912,7 @@ async def _do_unlock(ctx: ModContext, mod_system: ModerationSystem,
 def setup(bot):
     # Create unified moderation system
     mod_system = ModerationSystem(bot)
+    bot._mod_system = mod_system  # expose for EmbалDNA scanner sharing
 
     # Attach to bot for backward compatibility
     bot.moderation_manager = mod_system
@@ -2005,26 +2211,76 @@ def setup(bot):
 
     @bot.listen()
     async def on_message_delete(message):
-        """Track when moderation embeds are deleted, and re-host any cached media."""
+        """Track moderation embed deletions, bot-log deletion attempts, and re-host cached media."""
         await mod_system.handle_embed_deletion(message.id)
 
-        # Re-host cached media for this message if any
-        if message.guild and not message.author.bot and message.id in mod_system.media_cache:
+        if not message.guild:
+            return
+
+        # ── Bot-log deletion protection ──
+        bot_logs_channel = mod_system._get_bot_logs_channel(message.guild)
+        if bot_logs_channel and message.channel.id == bot_logs_channel.id:
+            if message.id in mod_system._bot_log_cache:
+                # Determine who deleted it via audit log
+                deleter = None
+                try:
+                    await asyncio.sleep(0.5)  # brief wait for audit log to populate
+                    async for entry in message.guild.audit_logs(
+                        limit=5, action=discord.AuditLogAction.message_delete
+                    ):
+                        if entry.target.id == message.author.id and \
+                           (discord.utils.utcnow() - entry.created_at).total_seconds() < 10:
+                            deleter = entry.user
+                            break
+                except Exception:
+                    pass
+
+                # Only act if an elevated user (or anyone identifiable) deleted it
+                if deleter and has_elevated_role(deleter):
+                    await mod_system.handle_bot_log_deletion(message.id, deleter, message.guild)
+                elif message.id in mod_system._deletion_warnings:
+                    # This was a deletion-warning message — resend regardless of who deleted it
+                    original_log_id = mod_system._deletion_warnings.pop(message.id)
+                    # Rebuild and resend the warning perpetually
+                    warning_embed = discord.Embed(
+                        title="🚨 Bot-Log Deletion Warning — REPOSTED",
+                        description=(
+                            f"A deletion warning for log `{original_log_id}` was itself deleted.\n"
+                            f"This report will continue to reappear every time it is deleted."
+                        ),
+                        color=0xff0000,
+                        timestamp=discord.utils.utcnow(),
+                    )
+                    warning_embed.add_field(name="Original Log ID", value=original_log_id, inline=True)
+                    warning_embed.set_footer(text="Deleting this message will cause it to repost again.")
+                    try:
+                        new_warn_msg = await bot_logs_channel.send(embed=warning_embed)
+                        mod_system._register_bot_log(
+                            new_warn_msg.id, f"WARN-{original_log_id}", warning_embed,
+                            is_warning=True, warning_for_log_id=original_log_id
+                        )
+                        mod_system._deletion_warnings[new_warn_msg.id] = original_log_id
+                    except Exception as e:
+                        mod_system.bot.logger.error(MODULE_NAME, f"Failed to repost deletion warning: {e}")
+            return  # Don't process bot-log channel messages further below
+
+        # ── Cached media re-hosting for regular channel messages ──
+        if not message.author.bot and message.id in mod_system.media_cache:
             guild_id = str(message.guild.id)
             channel_id = str(message.channel.id)
-            # Find author string from cache or message object
-            author_str = f"{message.author} ({message.author.id})"
-            content = message.content or "*no text*"
-            await mod_system.send_cached_media_to_logs(
-                message.guild,
-                message.id,
-                author_str,
-                "🗑️ Message with Attachment Deleted",
-                content,
-            )
-            # Clean up encrypted files from disk now that we've re-hosted them
+            cached = mod_system.media_cache.get(message.id)
+            rehosted = []
+            if cached:
+                for f in cached['files']:
+                    try:
+                        data = mod_system._decrypt_from_disk(f['path'])
+                        rehosted.append({'filename': f['filename'], 'data': data})
+                    except Exception as e:
+                        mod_system.bot.logger.log(MODULE_NAME, f"Failed to decrypt {f['filename']} for deletion log: {e}", "WARNING")
+            if not hasattr(bot, '_pending_rehosted_media'):
+                bot._pending_rehosted_media = {}
+            bot._pending_rehosted_media[message.id] = rehosted
             mod_system._delete_media_files(message.id)
-            # Remove from message cache too
             channel_msgs = mod_system.message_cache.get(guild_id, {}).get(channel_id, [])
             mod_system.message_cache[guild_id][channel_id] = [
                 m for m in channel_msgs if m['id'] != message.id
@@ -2080,7 +2336,7 @@ def setup(bot):
                 mod_system.media_cache.pop(after.id, None)
 
         if not removed_files:
-            # No locally cached copies, just log what we know from before
+            # No locally cached copies — log what we know without media
             bot_logs = mod_system._get_bot_logs_channel(after.guild)
             if bot_logs:
                 embed = discord.Embed(
@@ -2088,38 +2344,52 @@ def setup(bot):
                     color=discord.Color.yellow(),
                     timestamp=__import__('datetime').datetime.utcnow(),
                 )
-                embed.add_field(name="User", value=f"{after.author} ({after.author.id})", inline=True)
-                embed.add_field(name="Message ID", value=str(after.id), inline=True)
-                embed.add_field(name="Remaining Text", value=after.content[:1024] or "*empty*", inline=False)
-                removed_names = ", ".join(
-                    att.filename for att in before.attachments if att.id in removed_ids
-                )
-                embed.add_field(name="Removed Attachment(s)", value=removed_names or "unknown", inline=False)
+                embed.set_author(name=str(after.author), icon_url=after.author.display_avatar.url)
+                description = f"**{after.author.mention} removed an attachment in {after.channel.mention}**"
+                if after.content:
+                    description += f"\n{after.content}"
+                embed.description = description
+                removed_names = ", ".join(att.filename for att in before.attachments if att.id in removed_ids)
+                embed.add_field(name="Removed File(s)", value=removed_names or "unknown", inline=False)
                 embed.add_field(name="Note", value="File was not in local cache; original URLs may be expired.", inline=False)
-                await bot_logs.send(embed=embed)
+                embed.set_footer(text=f"Author: {after.author.id} | Message ID: {after.id}")
+                await mod_system.send_bot_log(after.guild, embed)
             return
 
-        # We have the cached files — re-host them
-        bot_logs = mod_system._get_bot_logs_channel(after.guild)
-        if not bot_logs:
-            return
-        files = [
-            discord.File(
-                fp=io.BytesIO(f['data']),
-                filename=f['filename'],
-            )
-            for f in removed_files
-        ]
+        # We have cached files — build embed matching deletion log style
+        image_exts = ('.png', '.jpg', '.jpeg', '.gif', '.webp')
+        audio_exts = ('.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.opus', '.mp4', '.mov', '.webm')
+
+        image_files = [f for f in removed_files if f['filename'].lower().endswith(image_exts)]
+        other_files  = [f for f in removed_files if not f['filename'].lower().endswith(image_exts)]
+
         embed = discord.Embed(
-            title="✂️ Attachment Removed from Message",
             color=discord.Color.yellow(),
             timestamp=__import__('datetime').datetime.utcnow(),
         )
-        embed.add_field(name="User", value=f"{after.author} ({after.author.id})", inline=True)
-        embed.add_field(name="Message ID", value=str(after.id), inline=True)
-        embed.add_field(name="Remaining Text", value=after.content[:1024] or "*empty*", inline=False)
-        embed.set_footer(text=f"{len(files)} removed attachment(s) re-hosted below")
-        await bot_logs.send(embed=embed, files=files)
+        embed.set_author(name=str(after.author), icon_url=after.author.display_avatar.url)
+        description = f"**{after.author.mention} removed an attachment in {after.channel.mention}**"
+        if after.content:
+            description += f"\n{after.content}"
+        embed.description = description
+        embed.set_footer(text=f"Author: {after.author.id} | Message ID: {after.id}")
+
+        bot_logs = mod_system._get_bot_logs_channel(after.guild)
+
+        if image_files and not other_files:
+            embed.set_image(url=f"attachment://{image_files[0]['filename']}")
+            await mod_system.send_bot_log(after.guild, embed, files_data=removed_files)
+        elif other_files:
+            has_audio = any(f['filename'].lower().endswith(audio_exts) for f in other_files)
+            label = "audio" if has_audio else "file"
+            embed.add_field(name="Attachment", value=f"*{label} hosted above*", inline=False)
+            # Files must appear above embed — send files first as plain message, then embed via send_bot_log
+            if bot_logs:
+                discord_files = [discord.File(fp=io.BytesIO(f['data']), filename=f['filename']) for f in removed_files]
+                await bot_logs.send(files=discord_files)
+            await mod_system.send_bot_log(after.guild, embed)
+        else:
+            await mod_system.send_bot_log(after.guild, embed, files_data=removed_files)
 
     @bot.listen()
     async def on_member_remove(member):

@@ -24,6 +24,9 @@ ffmpeg-python
 watchdog
 pydub
 cryptography
+nudenet 
+deepface 
+opencv-python-headless 
 
 moviepy==1.0.3
 Pillow>=10.0.0

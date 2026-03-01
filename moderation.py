@@ -2577,106 +2577,67 @@ def setup(bot):
 
     @bot.listen()
     async def on_message_delete(message):
-        """Track moderation embed deletions, bot-log deletion attempts, and re-host cached media."""
-        # Entry-point diagnostic — safe getattr in case message is partially populated
+        """Track moderation embed deletions, bot-log deletion protection, and stash re-hosted media for logger."""
         try:
-            _author_str = str(getattr(message, 'author', '<no author>'))
-            _is_bot = getattr(getattr(message, 'author', None), 'bot', None)
             mod_system.bot.logger.log(MODULE_NAME,
                 f"[REHOST] on_message_delete fired: msg={message.id}, "
                 f"guild={getattr(message.guild, 'id', None)}, "
-                f"author={_author_str}, author.bot={_is_bot}, "
+                f"author={getattr(message, 'author', '<no author>')}, "
+                f"author.bot={getattr(getattr(message, 'author', None), 'bot', None)}, "
                 f"in_media_cache={message.id in mod_system.media_cache}, "
                 f"channel={getattr(message.channel, 'id', None)}")
         except Exception as _log_e:
             mod_system.bot.logger.log(MODULE_NAME,
                 f"[REHOST] on_message_delete fired for msg {message.id} (log inspect failed: {_log_e})")
 
-        # Mark BEFORE any await — the logger listener runs concurrently and checks
-        # this flag. If we await first, it can fire before the flag is set.
+        # ── Decrypt and stash BEFORE any await ──
+        # Logger's listener runs concurrently. By stashing into _pending_rehosted_media
+        # before we ever yield, logger is guaranteed to see the files when it runs.
         if not message.author.bot and message.id in mod_system.media_cache:
-            if not hasattr(bot, '_deletion_log_handled'):
-                bot._deletion_log_handled = set()
-            bot._deletion_log_handled.add(message.id)
+            guild_id = str(message.guild.id) if message.guild else None
+            channel_id = str(message.channel.id) if message.channel else None
+            cached = mod_system.media_cache.get(message.id)
+            rehosted = []
+            if cached:
+                for f in cached['files']:
+                    try:
+                        data = mod_system._decrypt_from_disk(f['path'])
+                        mod_system.bot.logger.log(MODULE_NAME,
+                            f"[REHOST] Decrypted {len(data)} bytes for '{f['filename']}' (msg {message.id})")
+                        rehosted.append({'filename': f['filename'], 'data': data})
+                    except Exception as e:
+                        mod_system.bot.logger.log(MODULE_NAME,
+                            f"[REHOST] FAILED to decrypt '{f['filename']}' for msg {message.id}: {e}", "WARNING")
+            mod_system._delete_media_files(message.id)
+            if guild_id and channel_id:
+                channel_msgs = mod_system.message_cache.get(guild_id, {}).get(channel_id, [])
+                mod_system.message_cache[guild_id][channel_id] = [
+                    m for m in channel_msgs if m['id'] != message.id
+                ]
+            if not hasattr(bot, '_pending_rehosted_media'):
+                bot._pending_rehosted_media = {}
+            bot._pending_rehosted_media[message.id] = rehosted if rehosted else None
+            mod_system.bot.logger.log(MODULE_NAME,
+                f"[REHOST] Stashed {len(rehosted)} file(s) in _pending_rehosted_media for msg {message.id}")
 
-        # Outer try catches any silent exception in the whole handler
         try:
             await mod_system.handle_embed_deletion(message.id)
 
             if not message.guild:
                 return
 
-            # ── Cached media re-hosting — runs for ALL channels including bot-logs ──
-            if not message.author.bot and message.id in mod_system.media_cache:
-                guild_id = str(message.guild.id)
-                channel_id = str(message.channel.id)
-                cached = mod_system.media_cache.get(message.id)
-                mod_system.bot.logger.log(MODULE_NAME,
-                    f"[REHOST] Deletion detected for msg {message.id} — "
-                    f"found in media_cache with {len(cached['files']) if cached else 0} file(s)")
-                rehosted = []
-                if cached:
-                    for f in cached['files']:
-                        mod_system.bot.logger.log(MODULE_NAME,
-                            f"[REHOST] Decrypting '{f['filename']}' from {f['path']} for msg {message.id}")
-                        try:
-                            data = mod_system._decrypt_from_disk(f['path'])
-                            mod_system.bot.logger.log(MODULE_NAME,
-                                f"[REHOST] Decrypted {len(data)} bytes for '{f['filename']}' (msg {message.id})")
-                            rehosted.append({'filename': f['filename'], 'data': data})
-                        except Exception as e:
-                            mod_system.bot.logger.log(MODULE_NAME,
-                                f"[REHOST] FAILED to decrypt '{f['filename']}' for msg {message.id}: {e}", "WARNING")
-                mod_system.bot.logger.log(MODULE_NAME,
-                    f"[REHOST] {len(rehosted)} file(s) successfully decrypted for msg {message.id}; "
-                    f"passing to logger")
-                mod_system._delete_media_files(message.id)
-                channel_msgs = mod_system.message_cache.get(guild_id, {}).get(channel_id, [])
-                mod_system.message_cache[guild_id][channel_id] = [
-                    m for m in channel_msgs if m['id'] != message.id
-                ]
-                # Directly invoke the logger with the re-hosted files — avoids the race
-                # condition where logger's listener fires before this one populates
-                # _pending_rehosted_media, causing the log to use the original (expiring) URL.
-                event_logger = get_event_logger(bot)
-                if event_logger:
-                    mod_system.bot.logger.log(MODULE_NAME,
-                        f"[REHOST] Calling event_logger.log_message_delete for msg {message.id} "
-                        f"with rehosted_files={'YES (' + str(len(rehosted)) + ' files)' if rehosted else 'None (fallback to original URL)'}")
-                    await event_logger.log_message_delete(message, rehosted_files=rehosted if rehosted else None)
-                else:
-                    mod_system.bot.logger.log(MODULE_NAME,
-                        f"[REHOST] WARN: event_logger not found on bot — deletion log for msg {message.id} will NOT be sent", "WARNING")
-            elif not message.author.bot and message.attachments:
-                mod_system.bot.logger.log(MODULE_NAME,
-                    f"[REHOST] msg {message.id} was deleted with {len(message.attachments)} attachment(s) "
-                    f"but was NOT in media_cache — original URL will be used as fallback")
-
             # ── Bot-log deletion protection ──
-            # Runs after media re-hosting so user messages in #bot-logs are handled above first.
-            # Only cares about messages that are actual bot-log entries (in _bot_log_cache).
+            # Only fires for actual bot-sent log embeds (in _bot_log_cache),
+            # not for regular user messages posted in #bot-logs.
             bot_logs_channel = mod_system._get_bot_logs_channel(message.guild)
             if bot_logs_channel and message.channel.id == bot_logs_channel.id:
                 if message.id in mod_system._bot_log_cache:
-                    # Only the bot itself or elevated users can delete bot-log messages,
-                    # so no audit log lookup is needed. Just check if the bot deleted it
-                    # itself (e.g. purge command) via the cached author field — if the
-                    # message author is the bot, it was a self-delete; ignore it.
-                    # In all other cases (elevated user deleted it), repost.
-                    cached_record = mod_system._bot_log_cache.get(message.id, {})
-                    if message.author and message.author.id == message.guild.me.id:
-                        # Bot deleted its own log (purge) — don't repost
-                        mod_system.bot.logger.log(MODULE_NAME,
-                            f"Bot-log msg {message.id} deleted by bot itself — ignoring")
-                        return
                     await mod_system.handle_bot_log_deletion(
                         message.id, message.guild.me, message.guild
                     )
                 elif message.id in mod_system._deletion_warnings:
-                    # This was a deletion-warning message — resend regardless of who deleted it
                     original_log_id = mod_system._deletion_warnings.pop(message.id)
                     mod_system._save_deletion_warnings()
-                    # Rebuild and resend the warning perpetually
                     warning_embed = discord.Embed(
                         title="🚨 Bot-Log Deletion Warning — REPOSTED",
                         description=(

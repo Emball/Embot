@@ -93,14 +93,6 @@ class EventLogger:
         mod_sys = getattr(self.bot, '_mod_system', None)
         if mod_sys and hasattr(mod_sys, 'scanner'):
             self._scanner = mod_sys.scanner
-            self.bot.logger.log(MODULE_NAME,
-                f"[SCANNER] _get_scanner: acquired scanner from bot._mod_system")
-        else:
-            self.bot.logger.log(MODULE_NAME,
-                f"[SCANNER] _get_scanner: scanner NOT available — "
-                f"bot._mod_system={mod_sys is not None}, "
-                f"has scanner attr={hasattr(mod_sys, 'scanner') if mod_sys else 'N/A'}",
-                "WARNING")
         return self._scanner
     
     async def log_to_channel(self, channel, embed, file: discord.File = None, files: list = None) -> Optional[int]:
@@ -973,14 +965,13 @@ def setup(bot):
     @bot.listen()
     async def on_message_delete(message):
         """Called when a message is deleted"""
-        if not message.guild:
-            return
-        # Pick up any rehosted files stashed by moderation's on_message_delete.
-        # If the key is present, moderation already decrypted the media — use it.
-        # If not, fall back to the original attachment URL (may expire).
-        pending = getattr(bot, '_pending_rehosted_media', {})
-        rehosted_files = pending.pop(message.id, None)
-        await event_logger.log_message_delete(message, rehosted_files=rehosted_files)
+        if message.guild:
+            # Pick up any pre-decrypted media stashed by the moderation module
+            rehosted_files = None
+            pending = getattr(bot, '_pending_rehosted_media', {})
+            if message.id in pending:
+                rehosted_files = pending.pop(message.id)
+            await event_logger.log_message_delete(message, rehosted_files=rehosted_files)
     
     @bot.listen()
     async def on_message_edit(before, after):

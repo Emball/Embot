@@ -321,24 +321,15 @@ _nudenet_model     = None
 _deepface_ready    = False
 
 def _load_nudenet():
-    import logging as _log
     global _nudenet_model
     if _nudenet_model is None:
         try:
-            # nudenet >= 3.x uses NudeDetector; older versions used NudeClassifier
-            try:
-                from nudenet import NudeDetector  # type: ignore
-                _nudenet_model = NudeDetector()
-                _log.getLogger("MediaScanner").info("NudeNet loaded (NudeDetector / v3+ API)")
-            except (ImportError, AttributeError):
-                from nudenet import NudeClassifier  # type: ignore
-                _nudenet_model = NudeClassifier()
-                _log.getLogger("MediaScanner").info("NudeNet loaded (NudeClassifier / legacy API)")
+            from nudenet import NudeClassifier  # type: ignore
+            _nudenet_model = NudeClassifier()
         except ImportError:
-            _log.getLogger("MediaScanner").warning(
-                "NudeNet not installed — nudity scanning disabled")
+            pass  # NudeNet not installed — scanner will fail-open for nudity stage
         except Exception as e:
-            _log.getLogger("MediaScanner").error(f"NudeNet load failed: {e}")
+            logging.getLogger("MediaScanner").error(f"NudeNet load failed: {e}")
     return _nudenet_model
 
 def _load_deepface():
@@ -384,25 +375,14 @@ class MediaScanner:
         async with self._load_lock:
             if self._models_loaded:
                 return
-            self.bot.logger.log(MODULE_NAME,
-                f"[SCANNER] Loading models — NudeNet: {_nudenet_model is not None}, "
-                f"DeepFace ready: {_deepface_ready}")
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, _load_nudenet)
             await loop.run_in_executor(None, _load_deepface)
             self._models_loaded = True
-            self.bot.logger.log(MODULE_NAME,
-                f"[SCANNER] Models loaded — NudeNet: {_nudenet_model is not None}, "
-                f"DeepFace ready: {_deepface_ready}")
 
     async def scan_files(self, files_data: list, guild=None, context: str = "") -> ScanVerdict:
         """Scan a files_data list ({'filename', 'data'}) before re-hosting. Returns ScanVerdict."""
-        self.bot.logger.log(MODULE_NAME,
-            f"[SCANNER] scan_files called: {len(files_data)} file(s), context={context!r}")
         await self._ensure_models()
-        self.bot.logger.log(MODULE_NAME,
-            f"[SCANNER] Model state — NudeNet: {_nudenet_model is not None}, "
-            f"DeepFace: {_deepface_ready}")
         loop   = asyncio.get_event_loop()
         safe, blocked = [], []
 
@@ -412,61 +392,30 @@ class MediaScanner:
             ext = os.path.splitext(filename.lower())[1]
 
             if ext not in _SCAN_IMAGE_EXTS and ext not in _SCAN_VIDEO_EXTS:
-                self.bot.logger.log(MODULE_NAME,
-                    f"[SCANNER] '{filename}' — ext '{ext}' not scannable, passing through as safe")
                 safe.append(entry)
                 continue
 
-            self.bot.logger.log(MODULE_NAME,
-                f"[SCANNER] Scanning '{filename}' ({len(data)} bytes, ext={ext})")
             result = _FileScanResult(filename=filename, scannable=True)
             try:
-                if _nudenet_model is None:
-                    self.bot.logger.log(MODULE_NAME,
-                        f"[SCANNER] '{filename}' — NudeNet not available, skipping nudity check")
-                    is_explicit = False
-                else:
-                    is_explicit = await loop.run_in_executor(None, self._nudenet_scan, data, ext)
-                    self.bot.logger.log(MODULE_NAME,
-                        f"[SCANNER] '{filename}' — NudeNet result: explicit={is_explicit}")
+                is_explicit = await loop.run_in_executor(None, self._nudenet_scan, data, ext)
                 result.explicit = is_explicit
                 if is_explicit:
-                    if not _deepface_ready:
-                        self.bot.logger.log(MODULE_NAME,
-                            f"[SCANNER] '{filename}' — explicit but DeepFace not available, "
-                            f"skipping age check (will NOT block without age confirmation)")
                     min_age = await loop.run_in_executor(None, self._deepface_age, data)
                     result.min_age = min_age
-                    self.bot.logger.log(MODULE_NAME,
-                        f"[SCANNER] '{filename}' — DeepFace min_age={min_age} "
-                        f"(threshold={_AGE_THRESHOLD})")
                     if min_age is not None and min_age < _AGE_THRESHOLD:
                         result.blocked = True
                         result.reason  = f"Explicit + apparent age {min_age:.1f} < {_AGE_THRESHOLD}"
-                else:
-                    self.bot.logger.log(MODULE_NAME,
-                        f"[SCANNER] '{filename}' — not explicit, skipping age check")
             except Exception as e:
                 result.blocked = True
                 result.reason  = f"Scan error (blocked as precaution): {e}"
-                self.bot.logger.log(MODULE_NAME,
-                    f"[SCANNER] '{filename}' — EXCEPTION during scan (blocked as precaution): {e}", "WARNING")
                 _scanner_log.error(f"Scan error [{filename}]: {e}")
 
             if result.blocked:
                 blocked.append(result)
-                self.bot.logger.log(MODULE_NAME,
-                    f"[SCANNER] '{filename}' — BLOCKED: {result.reason}", "WARNING")
                 _scanner_log.warning(f"BLOCKED [{filename}]: {result.reason}")
             else:
-                self.bot.logger.log(MODULE_NAME,
-                    f"[SCANNER] '{filename}' — SAFE (explicit={result.explicit}, "
-                    f"min_age={result.min_age})")
                 safe.append(entry)
 
-        self.bot.logger.log(MODULE_NAME,
-            f"[SCANNER] scan_files complete: safe={len(safe)}, blocked={len(blocked)}, "
-            f"context={context!r}")
         verdict = ScanVerdict(blocked=bool(blocked), safe_files=safe, blocked_files=blocked)
         if verdict.blocked:
             await self._alert(verdict, guild, context)
@@ -487,24 +436,12 @@ class MediaScanner:
             tmp.write(data)
             path = tmp.name
         try:
-            # NudeDetector (v3+): detect() returns list of {'class': str, 'score': float}
-            # NudeClassifier (legacy): classify() returns {path: {label: score}}
-            if hasattr(_nudenet_model, 'detect'):
-                detections = _nudenet_model.detect(path)
-                triggered = [d for d in detections
-                             if d.get('class') in _EXPLICIT_LABELS
-                             and d.get('score', 0) >= _NUDENET_THRESHOLD]
-                if triggered:
-                    _scanner_log.warning(f"NudeDetector triggered: {triggered}")
-                return bool(triggered)
-            else:
-                result = _nudenet_model.classify(path)
-                preds  = list(result.values())[0] if result else {}
-                triggered = [(lbl, conf) for lbl, conf in preds.items()
-                             if lbl in _EXPLICIT_LABELS and conf >= _NUDENET_THRESHOLD]
-                if triggered:
-                    _scanner_log.warning(f"NudeClassifier triggered: {triggered}")
-                return bool(triggered)
+            result = _nudenet_model.classify(path)
+            preds  = list(result.values())[0] if result else {}
+            return any(
+                lbl in _EXPLICIT_LABELS and conf >= _NUDENET_THRESHOLD
+                for lbl, conf in preds.items()
+            )
         finally:
             try:
                 os.unlink(path)
@@ -624,8 +561,6 @@ class ModerationSystem:
         self.oversight_file = data_dir / "mod_oversight_data.json"
         self.appeals_file = data_dir / "ban_appeals.json"
         self.invites_file = data_dir / "ban_reversal_invites.json"
-        self.bot_log_cache_file = data_dir / "bot_log_cache.json"
-        self.deletion_warnings_file = data_dir / "deletion_warnings.json"
 
         # Load all data
         self.role_cache = self._load_json(self.roles_file, {})
@@ -636,29 +571,16 @@ class ModerationSystem:
         self.invites = self._load_json(self.invites_file, {})
 
         # Bot-log cache: tracks last 500 messages sent to bot-logs so deletions can be countered.
-        # Persisted to disk so it survives bot restarts.
-        # Keys are stored as strings in JSON and converted back to int on load.
+        # bot_log_cache maps discord message_id -> log record dict
+        # bot_log_order is a deque of message_ids in insertion order for LRU eviction
         BOT_LOG_CACHE_SIZE = 500
-        self._bot_log_cache_size = BOT_LOG_CACHE_SIZE
-        _raw_blc = self._load_json(self.bot_log_cache_file, {})
-        # Convert string keys -> int, and strip any files_data (bytes don't survive JSON)
         self._bot_log_cache: Dict[int, Dict] = {}
-        for k, v in _raw_blc.items():
-            v.pop('files_data', None)  # bytes can't round-trip through JSON
-            self._bot_log_cache[int(k)] = v
-        # Rebuild insertion-order deque from persisted timestamps so eviction is correct
-        _sorted_ids = sorted(
-            self._bot_log_cache.keys(),
-            key=lambda mid: self._bot_log_cache[mid].get('timestamp', '')
-        )
-        self._bot_log_order: deque = deque(_sorted_ids)
-        self.bot.logger.log(MODULE_NAME,
-            f"Loaded {len(self._bot_log_cache)} bot-log cache entries from disk")
+        self._bot_log_order: deque = deque()
+        self._bot_log_cache_size = BOT_LOG_CACHE_SIZE
 
-        # Deletion-warning tracking: persisted so warnings survive restarts.
-        # warning_message_id -> original_log_id  (string keys in JSON -> int keys in memory)
-        _raw_dw = self._load_json(self.deletion_warnings_file, {})
-        self._deletion_warnings: Dict[int, str] = {int(k): v for k, v in _raw_dw.items()}
+        # Tracks message_ids of deletion-warning messages (perpetual resend on delete)
+        # warning_message_id -> original_log_id
+        self._deletion_warnings: Dict[int, str] = {}
 
         # Deletion attempt log: list of dicts for daily report
         # Each: {'log_id', 'deleter', 'deleter_id', 'timestamp', 'original_title'}
@@ -837,17 +759,9 @@ class ModerationSystem:
         # Download and encrypt each attachment to disk
         downloaded = []
         for idx, att in enumerate(message.attachments):
-            self.bot.logger.log(MODULE_NAME,
-                f"[MEDIA-CACHE] Attempting to cache attachment '{att.filename}' "
-                f"(id={att.id}, size={att.size}, content_type={att.content_type}) "
-                f"for msg {message.id}")
             try:
                 data = await att.read()
-                self.bot.logger.log(MODULE_NAME,
-                    f"[MEDIA-CACHE] Downloaded {len(data)} bytes for '{att.filename}' (msg {message.id})")
                 path = self._encrypt_to_disk(message.id, idx, data)
-                self.bot.logger.log(MODULE_NAME,
-                    f"[MEDIA-CACHE] Encrypted to disk: {path} for '{att.filename}' (msg {message.id})")
                 downloaded.append({
                     'filename': att.filename,
                     'path': path,
@@ -855,9 +769,7 @@ class ModerationSystem:
                     'url': att.url,
                 })
             except Exception as e:
-                self.bot.logger.log(MODULE_NAME,
-                    f"[MEDIA-CACHE] FAILED to cache attachment '{att.filename}' "
-                    f"for msg {message.id}: {e}", "WARNING")
+                self.bot.logger.log(MODULE_NAME, f"Failed to cache attachment {att.filename}: {e}", "WARNING")
 
         if downloaded:
             self.media_cache[message.id] = {
@@ -865,12 +777,6 @@ class ModerationSystem:
                 'author_id': message.author.id,
                 'guild_id': message.guild.id,
             }
-            self.bot.logger.log(MODULE_NAME,
-                f"[MEDIA-CACHE] Stored {len(downloaded)} file(s) in media_cache for msg {message.id}")
-        elif message.attachments:
-            self.bot.logger.log(MODULE_NAME,
-                f"[MEDIA-CACHE] msg {message.id} had {len(message.attachments)} attachment(s) "
-                f"but none were successfully cached", "WARNING")
 
         msg_data = {
             'id': message.id,
@@ -1243,23 +1149,6 @@ class ModerationSystem:
         while len(self._bot_log_order) > self._bot_log_cache_size:
             oldest_id = self._bot_log_order.popleft()
             self._bot_log_cache.pop(oldest_id, None)
-        # Persist to disk — strip files_data (bytes) so JSON serialisation works
-        try:
-            serialisable = {
-                str(mid): {k: v for k, v in rec.items() if k != 'files_data'}
-                for mid, rec in self._bot_log_cache.items()
-            }
-            self._save_json(self.bot_log_cache_file, serialisable)
-        except Exception as _e:
-            self.bot.logger.log(MODULE_NAME, f"Failed to persist bot_log_cache: {_e}", "WARNING")
-
-    def _save_deletion_warnings(self):
-        """Persist _deletion_warnings to disk (string keys for JSON compatibility)."""
-        try:
-            self._save_json(self.deletion_warnings_file,
-                            {str(k): v for k, v in self._deletion_warnings.items()})
-        except Exception as _e:
-            self.bot.logger.log(MODULE_NAME, f"Failed to persist deletion_warnings: {_e}", "WARNING")
 
     async def send_bot_log(self, guild: discord.Guild, embed: discord.Embed,
                            files_data: list = None, log_id: str = None) -> Optional[int]:
@@ -1353,7 +1242,6 @@ class ModerationSystem:
                                               log_id=log_id)
         if new_msg_id:
             self._deletion_warnings[new_msg_id] = log_id
-            self._save_deletion_warnings()
 
     # ==================== OVERSIGHT: APPEALS ====================
 
@@ -2577,67 +2465,44 @@ def setup(bot):
 
     @bot.listen()
     async def on_message_delete(message):
-        """Track moderation embed deletions, bot-log deletion protection, and stash re-hosted media for logger."""
-        try:
-            mod_system.bot.logger.log(MODULE_NAME,
-                f"[REHOST] on_message_delete fired: msg={message.id}, "
-                f"guild={getattr(message.guild, 'id', None)}, "
-                f"author={getattr(message, 'author', '<no author>')}, "
-                f"author.bot={getattr(getattr(message, 'author', None), 'bot', None)}, "
-                f"in_media_cache={message.id in mod_system.media_cache}, "
-                f"channel={getattr(message.channel, 'id', None)}")
-        except Exception as _log_e:
-            mod_system.bot.logger.log(MODULE_NAME,
-                f"[REHOST] on_message_delete fired for msg {message.id} (log inspect failed: {_log_e})")
+        """Track moderation embed deletions, bot-log deletion attempts, and re-host cached media."""
+        await mod_system.handle_embed_deletion(message.id)
 
-        # ── Decrypt and stash BEFORE any await ──
-        # Logger's listener runs concurrently. By stashing into _pending_rehosted_media
-        # before we ever yield, logger is guaranteed to see the files when it runs.
-        if not message.author.bot and message.id in mod_system.media_cache:
-            guild_id = str(message.guild.id) if message.guild else None
-            channel_id = str(message.channel.id) if message.channel else None
-            cached = mod_system.media_cache.get(message.id)
-            rehosted = []
-            if cached:
-                for f in cached['files']:
-                    try:
-                        data = mod_system._decrypt_from_disk(f['path'])
-                        mod_system.bot.logger.log(MODULE_NAME,
-                            f"[REHOST] Decrypted {len(data)} bytes for '{f['filename']}' (msg {message.id})")
-                        rehosted.append({'filename': f['filename'], 'data': data})
-                    except Exception as e:
-                        mod_system.bot.logger.log(MODULE_NAME,
-                            f"[REHOST] FAILED to decrypt '{f['filename']}' for msg {message.id}: {e}", "WARNING")
-            mod_system._delete_media_files(message.id)
-            if guild_id and channel_id:
-                channel_msgs = mod_system.message_cache.get(guild_id, {}).get(channel_id, [])
-                mod_system.message_cache[guild_id][channel_id] = [
-                    m for m in channel_msgs if m['id'] != message.id
-                ]
-            if not hasattr(bot, '_pending_rehosted_media'):
-                bot._pending_rehosted_media = {}
-            bot._pending_rehosted_media[message.id] = rehosted if rehosted else None
-            mod_system.bot.logger.log(MODULE_NAME,
-                f"[REHOST] Stashed {len(rehosted)} file(s) in _pending_rehosted_media for msg {message.id}")
+        if not message.guild:
+            return
 
-        try:
-            await mod_system.handle_embed_deletion(message.id)
+        # ── Bot-log deletion protection ──
+        bot_logs_channel = mod_system._get_bot_logs_channel(message.guild)
+        if bot_logs_channel and message.channel.id == bot_logs_channel.id:
+            if message.id in mod_system._bot_log_cache:
+                # Determine who deleted it via audit log
+                deleter = None
+                try:
+                    await asyncio.sleep(0.75)  # give audit log time to populate
+                    async for entry in message.guild.audit_logs(
+                        limit=10, action=discord.AuditLogAction.message_delete
+                    ):
+                        age = (discord.utils.utcnow() - entry.created_at).total_seconds()
+                        if age < 15 and entry.target.id == message.author.id:
+                            deleter = entry.user
+                            break
+                except Exception as e:
+                    mod_system.bot.logger.log(MODULE_NAME, f"Audit log fetch failed: {e}", "WARNING")
 
-            if not message.guild:
-                return
+                # If the bot deleted it itself (e.g. purge command), ignore
+                if deleter and deleter.id == message.guild.me.id:
+                    return
 
-            # ── Bot-log deletion protection ──
-            # Only fires for actual bot-sent log embeds (in _bot_log_cache),
-            # not for regular user messages posted in #bot-logs.
-            bot_logs_channel = mod_system._get_bot_logs_channel(message.guild)
-            if bot_logs_channel and message.channel.id == bot_logs_channel.id:
-                if message.id in mod_system._bot_log_cache:
+                # Act if elevated user deleted it, OR if we couldn't identify the deleter
+                # (fail-safe: unknown = treat as suspicious)
+                if deleter is None or has_elevated_role(deleter):
                     await mod_system.handle_bot_log_deletion(
-                        message.id, message.guild.me, message.guild
+                        message.id, deleter or message.guild.me, message.guild
                     )
                 elif message.id in mod_system._deletion_warnings:
+                    # This was a deletion-warning message — resend regardless of who deleted it
                     original_log_id = mod_system._deletion_warnings.pop(message.id)
-                    mod_system._save_deletion_warnings()
+                    # Rebuild and resend the warning perpetually
                     warning_embed = discord.Embed(
                         title="🚨 Bot-Log Deletion Warning — REPOSTED",
                         description=(
@@ -2656,15 +2521,31 @@ def setup(bot):
                             is_warning=True, warning_for_log_id=original_log_id
                         )
                         mod_system._deletion_warnings[new_warn_msg.id] = original_log_id
-                        mod_system._save_deletion_warnings()
                     except Exception as e:
                         mod_system.bot.logger.error(MODULE_NAME, f"Failed to repost deletion warning: {e}")
+            return  # Don't process bot-log channel messages further below
 
-        except Exception as _e:
-            import traceback as _tb
-            mod_system.bot.logger.log(MODULE_NAME,
-                f"[REHOST] UNCAUGHT EXCEPTION in on_message_delete for msg {message.id}: "
-                f"{type(_e).__name__}: {_e}\n{_tb.format_exc()}", "WARNING")
+        # ── Cached media re-hosting for regular channel messages ──
+        if not message.author.bot and message.id in mod_system.media_cache:
+            guild_id = str(message.guild.id)
+            channel_id = str(message.channel.id)
+            cached = mod_system.media_cache.get(message.id)
+            rehosted = []
+            if cached:
+                for f in cached['files']:
+                    try:
+                        data = mod_system._decrypt_from_disk(f['path'])
+                        rehosted.append({'filename': f['filename'], 'data': data})
+                    except Exception as e:
+                        mod_system.bot.logger.log(MODULE_NAME, f"Failed to decrypt {f['filename']} for deletion log: {e}", "WARNING")
+            if not hasattr(bot, '_pending_rehosted_media'):
+                bot._pending_rehosted_media = {}
+            bot._pending_rehosted_media[message.id] = rehosted
+            mod_system._delete_media_files(message.id)
+            channel_msgs = mod_system.message_cache.get(guild_id, {}).get(channel_id, [])
+            mod_system.message_cache[guild_id][channel_id] = [
+                m for m in channel_msgs if m['id'] != message.id
+            ]
 
     @bot.listen()
     async def on_message_edit(before, after):

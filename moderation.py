@@ -321,6 +321,7 @@ _nudenet_model     = None
 _deepface_ready    = False
 
 def _load_nudenet():
+    import logging as _log
     global _nudenet_model
     if _nudenet_model is None:
         try:
@@ -328,16 +329,16 @@ def _load_nudenet():
             try:
                 from nudenet import NudeDetector  # type: ignore
                 _nudenet_model = NudeDetector()
-                logging.getLogger("MediaScanner").info("NudeNet loaded (NudeDetector / v3+ API)")
+                _log.getLogger("MediaScanner").info("NudeNet loaded (NudeDetector / v3+ API)")
             except (ImportError, AttributeError):
                 from nudenet import NudeClassifier  # type: ignore
                 _nudenet_model = NudeClassifier()
-                logging.getLogger("MediaScanner").info("NudeNet loaded (NudeClassifier / legacy API)")
+                _log.getLogger("MediaScanner").info("NudeNet loaded (NudeClassifier / legacy API)")
         except ImportError:
-            logging.getLogger("MediaScanner").warning(
+            _log.getLogger("MediaScanner").warning(
                 "NudeNet not installed — nudity scanning disabled")
         except Exception as e:
-            logging.getLogger("MediaScanner").error(f"NudeNet load failed: {e}")
+            _log.getLogger("MediaScanner").error(f"NudeNet load failed: {e}")
     return _nudenet_model
 
 def _load_deepface():
@@ -486,7 +487,7 @@ class MediaScanner:
             tmp.write(data)
             path = tmp.name
         try:
-            # NudeDetector (v3+): detect() returns list of {'class': str, 'score': float, ...}
+            # NudeDetector (v3+): detect() returns list of {'class': str, 'score': float}
             # NudeClassifier (legacy): classify() returns {path: {label: score}}
             if hasattr(_nudenet_model, 'detect'):
                 detections = _nudenet_model.detect(path)

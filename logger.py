@@ -974,6 +974,13 @@ def setup(bot):
     async def on_message_delete(message):
         """Called when a message is deleted"""
         if message.guild:
+            # If the moderation module already handled this deletion log (e.g. to
+            # re-host cached media), skip it here to avoid duplicate log entries.
+            handled = getattr(bot, '_deletion_log_handled', set())
+            if message.id in handled:
+                handled.discard(message.id)
+                return
+
             # Pick up any pre-decrypted media stashed by the moderation module
             rehosted_files = None
             pending = getattr(bot, '_pending_rehosted_media', {})

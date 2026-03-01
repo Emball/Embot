@@ -974,8 +974,9 @@ def setup(bot):
     async def on_message_delete(message):
         """Called when a message is deleted"""
         if message.guild:
-            # If the moderation module already handled this deletion log (e.g. to
-            # re-host cached media), skip it here to avoid duplicate log entries.
+            # If moderation.py already handled this deletion log (it calls
+            # event_logger.log_message_delete directly after re-hosting cached
+            # media), skip it here to avoid a duplicate log entry.
             handled = getattr(bot, '_deletion_log_handled', set())
             if message.id in handled:
                 handled.discard(message.id)

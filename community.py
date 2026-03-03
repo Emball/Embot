@@ -1,1242 +1,1309 @@
+# [file name]: community.py
+"""
+Community module for Embot.
+Handles submission tracking (#projects / #artwork), voting/XP, Spotlight Friday,
+version detection, submission linking, duplicate detection, and edit syncing.
+"""
+
 import discord
-from discord import app_commands
 from discord.ext import tasks
-import re
-import time
-import json
-import hashlib
+from discord import app_commands
+import sqlite3
 import asyncio
+import hashlib
+import re
+import json
+import uuid
+import threading
+from datetime import datetime, timezone, timedelta
+from typing import Optional, List, Tuple
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, List, Tuple
-import aiohttp
-from dataclasses import dataclass, asdict
-from enum import Enum
+
+try:
+    import aiohttp
+    HAS_AIOHTTP = True
+except ImportError:
+    HAS_AIOHTTP = False
+
+try:
+    import pytz
+    CST = pytz.timezone("America/Chicago")
+except ImportError:
+    CST = None
 
 MODULE_NAME = "COMMUNITY"
 
-# Channel configuration
-PROJECTS_CHANNEL_NAME = "projects"
-ARTWORK_CHANNEL_NAME = "artwork"
+# ─────────────────────────── CONSTANTS ───────────────────────────
+
+PROJECTS_CHANNEL_NAME  = "projects"
+ARTWORK_CHANNEL_NAME   = "artwork"
 ANNOUNCEMENTS_CHANNEL_NAME = "announcements"
+GENERAL_CHANNEL_NAME   = "general"
 
-# Special User Configuration
-EMBALL_USER_ID = "1328822521084117033"
-EMBALL_ROLE_NAME = "Emball Releases"
-EMBALL_KEYWORDS = ["remaster", "edit"]
-
-# Reaction emojis
-REACTION_FIRE = "🔥"
-REACTION_NEUTRAL = "😐"
-REACTION_TRASH = "🗑️"
-REACTION_STAR = "⭐"
-
-# XP values
-XP_VALUES = {
-    REACTION_FIRE: 5,
-    REACTION_NEUTRAL: 0,
-    REACTION_TRASH: -5,
-    REACTION_STAR: 10
+VOTE_EMOJIS: dict[str, int] = {
+    "🔥": 5,
+    "⭐": 10,
+    "😐": 0,
+    "🗑️": -5,
 }
+SETUP_EMOJIS = ["🔥", "😐", "🗑️"]   # Bot reacts with these on every submission
 
-# Thread message XP
-THREAD_MESSAGE_XP = 0.1
+MIN_DESCRIPTION_LENGTH = 10
+VERSION_REENTRY_DAYS   = 30          # Days before a group can re-enter spotlight
 
-# Theme colors (sleek, modern palette)
-THEME_COLORS = {
-    "primary": 0x00D9FF,      # Cyan - main accent
-    "secondary": 0xFF006E,    # Pink - highlights
-    "success": 0x06FFA5,      # Mint green
-    "warning": 0xFFBE0B,      # Amber
-    "error": 0xFF006E,        # Pink-red
-    "dark": 0x2B2D31,         # Discord dark gray
-    "project": 0x5865F2,      # Discord blurple
-    "artwork": 0xEB459E,      # Vibrant pink
-    "gold": 0xFFC107,         # Gold for leaderboard
-    "spotlight": 0xFFD700,    # Bright Gold for spotlight
-}
+# ─────────────────────────── HELPERS ────────────────────────────
 
-# Database file
-DB_FILE = Path("data/community_submissions.json")
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
-class SubmissionType(Enum):
-    """Submission type enumeration"""
-    PROJECT = "project"
-    ARTWORK = "artwork"
+def _now_str() -> str:
+    return _now().isoformat()
 
-@dataclass
-class Submission:
-    """Unified submission object for projects and artwork"""
-    project_id: str
-    message_id: str
-    user_id: str
-    submission_type: SubmissionType
-    version: str
-    title: Optional[str]
-    description: Optional[str]
-    media_links: List[str]
-    thumbnail: Optional[str]
-    file_hashes: List[str]
-    votes: Dict[str, int]
-    user_votes: Dict[str, str]  # user_id -> emoji (tracks first vote only)
-    thread_message_count: int
-    thread_message_xp: float  # XP from thread messages
-    created_at: str
-    updated_at: str
-    last_voted_at: Optional[str]
-    last_thread_message_at: Optional[str]
-    is_deleted: bool
-    channel_id: Optional[str] = None
-    linked_submissions: List[str] = None  # message_ids of linked submissions (shared votes)
-    
-    def __post_init__(self):
-        if self.linked_submissions is None:
-            self.linked_submissions = []
-        if not hasattr(self, 'thread_message_xp'):
-            self.thread_message_xp = 0.0
-    
-    def to_dict(self) -> Dict:
-        """Convert to dictionary for JSON serialization"""
-        data = asdict(self)
-        data['submission_type'] = self.submission_type.value
-        return data
-    
-    @classmethod
-    def from_dict(cls, data: Dict) -> 'Submission':
-        """Create from dictionary, filtering out unexpected fields"""
-        import inspect
-        valid_fields = {f.name for f in cls.__dataclass_fields__.values()}
-        filtered_data = {k: v for k, v in data.items() if k in valid_fields}
-        
-        if 'submission_type' in filtered_data:
-            filtered_data['submission_type'] = SubmissionType(filtered_data['submission_type'])
-        
-        return cls(**filtered_data)
-    
-    def calculate_xp(self) -> int:
-        """Calculate total XP for this submission"""
-        vote_xp = sum(count * XP_VALUES.get(emoji, 0) for emoji, count in self.votes.items())
-        return vote_xp + self.thread_message_xp
-    
-    def update_media(self, media_links: List[str], thumbnail: Optional[str], file_hashes: List[str]):
-        """Update media content"""
-        self.media_links = media_links
-        self.thumbnail = thumbnail
-        self.file_hashes = file_hashes
-        self.updated_at = datetime.now().isoformat()
-    
-    def update_content(self, title: Optional[str], description: Optional[str]):
-        """Update text content"""
-        self.title = title
-        self.description = description
-        self.updated_at = datetime.now().isoformat()
-    
-    def increment_version(self) -> str:
-        """Increment version number and return new version"""
-        try:
-            # Handle version strings like "v10" or "10" without dots
-            version_str = self.version.lstrip('v')
-            if '.' in version_str:
-                parts = version_str.split('.')
-                major = int(parts[0])
-                minor = int(parts[1]) if len(parts) > 1 else 0
-                self.version = f"{major + 1}.0"
-            else:
-                # Single number version like "v10"
-                current = int(version_str)
-                self.version = f"{current + 1}.0"
-        except (ValueError, AttributeError):
-            # If parsing fails, append .1
-            self.version = f"{self.version}.1"
-        self.updated_at = datetime.now().isoformat()
-        return self.version
-    
-    def mark_deleted(self):
-        """Mark submission as deleted"""
-        self.is_deleted = True
-        self.updated_at = datetime.now().isoformat()
-    
-    def record_vote(self, user_id: str, emoji: str):
-        """Record a user's vote"""
-        if user_id not in self.user_votes:
-            self.user_votes[user_id] = emoji
-        self.last_voted_at = datetime.now().isoformat()
-    
-    def add_thread_message(self):
-        """Add XP for a thread message"""
-        self.thread_message_count += 1
-        self.thread_message_xp += THREAD_MESSAGE_XP
-        self.last_thread_message_at = datetime.now().isoformat()
-        self.updated_at = datetime.now().isoformat()
-    
-    def has_voted(self, user_id: str) -> bool:
-        """Check if user has already voted"""
-        return user_id in self.user_votes
+def _parse_version(text: str) -> Optional[Tuple[int, int]]:
+    """Return (major, minor) from the first 'vX' or 'vX.Y' token found, else None."""
+    m = re.search(r'\bv(\d+)(?:\.(\d+))?\b', text, re.IGNORECASE)
+    if m:
+        return int(m.group(1)), int(m.group(2) or 0)
+    return None
 
-class SubmissionDatabase:
-    """Manages submission data persistence with optimizations for large datasets"""
-    
+def _strip_version(text: str) -> str:
+    return re.sub(r'\bv\d+(?:\.\d+)?\b', '', text, flags=re.IGNORECASE).strip()
+
+def _extract_title(content: str) -> Optional[str]:
+    """Return the first markdown header, or the first non-empty line."""
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('#'):
+            return re.sub(r'^#+\s*', '', stripped)[:200]
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:200]
+    return None
+
+def _extract_links(content: str) -> List[str]:
+    return re.findall(r'https?://[^\s<>"]+', content)
+
+def _normalize(content: str) -> str:
+    """Normalise content for duplicate / version comparison."""
+    text = _strip_version(content)
+    text = re.sub(r'^#+\s*', '', text, flags=re.MULTILINE)
+    return re.sub(r'\s+', ' ', text).strip().lower()
+
+async def _hash_url(url: str) -> Optional[str]:
+    if not HAS_AIOHTTP:
+        return None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                if r.status != 200:
+                    return None
+                return hashlib.sha256(await r.read()).hexdigest()
+    except Exception:
+        return None
+
+async def _hash_attachment(att: discord.Attachment) -> Optional[str]:
+    return await _hash_url(att.url)
+
+
+
+# ─────────────────────────── DATABASE ───────────────────────────
+
+class CommunityDB:
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+        self._lock = threading.Lock()
+        self._init()
+
+    # ── connection ──
+    def _conn(self) -> sqlite3.Connection:
+        c = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=10)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA journal_mode=WAL")
+        c.execute("PRAGMA foreign_keys=ON")
+        return c
+
+    def _init(self):
+        with self._conn() as c:
+            c.executescript("""
+                CREATE TABLE IF NOT EXISTS community_config (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS submissions (
+                    id                 TEXT PRIMARY KEY,
+                    group_id           TEXT NOT NULL,
+                    user_id            INTEGER NOT NULL,
+                    channel_id         INTEGER NOT NULL,
+                    message_id         INTEGER NOT NULL,
+                    thread_id          INTEGER,
+                    title              TEXT,
+                    content            TEXT NOT NULL,
+                    content_normalized TEXT NOT NULL,
+                    file_hashes        TEXT NOT NULL DEFAULT '[]',
+                    links              TEXT NOT NULL DEFAULT '[]',
+                    version            TEXT NOT NULL DEFAULT 'v1.0',
+                    version_major      INTEGER NOT NULL DEFAULT 1,
+                    version_minor      INTEGER NOT NULL DEFAULT 0,
+                    is_deleted         INTEGER NOT NULL DEFAULT 0,
+                    is_current         INTEGER NOT NULL DEFAULT 1,
+                    created_at         TEXT NOT NULL,
+                    updated_at         TEXT NOT NULL,
+                    last_checked_at    TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_sub_group   ON submissions(group_id);
+                CREATE INDEX IF NOT EXISTS idx_sub_user    ON submissions(user_id);
+                CREATE INDEX IF NOT EXISTS idx_sub_msg     ON submissions(message_id);
+                CREATE INDEX IF NOT EXISTS idx_sub_created ON submissions(created_at);
+
+                CREATE TABLE IF NOT EXISTS votes (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_id         TEXT NOT NULL,
+                    user_id          INTEGER NOT NULL,
+                    emoji            TEXT NOT NULL,
+                    xp_delta         INTEGER NOT NULL,
+                    voted_message_id INTEGER NOT NULL,
+                    created_at       TEXT NOT NULL,
+                    UNIQUE(group_id, user_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_vote_group   ON votes(group_id);
+                CREATE INDEX IF NOT EXISTS idx_vote_created ON votes(created_at);
+
+                CREATE TABLE IF NOT EXISTS xp_ledger (
+                    user_id    INTEGER PRIMARY KEY,
+                    xp         REAL NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS thread_xp_log (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    submitter_id INTEGER NOT NULL,
+                    thread_id    INTEGER NOT NULL,
+                    message_id   INTEGER NOT NULL UNIQUE,
+                    xp_delta     REAL NOT NULL DEFAULT 0.1,
+                    created_at   TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS spotlight_history (
+                    week_key      TEXT PRIMARY KEY,
+                    group_id      TEXT,
+                    submission_id TEXT,
+                    posted_at     TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS file_hash_registry (
+                    hash          TEXT NOT NULL,
+                    submission_id TEXT NOT NULL,
+                    user_id       INTEGER NOT NULL,
+                    created_at    TEXT NOT NULL,
+                    PRIMARY KEY (hash, submission_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_hash ON file_hash_registry(hash);
+            """)
+            c.commit()
+
+    # ── config ──
+    def get_config(self, key: str, default=None):
+        with self._conn() as c:
+            row = c.execute("SELECT value FROM community_config WHERE key=?", (key,)).fetchone()
+            if row:
+                try:
+                    return json.loads(row["value"])
+                except Exception:
+                    return row["value"]
+            return default
+
+    def set_config(self, key: str, value):
+        with self._conn() as c:
+            c.execute(
+                "INSERT OR REPLACE INTO community_config (key, value) VALUES (?,?)",
+                (key, json.dumps(value))
+            )
+            c.commit()
+
+    # ── submissions ──
+    def add_submission(self, sub: dict):
+        with self._conn() as c:
+            c.execute("""
+                INSERT INTO submissions
+                (id, group_id, user_id, channel_id, message_id, thread_id,
+                 title, content, content_normalized, file_hashes, links,
+                 version, version_major, version_minor,
+                 is_deleted, is_current, created_at, updated_at, last_checked_at)
+                VALUES
+                (:id,:group_id,:user_id,:channel_id,:message_id,:thread_id,
+                 :title,:content,:content_normalized,:file_hashes,:links,
+                 :version,:version_major,:version_minor,
+                 :is_deleted,:is_current,:created_at,:updated_at,:last_checked_at)
+            """, sub)
+            c.commit()
+
+    def update_submission(self, sub_id: str, **kwargs):
+        if not kwargs:
+            return
+        kwargs["updated_at"] = _now_str()
+        set_clause = ", ".join(f"{k}=:{k}" for k in kwargs)
+        kwargs["id"] = sub_id
+        with self._conn() as c:
+            c.execute(f"UPDATE submissions SET {set_clause} WHERE id=:id", kwargs)
+            c.commit()
+
+    def by_message(self, message_id: int) -> Optional[sqlite3.Row]:
+        with self._conn() as c:
+            return c.execute(
+                "SELECT * FROM submissions WHERE message_id=? AND is_deleted=0", (message_id,)
+            ).fetchone()
+
+    def by_id(self, sub_id: str) -> Optional[sqlite3.Row]:
+        with self._conn() as c:
+            return c.execute("SELECT * FROM submissions WHERE id=?", (sub_id,)).fetchone()
+
+    def by_group(self, group_id: str) -> List[sqlite3.Row]:
+        with self._conn() as c:
+            return c.execute(
+                "SELECT * FROM submissions WHERE group_id=? ORDER BY version_major, version_minor",
+                (group_id,)
+            ).fetchall()
+
+    def current_in_group(self, group_id: str) -> Optional[sqlite3.Row]:
+        with self._conn() as c:
+            return c.execute(
+                "SELECT * FROM submissions WHERE group_id=? AND is_current=1 AND is_deleted=0 "
+                "ORDER BY version_major DESC, version_minor DESC LIMIT 1",
+                (group_id,)
+            ).fetchone()
+
+    def find_existing(self, user_id: int, norm: str) -> Optional[sqlite3.Row]:
+        """Find the newest non-deleted submission by this user with matching normalized content."""
+        with self._conn() as c:
+            return c.execute(
+                "SELECT * FROM submissions WHERE user_id=? AND content_normalized=? AND is_deleted=0 "
+                "ORDER BY created_at DESC LIMIT 1",
+                (user_id, norm)
+            ).fetchone()
+
+    # ── votes ──
+    def get_vote(self, group_id: str, user_id: int) -> Optional[sqlite3.Row]:
+        with self._conn() as c:
+            return c.execute(
+                "SELECT * FROM votes WHERE group_id=? AND user_id=?", (group_id, user_id)
+            ).fetchone()
+
+    def upsert_vote(self, group_id: str, user_id: int, emoji: str,
+                    xp_delta: int, message_id: int) -> Optional[sqlite3.Row]:
+        """Insert or replace vote. Returns the old vote row (or None)."""
+        with self._conn() as c:
+            old = c.execute(
+                "SELECT * FROM votes WHERE group_id=? AND user_id=?", (group_id, user_id)
+            ).fetchone()
+            c.execute("""
+                INSERT OR REPLACE INTO votes
+                (group_id, user_id, emoji, xp_delta, voted_message_id, created_at)
+                VALUES (?,?,?,?,?,?)
+            """, (group_id, user_id, emoji, xp_delta, message_id, _now_str()))
+            c.commit()
+            return old
+
+    def remove_vote(self, group_id: str, user_id: int) -> Optional[sqlite3.Row]:
+        with self._conn() as c:
+            old = c.execute(
+                "SELECT * FROM votes WHERE group_id=? AND user_id=?", (group_id, user_id)
+            ).fetchone()
+            if old:
+                c.execute("DELETE FROM votes WHERE group_id=? AND user_id=?", (group_id, user_id))
+                c.commit()
+            return old
+
+    # ── XP ──
+    def add_xp(self, user_id: int, delta: float):
+        with self._conn() as c:
+            c.execute("""
+                INSERT INTO xp_ledger (user_id, xp, updated_at) VALUES (?,?,?)
+                ON CONFLICT(user_id) DO UPDATE SET xp=xp+excluded.xp, updated_at=excluded.updated_at
+            """, (user_id, delta, _now_str()))
+            c.commit()
+
+    def get_xp(self, user_id: int) -> float:
+        with self._conn() as c:
+            row = c.execute("SELECT xp FROM xp_ledger WHERE user_id=?", (user_id,)).fetchone()
+            return float(row["xp"]) if row else 0.0
+
+    def get_leaderboard(self, limit: int = 10) -> List[sqlite3.Row]:
+        with self._conn() as c:
+            return c.execute(
+                "SELECT user_id, xp FROM xp_ledger ORDER BY xp DESC LIMIT ?", (limit,)
+            ).fetchall()
+
+    # ── thread XP ──
+    def log_thread_xp(self, submitter_id: int, thread_id: int, message_id: int):
+        """Returns True if this message is new (XP should be awarded)."""
+        with self._conn() as c:
+            try:
+                c.execute("""
+                    INSERT INTO thread_xp_log (submitter_id, thread_id, message_id, xp_delta, created_at)
+                    VALUES (?,?,?,0.1,?)
+                """, (submitter_id, thread_id, message_id, _now_str()))
+                c.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    # ── spotlight ──
+    def week_key(self) -> str:
+        return _now().strftime("%Y-%W")
+
+    def spotlight_ran_this_week(self) -> bool:
+        with self._conn() as c:
+            return c.execute(
+                "SELECT 1 FROM spotlight_history WHERE week_key=?", (self.week_key(),)
+            ).fetchone() is not None
+
+    def record_spotlight(self, group_id: Optional[str], submission_id: Optional[str]):
+        with self._conn() as c:
+            c.execute(
+                "INSERT OR REPLACE INTO spotlight_history (week_key, group_id, submission_id, posted_at) VALUES (?,?,?,?)",
+                (self.week_key(), group_id, submission_id, _now_str())
+            )
+            c.commit()
+
+    def top_submission_this_week(self, exclude_user: Optional[int] = None) -> Optional[sqlite3.Row]:
+        since = (_now() - timedelta(days=7)).isoformat()
+        q = """
+            SELECT s.group_id, s.id AS submission_id, s.user_id, s.title,
+                   s.content, s.channel_id, s.message_id, s.thread_id, s.version,
+                   COALESCE(SUM(v.xp_delta), 0) AS total_xp
+            FROM submissions s
+            LEFT JOIN votes v ON v.group_id = s.group_id AND v.created_at >= ?
+            WHERE s.is_deleted=0 AND s.is_current=1
+        """
+        params: list = [since]
+        if exclude_user:
+            q += " AND s.user_id != ?"
+            params.append(exclude_user)
+        q += " GROUP BY s.group_id ORDER BY total_xp DESC LIMIT 1"
+        with self._conn() as c:
+            row = c.execute(q, params).fetchone()
+            return row if (row and row["total_xp"] > 0) else None
+
+    # ── file hashes ──
+    def register_hash(self, h: str, sub_id: str, user_id: int):
+        with self._conn() as c:
+            c.execute(
+                "INSERT OR IGNORE INTO file_hash_registry (hash, submission_id, user_id, created_at) VALUES (?,?,?,?)",
+                (h, sub_id, user_id, _now_str())
+            )
+            c.commit()
+
+    def hash_owner(self, h: str, exclude_user: int) -> Optional[sqlite3.Row]:
+        """Find a registered hash belonging to a different user."""
+        with self._conn() as c:
+            return c.execute(
+                "SELECT fhr.*, s.user_id AS owner_id FROM file_hash_registry fhr "
+                "JOIN submissions s ON s.id = fhr.submission_id "
+                "WHERE fhr.hash=? AND fhr.user_id!=? AND s.is_deleted=0 LIMIT 1",
+                (h, exclude_user)
+            ).fetchone()
+
+    def link_owner(self, link: str, exclude_user: int) -> Optional[sqlite3.Row]:
+        """Find a submission (from another user) that already registered this link."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM submissions WHERE user_id!=? AND is_deleted=0", (exclude_user,)
+            ).fetchall()
+            for row in rows:
+                try:
+                    if link in json.loads(row["links"]):
+                        return row
+                except Exception:
+                    pass
+            return None
+
+    def group_for_hash(self, h: str) -> Optional[str]:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT s.group_id FROM file_hash_registry fhr "
+                "JOIN submissions s ON s.id=fhr.submission_id "
+                "WHERE fhr.hash=? LIMIT 1", (h,)
+            ).fetchone()
+            return row["group_id"] if row else None
+
+    def group_for_link(self, link: str, user_id: int) -> Optional[str]:
+        """Find the group_id of any existing submission (same user) that registered this link."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT group_id, links FROM submissions WHERE user_id=? AND is_deleted=0",
+                (user_id,)
+            ).fetchall()
+            for row in rows:
+                try:
+                    if link in json.loads(row["links"]):
+                        return row["group_id"]
+                except Exception:
+                    pass
+            return None
+
+    def merge_groups(self, keep: str, drop: str):
+        """Reassign all submissions and votes from `drop` group into `keep`."""
+        if keep == drop:
+            return
+        with self._conn() as c:
+            c.execute("UPDATE submissions SET group_id=? WHERE group_id=?", (keep, drop))
+            # For votes: keep the earlier vote per user, discard duplicates
+            c.execute("""
+                DELETE FROM votes WHERE group_id=? AND user_id IN (
+                    SELECT user_id FROM votes WHERE group_id=?
+                )
+            """, (drop, keep))
+            c.execute("UPDATE votes SET group_id=? WHERE group_id=?", (keep, drop))
+            c.commit()
+
+    def get_checkable_submissions(self, limit: int = 50) -> List[sqlite3.Row]:
+        """Return submissions eligible for edit-sync checking (not older than 30 days)."""
+        cutoff = (_now() - timedelta(days=VERSION_REENTRY_DAYS)).isoformat()
+        with self._conn() as c:
+            return c.execute("""
+                SELECT * FROM submissions
+                WHERE is_deleted=0
+                  AND created_at >= ?
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, (cutoff, limit)).fetchall()
+
+
+# ─────────────────── COMMUNITY SYSTEM ───────────────────────────
+
+class CommunitySystem:
     def __init__(self, bot):
         self.bot = bot
-        self.data = {
-            "submissions": {},
-            "user_projects": {},
-            "file_hashes": {},
-            "link_registry": {},
-            "settings": {
-                "last_spotlight_week": None
-            }
-        }
-        self._user_xp_cache = {}
-        self._cache_timestamp = {}
-        self._cache_ttl = 300
-        self._load()
-    
-    def _load(self):
-        """Load database from file"""
-        try:
-            DB_FILE.parent.mkdir(parents=True, exist_ok=True)
-            if DB_FILE.exists():
-                with open(DB_FILE, 'r', encoding='utf-8') as f:
-                    loaded_data = json.load(f)
-                    for key, value in loaded_data.items():
-                        if key == "settings":
-                            for setting_key, setting_val in value.items():
-                                self.data["settings"][setting_key] = setting_val
-                        else:
-                            self.data[key] = value
-                            
-                self.bot.logger.log(MODULE_NAME, f"Loaded {len(self.data['submissions'])} submissions from database")
-            else:
-                self._save()
-                self.bot.logger.log(MODULE_NAME, "Created new submission database")
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Failed to load database", e)
-    
-    def _save(self):
-        """Save database to file"""
-        try:
-            temp_file = DB_FILE.with_suffix('.tmp')
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                json.dump(self.data, f, indent=2, ensure_ascii=False)
-            temp_file.replace(DB_FILE)
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Failed to save database", e)
-    
-    def _get_title_hash(self, title: str) -> str:
-        """Generate short hash for title"""
-        return hashlib.md5(title.lower().strip().encode()).hexdigest()[:8]
+        db_path = Path(__file__).parent / "data" / "community.db"
+        db_path.parent.mkdir(exist_ok=True)
+        self.db = CommunityDB(db_path)
+        self._submission_channel_ids: set[int] = set()
 
-    def get_last_spotlight_week(self) -> Optional[str]:
-        return self.data["settings"].get("last_spotlight_week")
-    
-    def set_last_spotlight_week(self, week_str: str):
-        self.data["settings"]["last_spotlight_week"] = week_str
-        self._save()
-    
-    def link_submissions(self, msg_id_1: str, msg_id_2: str):
-        """Link two submissions to share votes"""
-        sub1 = self.get_submission(msg_id_1)
-        sub2 = self.get_submission(msg_id_2)
-        
-        if not sub1 or not sub2:
+    # ── logging helpers ──
+
+    def clog(self, msg: str, level: str = "INFO"):
+        self.bot.logger.log(MODULE_NAME, msg, level)
+
+    def cerr(self, msg: str, exc: Exception = None):
+        self.bot.logger.error(MODULE_NAME, msg, exc)
+
+    async def _bot_log(self, guild: discord.Guild, embed: discord.Embed):
+        """Send embed to #bot-logs via the logger module if available."""
+        try:
+            el = getattr(self.bot, "_logger_event_logger", None)
+            if el:
+                ch = el.get_bot_logs_channel(guild)
+                if ch:
+                    await ch.send(embed=embed)
+                    return
+            ch = discord.utils.get(guild.text_channels, name="bot-logs")
+            if ch:
+                await ch.send(embed=embed)
+        except Exception as e:
+            self.cerr("Failed to send to bot-logs", e)
+
+    async def _dm_or_ping(self, user: discord.Member, embed: discord.Embed):
+        """DM the user. On failure, ping them in #general with the embed."""
+        try:
+            await user.send(embed=embed)
             return
-        
-        if msg_id_2 not in sub1.linked_submissions:
-            sub1.linked_submissions.append(msg_id_2)
-        if msg_id_1 not in sub2.linked_submissions:
-            sub2.linked_submissions.append(msg_id_1)
-        
-        merged_votes = sub1.votes.copy()
-        for emoji, count in sub2.votes.items():
-            merged_votes[emoji] = merged_votes.get(emoji, 0) + count
-        
-        merged_user_votes = {**sub1.user_votes, **sub2.user_votes}
-        
-        sub1.votes = merged_votes
-        sub2.votes = merged_votes
-        sub1.user_votes = merged_user_votes
-        sub2.user_votes = merged_user_votes
-        
-        self.update_submission(sub1)
-        self.update_submission(sub2)
-        
-        self.bot.logger.log(MODULE_NAME, f"Linked submissions: {msg_id_1} <-> {msg_id_2}")
-    
-    def add_submission(self, message_id: str, user_id: str, submission_type: SubmissionType, 
-                      title: Optional[str], description: Optional[str], 
-                      media_links: List[str], thumbnail: Optional[str],
-                      file_hashes: List[str], channel_id: Optional[str] = None) -> Tuple[Submission, bool, Optional[str]]:
-        """Add a new submission to the database"""
-        is_new_version = False
-        version = "1.0"
-        existing_submission = None
-        linked_message_id = None
-        
-        detected_version = None
-        if title:
-            combined_text = title + " " + (description if description else "")
-            version_match = re.search(r'(?:v|ver|version)\.?\s*?(\d+(?:\.\d+)+)', combined_text, re.IGNORECASE)
-            if version_match:
-                detected_version = version_match.group(1)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        try:
+            guild = user.guild
+            ch = discord.utils.get(guild.text_channels, name=GENERAL_CHANNEL_NAME)
+            if ch:
+                await ch.send(content=user.mention, embed=embed)
+        except Exception as e:
+            self.cerr("Failed to DM and failed to fallback to general", e)
 
-        if submission_type == SubmissionType.PROJECT and title:
-            title_hash = self._get_title_hash(title)
-            project_id = f"p-{user_id[-6:]}-{title_hash}"
-            version_key = f"{user_id}:{title_hash}"
-            
-            if version_key in self.data["project_versions"]:
-                is_new_version = True
-                existing_message_ids = self.data["project_versions"][version_key]
-                
-                latest_version = "1.0"
-                for msg_id in existing_message_ids:
-                    if msg_id in self.data["submissions"]:
-                        sub = Submission.from_dict(self.data["submissions"][msg_id])
-                        if sub.version > latest_version:
-                            latest_version = sub.version
-                            existing_submission = sub
-                
-                if detected_version:
-                    version = detected_version
-                else:
-                    try:
-                        # Handle version strings like "v10" or "10" without dots
-                        version_str = latest_version.lstrip('v')
-                        if '.' in version_str:
-                            parts = version_str.split('.')
-                            major = int(parts[0])
-                            minor = int(parts[1]) if len(parts) > 1 else 0
-                            version = f"{major + 1}.0"
-                        else:
-                            # Single number version like "v10"
-                            current = int(version_str)
-                            version = f"{current + 1}.0"
-                    except (ValueError, AttributeError):
-                         version = "2.0"
-                         
-                self.data["project_versions"][version_key].append(message_id)
-            else:
-                if detected_version:
-                    version = detected_version
-                self.data["project_versions"][version_key] = [message_id]
+    # ── channel resolution ──
+
+    def _get_submission_channel_names(self) -> List[str]:
+        names = self.db.get_config("submission_channels")
+        if names:
+            return names
+        return [PROJECTS_CHANNEL_NAME, ARTWORK_CHANNEL_NAME]
+
+    def _refresh_channel_ids(self, guild: discord.Guild):
+        self._submission_channel_ids = {
+            ch.id
+            for ch in guild.text_channels
+            if ch.name in self._get_submission_channel_names()
+        }
+
+    def _is_submission_channel(self, channel_id: int) -> bool:
+        return channel_id in self._submission_channel_ids
+
+    # ── submission validation ──
+
+    def _validate(self, message: discord.Message) -> Optional[str]:
+        """Return an error string if the message fails validation, else None."""
+        content = message.content or ""
+        links   = _extract_links(content)
+        has_file = bool(message.attachments)
+        has_link = bool(links)
+
+        if not has_file and not has_link:
+            return "Your submission must include at least one **attached file** or **link**."
+
+        title = _extract_title(content)
+        if not title or len(title.strip()) < MIN_DESCRIPTION_LENGTH:
+            return (
+                f"Your submission needs a title or description of at least "
+                f"**{MIN_DESCRIPTION_LENGTH} characters**.\n"
+                "Use a markdown header like `# My Project` or start with a descriptive sentence."
+            )
+        return None
+
+    def _invalid_embed(self, reason: str, channel_name: str) -> discord.Embed:
+        e = discord.Embed(
+            title="⚠️ Submission Not Accepted",
+            description=(
+                f"Your post in **#{channel_name}** was removed because it didn't meet "
+                "the submission requirements.\n\n"
+                f"**Reason:** {reason}\n\n"
+                "Please fix the issue and repost. Need help? Ask in the server!"
+            ),
+            color=0xf39c12,
+            timestamp=_now()
+        )
+        e.set_footer(text="Embot Community System")
+        return e
+
+    # ── version logic ──
+
+    def _next_version(self, existing_row: sqlite3.Row, new_content: str
+                      ) -> Tuple[str, int, int]:
+        """
+        Given the most-recent submission row in a group and new content,
+        determine the next version string and (major, minor).
+        Explicit 'vX' in new content wins; otherwise bump major.
+        """
+        parsed = _parse_version(new_content)
+        if parsed:
+            maj, min_ = parsed
         else:
-            project_id = f"a-{user_id[-6:]}-{message_id[-8:]}"
-        
-        for file_hash in file_hashes:
-            if file_hash in self.data["file_hashes"]:
-                existing_user_id, existing_msg_id, existing_proj_id = self.data["file_hashes"][file_hash]
-                if existing_user_id == user_id:
-                    existing_sub = self.get_submission(existing_msg_id)
-                    if existing_sub and existing_sub.submission_type == SubmissionType.ARTWORK:
-                        linked_message_id = existing_msg_id
-                        break
-        
-        submission = Submission(
-            project_id=project_id,
-            message_id=message_id,
-            user_id=user_id,
-            submission_type=submission_type,
-            version=version,
-            title=title,
-            description=description,
-            media_links=media_links,
-            thumbnail=thumbnail,
-            file_hashes=file_hashes,
-            votes=existing_submission.votes if existing_submission else {REACTION_FIRE: 0, REACTION_NEUTRAL: 0, REACTION_TRASH: 0, REACTION_STAR: 0},
-            user_votes=existing_submission.user_votes if existing_submission else {},
-            thread_message_count=0,
-            thread_message_xp=0.0,
-            created_at=existing_submission.created_at if existing_submission else datetime.now().isoformat(),
-            updated_at=datetime.now().isoformat(),
-            last_voted_at=existing_submission.last_voted_at if existing_submission else None,
-            last_thread_message_at=None,
-            is_deleted=False,
-            channel_id=channel_id,
-            linked_submissions=[]
-        )
-        
-        self.data["submissions"][message_id] = submission.to_dict()
-        
-        if user_id not in self.data["user_projects"]:
-            self.data["user_projects"][user_id] = []
-        
-        if project_id not in self.data["user_projects"][user_id]:
-            self.data["user_projects"][user_id].append(project_id)
-        
-        for file_hash in file_hashes:
-            self.data["file_hashes"][file_hash] = (user_id, message_id, project_id)
-        
-        for link in media_links:
-            self.data["link_registry"][link] = (user_id, message_id, project_id)
-        
-        if linked_message_id:
-            self.link_submissions(message_id, linked_message_id)
-        
-        self._user_xp_cache.pop(user_id, None)
-        
-        self._save()
-        return submission, is_new_version, linked_message_id
-    
-    def get_submission(self, message_id: str) -> Optional[Submission]:
-        """Get submission by message ID"""
-        data = self.data["submissions"].get(message_id)
-        if not data:
-            return None
-        try:
-            return Submission.from_dict(data)
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, f"Failed to parse submission {message_id}", e)
-            return None
-    
-    def update_submission(self, submission: Submission):
-        """Update an existing submission"""
-        self.data["submissions"][submission.message_id] = submission.to_dict()
-        
-        for file_hash in submission.file_hashes:
-            self.data["file_hashes"][file_hash] = (submission.user_id, submission.message_id, submission.project_id)
-        
-        for link in submission.media_links:
-            self.data["link_registry"][link] = (submission.user_id, submission.message_id, submission.project_id)
-        
-        self._user_xp_cache.pop(submission.user_id, None)
-        
-        self._save()
-    
-    def handle_vote(self, message_id: str, user_id: str, emoji: str, count: int) -> bool:
-        """Centralized vote handling with linked submission support"""
-        submission = self.get_submission(message_id)
-        if not submission:
-            return False
-        
-        if submission.has_voted(user_id):
-            self.bot.logger.log(MODULE_NAME, 
-                              f"Vote spam detected: {user_id} tried to vote again on {message_id}", 
-                              "WARNING")
-            return False
-        
-        submission.record_vote(user_id, emoji)
-        submission.votes[emoji] = count
-        
-        for linked_msg_id in submission.linked_submissions:
-            linked_sub = self.get_submission(linked_msg_id)
-            if linked_sub:
-                linked_sub.votes = submission.votes.copy()
-                linked_sub.user_votes = submission.user_votes.copy()
-                self.update_submission(linked_sub)
-        
-        self.update_submission(submission)
-        return True
-    
-    def update_vote_count(self, message_id: str, emoji: str, count: int):
-        """Update vote count for a submission and its linked submissions"""
-        submission = self.get_submission(message_id)
-        if submission:
-            submission.votes[emoji] = count
-            submission.last_voted_at = datetime.now().isoformat()
-            
-            for linked_msg_id in submission.linked_submissions:
-                linked_sub = self.get_submission(linked_msg_id)
-                if linked_sub:
-                    linked_sub.votes[emoji] = count
-                    linked_sub.last_voted_at = datetime.now().isoformat()
-                    self.update_submission(linked_sub)
-            
-            self.update_submission(submission)
-    
-    def add_thread_message_xp(self, message_id: str):
-        """Add XP for a thread message"""
-        submission = self.get_submission(message_id)
-        if submission:
-            submission.add_thread_message()
-            self.update_submission(submission)
-            self.bot.logger.log(MODULE_NAME, 
-                              f"Added {THREAD_MESSAGE_XP} XP for thread message on {submission.project_id}")
-    
-    def get_user_xp(self, user_id: str) -> int:
-        """Calculate total XP for a user with caching"""
-        cache_key = user_id
-        if cache_key in self._user_xp_cache:
-            cache_time = self._cache_timestamp.get(cache_key, 0)
-            if time.time() - cache_time < self._cache_ttl:
-                return self._user_xp_cache[cache_key]
-        
-        if str(user_id) == EMBALL_USER_ID:
-            return 0
-            
-        total_xp = 0
-        counted_projects = set()
-        
-        for project_id in self.data["user_projects"].get(user_id, []):
-            if project_id in counted_projects:
-                continue
-                
-            latest_submission = None
-            for submission_data in self.data["submissions"].values():
-                submission = Submission.from_dict(submission_data)
-                if submission.project_id == project_id and not submission.is_deleted:
-                    if latest_submission is None or submission.version > latest_submission.version:
-                        latest_submission = submission
-            
-            if latest_submission:
-                total_xp += latest_submission.calculate_xp()
-                counted_projects.add(project_id)
-        
-        self._user_xp_cache[cache_key] = total_xp
-        self._cache_timestamp[cache_key] = time.time()
-        
-        return total_xp
-    
-    def check_file_duplicate(self, file_hash: str, user_id: str) -> Optional[tuple]:
-        """Check if file hash exists from different user"""
-        existing = self.data["file_hashes"].get(file_hash)
-        if existing:
-            existing_user_id, existing_msg_id, existing_proj_id = existing
-            if existing_user_id != user_id:
-                return existing
-        return None
-    
-    def check_link_duplicate(self, link: str, user_id: str) -> Optional[tuple]:
-        """Check if link exists from different user"""
-        existing = self.data["link_registry"].get(link)
-        if existing:
-            existing_user_id, existing_msg_id, existing_proj_id = existing
-            if existing_user_id != user_id:
-                return existing
-        return None
-    
-    def get_stats(self) -> Dict:
-        """Get database statistics"""
-        active_submissions = [s for s in self.data["submissions"].values() 
-                            if not Submission.from_dict(s).is_deleted]
-        
-        return {
-            "total_submissions": len(active_submissions),
-            "total_projects": sum(1 for s in active_submissions 
-                                if Submission.from_dict(s).submission_type == SubmissionType.PROJECT),
-            "total_artwork": sum(1 for s in active_submissions 
-                               if Submission.from_dict(s).submission_type == SubmissionType.ARTWORK),
-            "total_users": len(self.data["user_projects"]),
-            "total_votes": sum(sum(Submission.from_dict(s).votes.values()) 
-                             for s in active_submissions)
-        }
-    
-    def cleanup_old_deleted_submissions(self, days: int = 30):
-        """Remove old deleted submissions to keep database size manageable"""
-        cutoff = datetime.now() - timedelta(days=days)
-        removed_count = 0
-        
-        for msg_id in list(self.data["submissions"].keys()):
-            submission_data = self.data["submissions"][msg_id]
-            try:
-                submission = Submission.from_dict(submission_data)
-                if submission.is_deleted:
-                    deleted_date = datetime.fromisoformat(submission.updated_at)
-                    if deleted_date < cutoff:
-                        del self.data["submissions"][msg_id]
-                        removed_count += 1
-            except Exception as e:
-                self.bot.logger.error(MODULE_NAME, f"Error during cleanup of {msg_id}", e)
-        
-        if removed_count > 0:
-            self._save()
-            self.bot.logger.log(MODULE_NAME, f"Cleaned up {removed_count} old deleted submissions")
-        
-        return removed_count
+            maj = existing_row["version_major"] + 1
+            min_ = 0
+        return f"v{maj}.{min_}", maj, min_
 
+    # ── core submission handler ──
 
-class SubmissionValidator:
-    """Validates submission format and content with relaxed requirements"""
-    
-    @staticmethod
-    def extract_links(content: str) -> List[str]:
-        """Extract URLs from message content"""
-        url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
-        return re.findall(url_pattern, content)
-    
-    @staticmethod
-    def validate_project(message: discord.Message) -> Tuple[bool, Optional[str], Optional[str], List[str], Optional[str]]:
-        """
-        Validate project submission with relaxed requirements
-        Returns: (is_valid, title, description, media_links, error_message)
-        """
-        content = message.content
-        
-        # Extract title from markdown header if present
-        title_match = re.search(r'^#{1,3}\s+(.+)$', content, re.MULTILINE)
-        title = title_match.group(1).strip() if title_match else None
-        
-        # Extract description lines from bullet points if present
-        description_lines = re.findall(r'^\s*-\s+(.+)$', content, re.MULTILINE)
-        description = "\n".join(description_lines) if description_lines else None
-        
-        links = SubmissionValidator.extract_links(content)
-        has_attachment = len(message.attachments) > 0
-        
-        # Check if we have at least one link or attachment
-        if not links and not has_attachment:
-            return (False, None, None, [], 
-                   "Your project submission must include at least one link or file attachment")
-        
-        # Check if we have either title or description (or both)
-        if not title and not description:
-            # If no formatted title/description but we have attachments, use filename as title
-            if has_attachment and message.attachments:
-                title = message.attachments[0].filename
-                description = content if content.strip() else "No description provided"
-            else:
-                # If no attachments, use entire content as description
-                description = content if content.strip() else None
-                if not description:
-                    return (False, None, None, [], 
-                           "Your project submission must include either a title or description")
-        
-        # If we have a title but no description, use message content as description
-        if title and not description:
-            description = content if content.strip() else "No description provided"
-        
-        media_links = links.copy()
-        for att in message.attachments:
-            media_links.append(att.url)
-        
-        return (True, title, description, media_links, None)
-    
-    @staticmethod
-    def validate_artwork(message: discord.Message) -> Tuple[bool, Optional[str], Optional[str]]:
-        """
-        Validate artwork submission
-        Returns: (is_valid, thumbnail, error_message)
-        """
-        has_image = any(
-            att.content_type and att.content_type.startswith('image/')
-            for att in message.attachments
-        )
-        
-        if not has_image:
-            return (False, None, "Artwork submissions must include at least one attached image")
-        
-        thumbnail = next(
-            (att.url for att in message.attachments 
-             if att.content_type and att.content_type.startswith('image/')),
-            None
-        )
-        
-        return (True, thumbnail, None)
-
-
-class CommunityManager:
-    """Manages community submissions and validation"""
-    
-    def __init__(self, bot, db: SubmissionDatabase):
-        self.bot = bot
-        self.db = db
-    
-    async def compute_file_hash(self, attachment: discord.Attachment) -> str:
-        """Compute SHA256 hash of file content"""
-        try:
-            file_data = await attachment.read()
-            return hashlib.sha256(file_data).hexdigest()
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, f"Failed to hash file {attachment.filename}", e)
-            return ""
-    
-    async def check_duplicates(self, message: discord.Message, file_hashes: List[str], 
-                              media_links: List[str]) -> Optional[str]:
-        """Check for duplicate submissions from different users"""
-        user_id = str(message.author.id)
-        
-        for file_hash in file_hashes:
-            existing = self.db.check_file_duplicate(file_hash, user_id)
-            if existing:
-                existing_user_id, existing_msg_id, existing_proj_id = existing
-                user = await self.bot.fetch_user(int(existing_user_id))
-                return f"This file appears to be copied from <@{existing_user_id}> ({user.display_name})'s submission. Please only submit your own original work."
-        
-        for link in media_links:
-            existing = self.db.check_link_duplicate(link, user_id)
-            if existing:
-                existing_user_id, existing_msg_id, existing_proj_id = existing
-                user = await self.bot.fetch_user(int(existing_user_id))
-                return f"This link was already shared by <@{existing_user_id}> ({user.display_name}). Please only submit your own original work."
-        
-        return None
-    
-    async def send_error_dm(self, user: discord.User, error_message: str, submission_type: str):
-        """Send a friendly error DM to the user"""
-        try:
-            embed = discord.Embed(
-                color=THEME_COLORS["error"]
-            )
-            embed.description = (
-                f"# ❌ Submission Issue\n\n"
-                f"{error_message}"
-            )
-            
-            await user.send(embed=embed)
-            self.bot.logger.log(MODULE_NAME, f"Sent error DM to {user.display_name}")
-            
-        except discord.Forbidden:
-            self.bot.logger.log(MODULE_NAME, 
-                              f"Could not DM {user.display_name} (DMs disabled)", "WARNING")
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, f"Failed to send error DM to {user.display_name}", e)
-    
-    async def send_version_notification(self, user: discord.User, submission: Submission, 
-                                       message: discord.Message) -> bool:
-        """Send DM about project version update with undo button"""
-        try:
-            embed = discord.Embed(
-                color=THEME_COLORS["primary"]
-            )
-            embed.description = (
-                f"# 🔄 Version Update\n\n"
-                f"Your project **{submission.title}** has been updated to `v{submission.version}`\n\n"
-                f"## What This Means\n"
-                f"• All versions share the same votes & XP\n"
-                f"• Prevents leaderboard clutter\n"
-                f"• Your previous version is still tracked\n\n"
-                f"**Made a mistake?** This was automatically detected as a new version of your project."
-            )
-            
-            await user.send(embed=embed)
-            
-            self.bot.logger.log(MODULE_NAME, 
-                              f"Sent version notification to {user.display_name} for v{submission.version}")
-            
-            return True
-            
-        except discord.Forbidden:
-            self.bot.logger.log(MODULE_NAME, 
-                              f"Could not DM {user.display_name} (DMs disabled)", "WARNING")
-            return True
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, 
-                                f"Failed to send version notification to {user.display_name}", e)
-            return True
-    
-    async def send_linked_notification(self, user: discord.User, linked_msg_id: str):
-        """Notify user that their submission was linked to existing artwork"""
-        try:
-            embed = discord.Embed(
-                color=THEME_COLORS["warning"]
-            )
-            embed.description = (
-                "# 🔗 Submissions Linked\n\n"
-                "Your new submission shares artwork with an existing post, so their votes have been linked!\n\n"
-                "## What This Means\n"
-                "• Both submissions share the same vote count\n"
-                "• XP is counted once (no double-dipping)\n"
-                "• Prevents vote manipulation\n"
-                "• Both posts remain visible\n\n"
-                "This is automatic and helps maintain fair leaderboard rankings."
-            )
-            
-            await user.send(embed=embed)
-            
-            self.bot.logger.log(MODULE_NAME, f"Sent link notification to {user.display_name}")
-            
-        except discord.Forbidden:
-            self.bot.logger.log(MODULE_NAME, 
-                              f"Could not DM {user.display_name} (DMs disabled)", "WARNING")
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, 
-                                f"Failed to send link notification to {user.display_name}", e)
-    
-    async def process_emball_submission(self, message: discord.Message, submission: Submission):
-        """Special handling for Emball's posts - only forward if contains remaster/edit"""
-        try:
-            guild = message.guild
-            announcements = discord.utils.get(guild.channels, name=ANNOUNCEMENTS_CHANNEL_NAME)
-            
-            if not announcements:
-                self.bot.logger.log(MODULE_NAME, "Announcements channel not found for Emball forwarding", "WARNING")
-                return
-
-            # Check for keywords to ping role - only forward if contains remaster OR edit
-            content_lower = message.content.lower()
-            should_forward = any(keyword in content_lower for keyword in EMBALL_KEYWORDS)
-            
-            if not should_forward:
-                self.bot.logger.log(MODULE_NAME, "Emball submission doesn't contain remaster/edit keywords, skipping forwarding")
-                return
-            
-            ping_text = ""
-            if should_forward:
-                role = discord.utils.get(guild.roles, name=EMBALL_ROLE_NAME)
-                if role:
-                    ping_text = f"{role.mention} "
-            
-            # Construct embed for announcement
-            embed = discord.Embed(
-                title=f"New Release: {submission.title}",
-                description=submission.description,
-                color=THEME_COLORS["project"],
-                url=message.jump_url
-            )
-            if submission.thumbnail:
-                embed.set_image(url=submission.thumbnail)
-            
-            embed.set_author(name=message.author.display_name, icon_url=message.author.display_avatar.url)
-            embed.set_footer(text="Check it out in #projects!")
-            
-            # Send to announcements
-            announcement_msg = await announcements.send(content=ping_text, embed=embed)
-            
-            # Clear reactions from announcement message to prevent voting
-            await announcement_msg.clear_reactions()
-            
-            # Link the announcement message to the project message
-            self.db.link_submissions(message.id, str(announcement_msg.id))
-            
-            self.bot.logger.log(MODULE_NAME, f"Forwarded Emball's project to #announcements: {announcement_msg.id}")
-            
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Failed to process Emball submission", e)
-
-    async def process_submission(self, message: discord.Message, channel_type: str):
-        """Process a submission in projects or artwork channel"""
-        try:
-            self.bot.logger.log(MODULE_NAME, 
-                              f"Processing {channel_type} submission from {message.author.display_name}")
-            
-            if channel_type == "project":
-                is_valid, title, description, media_links, error = SubmissionValidator.validate_project(message)
-                thumbnail = None
-                
-                for att in message.attachments:
-                    if att.content_type and att.content_type.startswith('image/'):
-                        thumbnail = att.url
-                        break
-            else:
-                is_valid, thumbnail, error = SubmissionValidator.validate_artwork(message)
-                title = None
-                description = None
-                media_links = [thumbnail] if thumbnail else []
-            
-            if not is_valid:
-                await self.send_error_dm(message.author, error, channel_type)
-                await message.delete()
-                self.bot.logger.log(MODULE_NAME, 
-                                  f"Deleted invalid {channel_type} submission from {message.author.display_name}")
-                return
-            
-            file_hashes = []
-            for att in message.attachments:
-                file_hash = await self.compute_file_hash(att)
-                if file_hash:
-                    file_hashes.append(file_hash)
-            
-            duplicate_error = await self.check_duplicates(message, file_hashes, media_links)
-            if duplicate_error:
-                await self.send_error_dm(message.author, duplicate_error, channel_type)
-                await message.delete()
-                self.bot.logger.log(MODULE_NAME, 
-                                  f"Deleted duplicate {channel_type} submission from {message.author.display_name}")
-                return
-            
-            submission_type = SubmissionType.PROJECT if channel_type == "project" else SubmissionType.ARTWORK
-            submission, is_new_version, linked_msg_id = self.db.add_submission(
-                message_id=str(message.id),
-                user_id=str(message.author.id),
-                submission_type=submission_type,
-                title=title,
-                description=description,
-                media_links=media_links,
-                thumbnail=thumbnail,
-                file_hashes=file_hashes,
-                channel_id=str(message.channel.id)
-            )
-            
-            if is_new_version:
-                await self.send_version_notification(message.author, submission, message)
-            
-            if linked_msg_id:
-                await self.send_linked_notification(message.author, linked_msg_id)
-            
-            thread_name = title[:100] if title else f"{message.author.display_name}'s artwork"
-            if is_new_version:
-                thread_name = f"{thread_name} v{submission.version}"
-            thread = await message.create_thread(name=thread_name, auto_archive_duration=10080)
-            
-            await message.add_reaction(REACTION_FIRE)
-            await message.add_reaction(REACTION_NEUTRAL)
-            await message.add_reaction(REACTION_TRASH)
-            
-            # Special handling for Emball in projects channel
-            if str(message.author.id) == EMBALL_USER_ID and channel_type == "project":
-                await self.process_emball_submission(message, submission)
-
-            version_str = f" v{submission.version}" if is_new_version else ""
-            self.bot.logger.log(MODULE_NAME, 
-                              f"✅ Successfully registered {channel_type} submission: {submission.project_id}{version_str}")
-            
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Failed to process submission", e)
-    
-    async def process_edit(self, before: discord.Message, after: discord.Message):
-        """Process message edit and update submission"""
-        try:
-            submission = self.db.get_submission(str(after.id))
-            if not submission:
-                return
-            
-            self.bot.logger.log(MODULE_NAME, 
-                              f"Detected edit for submission {submission.project_id}")
-            
-            if submission.submission_type == SubmissionType.PROJECT:
-                is_valid, title, description, media_links, error = SubmissionValidator.validate_project(after)
-                
-                thumbnail = None
-                for att in after.attachments:
-                    if att.content_type and att.content_type.startswith('image/'):
-                        thumbnail = att.url
-                        break
-            else:
-                is_valid, thumbnail, error = SubmissionValidator.validate_artwork(after)
-                title = None
-                description = None
-                media_links = [thumbnail] if thumbnail else []
-            
-            if not is_valid:
-                submission.mark_deleted()
-                self.db.update_submission(submission)
-                await after.delete()
-                await self.send_error_dm(after.author, 
-                    "Your edit made the submission invalid. " + error, 
-                    submission.submission_type.value)
-                return
-            
-            file_hashes = []
-            for att in after.attachments:
-                file_hash = await self.compute_file_hash(att)
-                if file_hash:
-                    file_hashes.append(file_hash)
-            
-            submission.update_content(title, description)
-            submission.update_media(media_links, thumbnail, file_hashes)
-            self.db.update_submission(submission)
-            
-            self.bot.logger.log(MODULE_NAME, 
-                              f"✅ Updated submission {submission.project_id} after edit")
-            
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Failed to process edit", e)
-    
-    async def run_spotlight_friday(self):
-        """Execute Spotlight Friday logic"""
-        self.bot.logger.log(MODULE_NAME, "Running Spotlight Friday...")
-        
-        cutoff = datetime.now() - timedelta(days=7)
-        eligible_submissions = []
-        
-        for msg_id, sub_data in self.db.data["submissions"].items():
-            sub = Submission.from_dict(sub_data)
-            
-            if (sub.is_deleted or 
-                str(sub.user_id) == EMBALL_USER_ID or 
-                datetime.fromisoformat(sub.created_at) < cutoff):
-                continue
-                
-            eligible_submissions.append(sub)
-        
-        if not eligible_submissions:
-            self.bot.logger.log(MODULE_NAME, "No eligible submissions for Spotlight Friday", "WARNING")
-            return
-
-        def get_score(s):
-             return (s.votes.get(REACTION_FIRE, 0) * 5) + (s.votes.get(REACTION_STAR, 0) * 10) - (s.votes.get(REACTION_TRASH, 0) * 5)
-
-        eligible_submissions.sort(key=get_score, reverse=True)
-        winner = eligible_submissions[0]
-        score = get_score(winner)
-        
-        if score <= 0:
-             self.bot.logger.log(MODULE_NAME, "Top submission has non-positive score, skipping spotlight", "WARNING")
-             return
-
-        try:
-            guild = self.bot.guilds[0]
-            announcements = discord.utils.get(guild.channels, name=ANNOUNCEMENTS_CHANNEL_NAME)
-            if not announcements:
-                self.bot.logger.error(MODULE_NAME, f"Could not find #{ANNOUNCEMENTS_CHANNEL_NAME} for Spotlight")
-                return
-
-            user = await self.bot.fetch_user(int(winner.user_id))
-            
-            embed = discord.Embed(
-                title=f"🌟 Spotlight Friday: {winner.title or 'Untitled Artwork'}",
-                description=f"This week's community favorite!\n\n{winner.description or ''}",
-                color=THEME_COLORS["spotlight"],
-                url=f"https://discord.com/channels/{guild.id}/{winner.channel_id}/{winner.message_id}"
-            )
-            embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
-            
-            if winner.thumbnail:
-                embed.set_image(url=winner.thumbnail)
-            
-            embed.add_field(name="Score", value=f"🔥 {winner.votes.get(REACTION_FIRE, 0)} Votes", inline=True)
-            if winner.version != "1.0":
-                embed.add_field(name="Version", value=winner.version, inline=True)
-                
-            embed.set_footer(text="Spotlight Friday • The best of the week!")
-            
-            await announcements.send(embed=embed)
-            self.bot.logger.log(MODULE_NAME, f"Posted Spotlight for {winner.project_id}")
-            
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Failed to post Spotlight", e)
-
-
-def setup(bot):
-    """Setup function called by main bot to initialize this module"""
-    
-    listener_name = f"_{MODULE_NAME.lower()}_listener_registered"
-    if hasattr(bot, listener_name):
-        bot.logger.log(MODULE_NAME, "Module already setup, skipping duplicate registration")
-        return
-    setattr(bot, listener_name, True)
-    
-    bot.logger.log(MODULE_NAME, "Setting up community module")
-    
-    db = SubmissionDatabase(bot)
-    bot.community_db = db
-    
-    manager = CommunityManager(bot, db)
-    bot.community_manager = manager
-    
-    # --- Spotlight Friday Task ---
-    @tasks.loop(minutes=1)
-    async def spotlight_checker():
-        """Check time for Spotlight Friday (Friday 3PM CST)"""
-        try:
-            cst_tz = timezone(timedelta(hours=-6))
-            now = datetime.now(cst_tz)
-            
-            if now.weekday() == 4 and now.hour == 15:
-                current_week = now.strftime("%Y-%W")
-                last_run = db.get_last_spotlight_week()
-                
-                if current_week != last_run:
-                    await manager.run_spotlight_friday()
-                    db.set_last_spotlight_week(current_week)
-                    
-        except Exception as e:
-            bot.logger.error(MODULE_NAME, "Error in spotlight checker", e)
-    
-    @spotlight_checker.before_loop
-    async def before_spotlight():
-        await bot.wait_until_ready()
-    
-    spotlight_checker.start()
-    
-    # --- Database Cleanup Task ---
-    @tasks.loop(hours=24)
-    async def database_cleanup():
-        """Clean up old deleted submissions daily"""
-        try:
-            removed = db.cleanup_old_deleted_submissions(days=30)
-            if removed > 0:
-                bot.logger.log(MODULE_NAME, f"Daily cleanup removed {removed} old deleted submissions")
-        except Exception as e:
-            bot.logger.error(MODULE_NAME, "Error in database cleanup", e)
-    
-    @database_cleanup.before_loop
-    async def before_cleanup():
-        await bot.wait_until_ready()
-        await asyncio.sleep(3600)
-    
-    database_cleanup.start()
-    
-    # --- Console Command Handlers ---
-    async def handle_db_cleanup(args):
-        """Manually trigger database cleanup"""
-        days = 30
-        if args.strip():
-            try:
-                days = int(args.strip())
-            except ValueError:
-                print("⚠️ Invalid number of days, using default (30)")
-        
-        print(f"🔄 Cleaning up submissions deleted more than {days} days ago...")
-        removed = db.cleanup_old_deleted_submissions(days)
-        
-        import os
-        db_size = os.path.getsize(DB_FILE) / (1024 * 1024)
-        
-        print(f"✅ Removed {removed} old submissions")
-        print(f"📊 Database size: {db_size:.2f} MB")
-        print(f"📦 Active submissions: {len([s for s in db.data['submissions'].values() if not Submission.from_dict(s).is_deleted])}")
-    
-    async def handle_db_stats(args):
-        """Show detailed database statistics"""
-        stats = db.get_stats()
-        
-        import os
-        db_size = os.path.getsize(DB_FILE) / (1024 * 1024)
-        
-        deleted_count = len([s for s in db.data['submissions'].values() if Submission.from_dict(s).is_deleted])
-        
-        print("\n┌─────────────────────────────────────────────────────────────────┐")
-        print("│                      DATABASE STATISTICS                        │")
-        print("├─────────────────────────────────────────────────────────────────┤")
-        print(f"│ File Size: {db_size:.2f} MB{' ' * (49 - len(f'{db_size:.2f} MB'))}│")
-        print(f"│ Active Submissions: {stats['total_submissions']}{' ' * (44 - len(str(stats['total_submissions'])))}│")
-        print(f"│ Deleted Submissions: {deleted_count}{' ' * (43 - len(str(deleted_count)))}│")
-        print(f"│ Projects: {stats['total_projects']}{' ' * (50 - len(str(stats['total_projects'])))}│")
-        print(f"│ Artwork: {stats['total_artwork']}{' ' * (51 - len(str(stats['total_artwork'])))}│")
-        print(f"│ Users: {stats['total_users']}{' ' * (53 - len(str(stats['total_users'])))}│")
-        print(f"│ Total Votes: {stats['total_votes']}{' ' * (47 - len(str(stats['total_votes'])))}│")
-        print(f"│ File Hashes: {len(db.data['file_hashes'])}{' ' * (47 - len(str(len(db.data['file_hashes']))))}│")
-        print(f"│ Link Registry: {len(db.data['link_registry'])}{' ' * (45 - len(str(len(db.data['link_registry']))))}│")
-        print("└─────────────────────────────────────────────────────────────────┘\n")
-    
-    if hasattr(bot, 'console_commands'):
-        bot.console_commands['db_cleanup'] = {
-            'description': 'Clean up old deleted submissions [days]',
-            'handler': handle_db_cleanup
-        }
-        bot.console_commands['db_stats'] = {
-            'description': 'Show detailed database statistics',
-            'handler': handle_db_stats
-        }
-    
-    # --- Event Listeners with Bot Reaction Exclusion ---
-    @bot.listen('on_message')
-    async def on_community_message(message: discord.Message):
-        """Listen for messages in projects and artwork channels"""
+    async def handle_submission(self, message: discord.Message):
+        """Process a message posted in a submission channel."""
         if message.author.bot:
             return
-        
-        if not message.guild:
+
+        guild = message.guild
+        self._refresh_channel_ids(guild)
+
+        # Validate
+        err = self._validate(message)
+        if err:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            embed = self._invalid_embed(err, message.channel.name)
+            await self._dm_or_ping(message.author, embed)
+            self.clog(f"Rejected submission by {message.author} in #{message.channel.name}: {err}")
             return
-        
-        channel_name = message.channel.name.lower()
-        
-        if channel_name == PROJECTS_CHANNEL_NAME:
-            await manager.process_submission(message, "project")
-        elif channel_name == ARTWORK_CHANNEL_NAME:
-            await manager.process_submission(message, "artwork")
-    
-    @bot.listen('on_message_edit')
-    async def on_community_edit(before: discord.Message, after: discord.Message):
-        """Detect submission edits and update database"""
-        if after.author.bot:
-            return
-        
-        if not after.guild:
-            return
-        
-        channel_name = after.channel.name.lower()
-        
-        if channel_name in [PROJECTS_CHANNEL_NAME, ARTWORK_CHANNEL_NAME]:
-            await manager.process_edit(before, after)
-    
-    @bot.listen('on_raw_reaction_add')
-    async def on_community_reaction_add(payload: discord.RawReactionActionEvent):
-        """Centralized vote handling with spam protection and bot exclusion"""
-        try:
-            # Exclude bot reactions from vote counts
-            user = await bot.fetch_user(payload.user_id)
-            if user.bot:
-                return
-            
-            submission = db.get_submission(str(payload.message_id))
-            if not submission:
-                return
-            
-            emoji = str(payload.emoji)
-            
-            if emoji not in XP_VALUES:
-                return
-            
-            channel = bot.get_channel(payload.channel_id)
-            if not channel:
-                return
-            
-            message = await channel.fetch_message(payload.message_id)
-            
-            # Count only non-bot reactions
-            count = 0
-            for reaction in message.reactions:
-                if str(reaction.emoji) == emoji:
-                    # Get non-bot users who reacted
-                    users = [user async for user in reaction.users() if not user.bot]
-                    count = len(users)
-                    break
-            
-            was_recorded = db.handle_vote(str(message.id), str(payload.user_id), emoji, count)
-            
-            if was_recorded:
-                bot.logger.log(MODULE_NAME, 
-                              f"Recorded {emoji} vote from user {payload.user_id} on {submission.project_id}")
-            
-        except Exception as e:
-            bot.logger.error(MODULE_NAME, "Failed to process reaction", e)
-    
-    @bot.listen('on_raw_reaction_remove')
-    async def on_community_reaction_remove(payload: discord.RawReactionActionEvent):
-        """Update vote counts when reactions are removed - exclude bot reactions"""
-        try:
-            # Exclude bot reactions
-            user = await bot.fetch_user(payload.user_id)
-            if user.bot:
-                return
-            
-            submission = db.get_submission(str(payload.message_id))
-            if not submission:
-                return
-            
-            emoji = str(payload.emoji)
-            
-            if emoji not in XP_VALUES:
-                return
-            
-            channel = bot.get_channel(payload.channel_id)
-            if not channel:
-                return
-            
-            message = await channel.fetch_message(payload.message_id)
-            
-            for reaction in message.reactions:
-                if str(reaction.emoji) == emoji:
-                    # Count only non-bot users
-                    users = [user async for user in reaction.users() if not user.bot]
-                    db.update_vote_count(str(message.id), emoji, len(users))
-                    break
-            
-        except Exception as e:
-            bot.logger.error(MODULE_NAME, "Failed to process reaction removal", e)
-    
-    @bot.listen('on_message')
-    async def on_thread_message(message: discord.Message):
-        """Award XP for messages in submission threads"""
-        try:
-            if message.author.bot:
-                return
-            
-            if not isinstance(message.channel, discord.Thread):
-                return
-            
-            parent_message_id = str(message.channel.id)
-            
-            if message.channel.parent:
+
+        content   = message.content or ""
+        norm      = _normalize(content)
+        title     = _extract_title(content)
+        links     = _extract_links(content)
+        user_id   = message.author.id
+
+        # Hash every attached file. Links are stored as plain text and matched by string equality.
+        attachment_hashes: List[str] = []
+        for att in message.attachments:
+            h = await _hash_attachment(att)
+            if h:
+                attachment_hashes.append(h)
+            else:
+                self.clog(
+                    f"Could not hash attachment '{att.filename}' for {message.author} "
+                    f"(network error or unsupported type) — skipping hash for this file.",
+                    "WARNING"
+                )
+
+        # ── Duplicate detection — attachment hash check ──
+        for h in attachment_hashes:
+            owner = self.db.hash_owner(h, exclude_user=user_id)
+            if owner:
                 try:
-                    parent_channel = message.channel.parent
-                    if parent_channel.name.lower() not in [PROJECTS_CHANNEL_NAME, ARTWORK_CHANNEL_NAME]:
-                        return
-                    
-                    starter_message = message.channel.starter_message
-                    if not starter_message:
-                        starter_message = await message.channel.parent.fetch_message(message.channel.id)
-                    
-                    submission = db.get_submission(str(starter_message.id))
-                    if submission and not submission.is_deleted:
-                        db.add_thread_message_xp(str(starter_message.id))
-                        
-                except (discord.NotFound, discord.HTTPException):
+                    await message.delete()
+                except Exception:
                     pass
-                    
+                embed = discord.Embed(
+                    title="🚨 Duplicate Submission Detected",
+                    description=(
+                        "Your submission was removed because an attached file has already been "
+                        "submitted by another member. Please only submit your own original work."
+                    ),
+                    color=0xe74c3c,
+                    timestamp=_now()
+                )
+                embed.set_footer(text="Embot Community System")
+                await self._dm_or_ping(message.author, embed)
+                self.clog(
+                    f"Duplicate attachment hash from {message.author} "
+                    f"— matches another user's submission."
+                )
+                return
+
+        # ── Duplicate detection — exact URL check (catches page links like SoundCloud/YouTube) ──
+        for link in links:
+            owner_row = self.db.link_owner(link, exclude_user=user_id)
+            if owner_row:
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                embed = discord.Embed(
+                    title="🚨 Duplicate Link Detected",
+                    description=(
+                        "Your submission was removed because that link has already been "
+                        "submitted by another member. Please only submit your own original work."
+                    ),
+                    color=0xe74c3c,
+                    timestamp=_now()
+                )
+                embed.set_footer(text="Embot Community System")
+                await self._dm_or_ping(message.author, embed)
+                self.clog(f"Duplicate link from {message.author} — matches another user's submission.")
+                return
+
+        # ── Version detection ──
+        existing = self.db.find_existing(user_id, norm)
+        is_new_version = False
+        group_id: str
+        version_str: str
+        version_major: int
+        version_minor: int
+        dm_version_embed: Optional[discord.Embed] = None
+
+        if existing:
+            # Check re-entry eligibility
+            created = datetime.fromisoformat(existing["created_at"])
+            age_days = (_now() - created.replace(tzinfo=timezone.utc)).days
+            reenter_ok = age_days >= VERSION_REENTRY_DAYS
+
+            group_id = existing["group_id"]
+            version_str, version_major, version_minor = self._next_version(existing, content)
+            is_new_version = True
+
+            # Mark all previous versions in this group as not-current
+            for sub in self.db.by_group(group_id):
+                if sub["is_current"]:
+                    self.db.update_submission(sub["id"], is_current=0)
+
+            action = "re-entered the voting cycle as" if reenter_ok else "registered as"
+            dm_version_embed = discord.Embed(
+                title="📦 New Version Detected",
+                description=(
+                    f"Your project **{title or 'Untitled'}** was {action} **{version_str}**.\n\n"
+                    "Your previous vote history has been carried over, and voters who already "
+                    "voted on an earlier version cannot vote again on this one."
+                ),
+                color=0x5865f2,
+                timestamp=_now()
+            )
+            dm_version_embed.set_footer(text="Embot Community System")
+            self.clog(f"New version {version_str} for group {group_id} by {message.author}")
+        else:
+            group_id     = str(uuid.uuid4())
+            version_str  = "v1.0"
+            version_major = 1
+            version_minor = 0
+            # Cross-channel linking: if another submission shares an attachment hash,
+            # merge this submission into that group so votes/XP are pooled.
+            linked_group: Optional[str] = None
+            for h in attachment_hashes:
+                linked_group = self.db.group_for_hash(h)
+                if linked_group:
+                    self.clog(
+                        f"Submission by {message.author} linked to existing group "
+                        f"{linked_group} via file hash"
+                    )
+                    break
+            if not linked_group:
+                for link in links:
+                    linked_group = self.db.group_for_link(link, user_id)
+                    if linked_group:
+                        self.clog(
+                            f"Submission by {message.author} linked to existing group "
+                            f"{linked_group} via URL match"
+                        )
+                        break
+            if linked_group and linked_group != group_id:
+                group_id = linked_group
+
+        # ── Create submission record ──
+        # file_hashes stores attachment hashes only. Links are stored as plain text in `links`.
+        sub_id = str(uuid.uuid4())
+        sub_record = {
+            "id":                 sub_id,
+            "group_id":           group_id,
+            "user_id":            user_id,
+            "channel_id":         message.channel.id,
+            "message_id":         message.id,
+            "thread_id":          None,
+            "title":              title,
+            "content":            content,
+            "content_normalized": norm,
+            "file_hashes":        json.dumps(attachment_hashes),
+            "links":              json.dumps(links),
+            "version":            version_str,
+            "version_major":      version_major,
+            "version_minor":      version_minor,
+            "is_deleted":         0,
+            "is_current":         1,
+            "created_at":         _now_str(),
+            "updated_at":         _now_str(),
+            "last_checked_at":    None,
+        }
+        self.db.add_submission(sub_record)
+
+        # Register each attachment hash individually
+        for h in attachment_hashes:
+            self.db.register_hash(h, sub_id, user_id)
+
+        # ── Create discussion thread ──
+        thread_name = (title or "Submission")[:100]
+        try:
+            thread = await message.create_thread(name=thread_name, auto_archive_duration=10080)
+            self.db.update_submission(sub_id, thread_id=thread.id)
         except Exception as e:
-            bot.logger.error(MODULE_NAME, "Failed to process thread message", e)
-    
-    bot.logger.log(MODULE_NAME, "Community module setup complete")
+            self.cerr("Failed to create submission thread", e)
+            thread = None
+
+        # ── Add setup reactions ──
+        for emoji in SETUP_EMOJIS:
+            try:
+                await message.add_reaction(emoji)
+            except Exception as e:
+                self.cerr(f"Failed to add reaction {emoji}", e)
+
+        # ── DM version notice if applicable ──
+        if dm_version_embed:
+            await self._dm_or_ping(message.author, dm_version_embed)
+
+        # ── Bot logs ──
+        log_embed = discord.Embed(
+            title="📥 New Submission",
+            description=(
+                f"**Author:** {message.author.mention}\n"
+                f"**Channel:** {message.channel.mention}\n"
+                f"**Title:** {title or 'Untitled'}\n"
+                f"**Version:** {version_str}\n"
+                f"**Group ID:** `{group_id}`\n"
+                f"[Jump to Message]({message.jump_url})"
+            ),
+            color=0x2ecc71,
+            timestamp=_now()
+        )
+        log_embed.set_footer(text=f"Submission ID: {sub_id}")
+        await self._bot_log(guild, log_embed)
+        self.clog(
+            f"Submission registered: {title!r} by {message.author} "
+            f"({version_str}, group={group_id})"
+        )
+
+    # ── edit handler ──
+
+    async def handle_edit(self, payload: discord.RawMessageUpdateEvent):
+        """Sync an edited submission. Skip if older than 30 days."""
+        sub = self.db.by_message(payload.message_id)
+        if not sub:
+            return
+
+        # 30-day cutoff
+        created = datetime.fromisoformat(sub["created_at"]).replace(tzinfo=timezone.utc)
+        if (_now() - created).days >= VERSION_REENTRY_DAYS:
+            return  # Too old; stop tracking edits
+
+        # Fetch the updated message
+        try:
+            guild   = self.bot.get_guild(payload.guild_id)
+            channel = guild.get_channel(payload.channel_id) if guild else None
+            if not channel:
+                return
+            message = await channel.fetch_message(payload.message_id)
+        except Exception as e:
+            self.cerr("Could not fetch edited message", e)
+            return
+
+        new_content = message.content or ""
+        new_links   = _extract_links(new_content)
+
+        # Hash each attachment individually — links are matched as plain text
+        new_att_hashes: List[str] = []
+        for att in message.attachments:
+            h = await _hash_attachment(att)
+            if h:
+                new_att_hashes.append(h)
+            else:
+                self.clog(
+                    f"Edit: Could not hash attachment '{att.filename}' "
+                    f"(submission {sub['id']}) — skipping.",
+                    "WARNING"
+                )
+
+        # Check validity
+        err = self._validate(message)
+        if err:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            self.db.update_submission(sub["id"], is_deleted=1, last_checked_at=_now_str())
+            embed = self._invalid_embed(err, channel.name)
+            member = guild.get_member(sub["user_id"])
+            if member:
+                await self._dm_or_ping(member, embed)
+            self.clog(f"Edited submission {sub['id']} became invalid and was deleted.")
+            return
+
+        # Check for file/link changes → bump minor version
+        old_hashes = set(json.loads(sub["file_hashes"]))
+        old_links  = set(json.loads(sub["links"]))
+        changed = set(new_att_hashes) != old_hashes or set(new_links) != old_links
+
+        new_ver = _parse_version(new_content)
+        kwargs: dict = {
+            "content":            new_content,
+            "content_normalized": _normalize(new_content),
+            "title":              _extract_title(new_content),
+            "links":              json.dumps(new_links),
+            "file_hashes":        json.dumps(new_att_hashes),
+            "last_checked_at":    _now_str(),
+        }
+
+        if new_ver:
+            maj, min_ = new_ver
+            kwargs["version"]       = f"v{maj}.{min_}"
+            kwargs["version_major"] = maj
+            kwargs["version_minor"] = min_
+        elif changed:
+            new_minor = sub["version_minor"] + 1
+            kwargs["version"]       = f"v{sub['version_major']}.{new_minor}"
+            kwargs["version_minor"] = new_minor
+
+        self.db.update_submission(sub["id"], **kwargs)
+
+        # Register any newly-seen attachment hashes
+        for h in new_att_hashes:
+            if h not in old_hashes:
+                self.db.register_hash(h, sub["id"], sub["user_id"])
+
+        self.clog(f"Synced edit for submission {sub['id']} (changed={changed})")
+
+    # ── voting ──
+
+    async def handle_reaction_add(self, payload: discord.RawReactionActionEvent):
+        if payload.user_id == self.bot.user.id:
+            return  # Ignore bot's own reactions
+
+        emoji = str(payload.emoji)
+        if emoji not in VOTE_EMOJIS:
+            return
+
+        sub = self.db.by_message(payload.message_id)
+        if not sub:
+            return
+
+        voter_id  = payload.user_id
+        submitter = sub["user_id"]
+
+        if voter_id == submitter:
+            # Don't allow self-voting — remove the reaction silently
+            try:
+                guild   = self.bot.get_guild(payload.guild_id)
+                channel = guild.get_channel(payload.channel_id)
+                msg     = await channel.fetch_message(payload.message_id)
+                user    = guild.get_member(voter_id)
+                if user:
+                    await msg.remove_reaction(payload.emoji, user)
+            except Exception:
+                pass
+            return
+
+        group_id  = sub["group_id"]
+        xp_delta  = VOTE_EMOJIS[emoji]
+
+        # Upsert vote; get old vote to handle XP adjustments + reaction cleanup
+        old_vote = self.db.upsert_vote(group_id, voter_id, emoji, xp_delta, payload.message_id)
+
+        if old_vote:
+            # Reverse old XP
+            self.db.add_xp(submitter, -old_vote["xp_delta"])
+            # Remove the old emoji from the old message if different
+            if old_vote["emoji"] != emoji:
+                try:
+                    guild   = self.bot.get_guild(payload.guild_id)
+                    channel = guild.get_channel(payload.channel_id)
+                    old_msg_id = old_vote["voted_message_id"]
+                    old_msg_ch = guild.get_channel(sub["channel_id"])
+                    old_msg    = await old_msg_ch.fetch_message(old_msg_id)
+                    user       = guild.get_member(voter_id)
+                    if user:
+                        await old_msg.remove_reaction(old_vote["emoji"], user)
+                except Exception:
+                    pass
+
+        self.db.add_xp(submitter, xp_delta)
+        self.clog(
+            f"Vote: {emoji} ({xp_delta:+d} XP) by user {voter_id} "
+            f"on group {group_id} — submitter {submitter}"
+        )
+
+    async def handle_reaction_remove(self, payload: discord.RawReactionActionEvent):
+        if payload.user_id == self.bot.user.id:
+            return
+
+        emoji = str(payload.emoji)
+        if emoji not in VOTE_EMOJIS:
+            return
+
+        sub = self.db.by_message(payload.message_id)
+        if not sub:
+            return
+
+        group_id = sub["group_id"]
+        old_vote = self.db.get_vote(group_id, payload.user_id)
+        if not old_vote or old_vote["emoji"] != emoji:
+            return
+
+        # Only remove if the reaction removed matches stored vote
+        self.db.remove_vote(group_id, payload.user_id)
+        self.db.add_xp(sub["user_id"], -old_vote["xp_delta"])
+        self.clog(
+            f"Vote removed: {emoji} by user {payload.user_id} "
+            f"on group {group_id}"
+        )
+
+    # ── thread reply XP ──
+
+    async def handle_thread_message(self, message: discord.Message):
+        """Award 0.1 XP to the submission author when someone replies in its thread."""
+        if message.author.bot:
+            return
+        channel = message.channel
+        if not isinstance(channel, discord.Thread):
+            return
+
+        # Find submission whose thread_id matches
+        with self.db._conn() as c:
+            row = c.execute(
+                "SELECT * FROM submissions WHERE thread_id=? AND is_deleted=0 LIMIT 1",
+                (channel.id,)
+            ).fetchone()
+        if not row:
+            return
+
+        submitter_id = row["user_id"]
+        if message.author.id == submitter_id:
+            return  # Don't award XP for own replies
+
+        if self.db.log_thread_xp(submitter_id, channel.id, message.id):
+            self.db.add_xp(submitter_id, 0.1)
+
+    # ── Spotlight Friday ──
+
+    async def run_spotlight(self, guild: discord.Guild):
+        if self.db.spotlight_ran_this_week():
+            return
+
+        exclude_user = self.db.get_config("spotlight_exclude_user_id")
+        top = self.db.top_submission_this_week(exclude_user=exclude_user)
+
+        self.db.record_spotlight(
+            top["group_id"] if top else None,
+            top["submission_id"] if top else None
+        )
+
+        announcements = discord.utils.get(guild.text_channels, name=ANNOUNCEMENTS_CHANNEL_NAME)
+        if not announcements:
+            self.clog("Spotlight: #announcements channel not found.", "WARNING")
+            return
+
+        if not top:
+            self.clog("Spotlight Friday: no qualifying submission this week.")
+            return
+
+        member = guild.get_member(top["user_id"])
+        name   = member.display_name if member else f"User {top['user_id']}"
+
+        embed = discord.Embed(
+            title="🌟 Spotlight Friday",
+            description=(
+                f"This week's featured submission is **{top['title'] or 'Untitled'}** "
+                f"by {member.mention if member else name}!\n\n"
+                f"{top['content'][:400]}{'...' if len(top['content']) > 400 else ''}"
+            ),
+            color=0xf1c40f,
+            timestamp=_now()
+        )
+        embed.add_field(name="Version",    value=top["version"],                  inline=True)
+        embed.add_field(name="XP Score",   value=f"{int(top['total_xp'])} XP",    inline=True)
+
+        if top["message_id"]:
+            ch = guild.get_channel(top["channel_id"])
+            if ch:
+                embed.add_field(
+                    name="Original Post",
+                    value=f"[Jump to Submission](https://discord.com/channels/{guild.id}/{top['channel_id']}/{top['message_id']})",
+                    inline=False
+                )
+
+        if member:
+            embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_footer(text="Embot Spotlight Friday")
+
+        await announcements.send(embed=embed)
+        self.clog(
+            f"Spotlight Friday posted: '{top['title']}' by user {top['user_id']} "
+            f"({int(top['total_xp'])} XP)"
+        )
+
+
+# ─────────────────────────── SETUP ──────────────────────────────
+
+def setup(bot):
+    data_dir = Path(__file__).parent / "data"
+    data_dir.mkdir(exist_ok=True)
+
+    cs = CommunitySystem(bot)
+    bot._community_system = cs
+
+    # ── Determine if it's Spotlight time (Friday 15:00 CST) ──
+    def _is_spotlight_time() -> bool:
+        now = _now()
+        if CST:
+            local = now.astimezone(CST)
+        else:
+            # Fallback: UTC-6
+            local = now - timedelta(hours=6)
+            local = local.replace(tzinfo=timezone.utc)
+        return local.weekday() == 4 and local.hour == 15
+
+    # ── Event: new messages ──
+    @bot.listen()
+    async def on_message(message: discord.Message):
+        if not message.guild or message.author.bot:
+            return
+
+        # Refresh channel IDs for this guild
+        cs._refresh_channel_ids(message.guild)
+
+        # Submission channel
+        if cs._is_submission_channel(message.channel.id):
+            await cs.handle_submission(message)
+            return
+
+        # Thread reply XP
+        await cs.handle_thread_message(message)
+
+    # ── Event: message edits ──
+    @bot.listen()
+    async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent):
+        if not payload.guild_id:
+            return
+        await cs.handle_edit(payload)
+
+    # ── Event: reaction add ──
+    @bot.listen()
+    async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+        if not payload.guild_id:
+            return
+        await cs.handle_reaction_add(payload)
+
+    # ── Event: reaction remove ──
+    @bot.listen()
+    async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+        if not payload.guild_id:
+            return
+        await cs.handle_reaction_remove(payload)
+
+    # ── Task: Spotlight Friday (checks every minute) ──
+    @tasks.loop(minutes=1)
+    async def spotlight_task():
+        try:
+            if not _is_spotlight_time():
+                return
+            for guild in bot.guilds:
+                await cs.run_spotlight(guild)
+        except Exception as e:
+            cs.cerr("Spotlight task error", e)
+
+    @spotlight_task.before_loop
+    async def before_spotlight():
+        await bot.wait_until_ready()
+
+    spotlight_task.start()
+
+    # ── Slash commands ──
+
+    @bot.tree.command(name="community_setup", description="Configure community submission channels")
+    @app_commands.describe(
+        projects_channel="The #projects channel",
+        artwork_channel="The #artwork channel",
+        announcements_channel="The #announcements channel",
+        spotlight_exclude_user="User ID to exclude from Spotlight Friday (server owner)",
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def community_setup(
+        interaction: discord.Interaction,
+        projects_channel: Optional[discord.TextChannel] = None,
+        artwork_channel: Optional[discord.TextChannel] = None,
+        announcements_channel: Optional[discord.TextChannel] = None,
+        spotlight_exclude_user: Optional[str] = None,
+    ):
+        changed = []
+        if projects_channel:
+            names = cs._get_submission_channel_names()
+            if PROJECTS_CHANNEL_NAME not in names:
+                names.append(projects_channel.name)
+            cs.db.set_config("projects_channel_id", projects_channel.id)
+            changed.append(f"Projects: {projects_channel.mention}")
+
+        if artwork_channel:
+            cs.db.set_config("artwork_channel_id", artwork_channel.id)
+            changed.append(f"Artwork: {artwork_channel.mention}")
+
+        if announcements_channel:
+            cs.db.set_config("announcements_channel_id", announcements_channel.id)
+            changed.append(f"Announcements: {announcements_channel.mention}")
+
+        if spotlight_exclude_user:
+            try:
+                uid = int(spotlight_exclude_user)
+                cs.db.set_config("spotlight_exclude_user_id", uid)
+                changed.append(f"Spotlight excluded user ID: `{uid}`")
+            except ValueError:
+                await interaction.response.send_message("❌ Invalid user ID.", ephemeral=True)
+                return
+
+        cs._refresh_channel_ids(interaction.guild)
+
+        embed = discord.Embed(
+            title="✅ Community Configuration Updated",
+            description="\n".join(changed) if changed else "No changes made.",
+            color=0x2ecc71
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        cs.clog(f"Community config updated by {interaction.user}")
+
+    @bot.tree.command(name="xp", description="Check your XP or another user's XP")
+    @app_commands.describe(member="Member to check (leave blank for yourself)")
+    async def xp_command(interaction: discord.Interaction, member: Optional[discord.Member] = None):
+        target = member or interaction.user
+        xp_val = cs.db.get_xp(target.id)
+        embed = discord.Embed(
+            title=f"⭐ XP — {target.display_name}",
+            description=f"**{xp_val:.1f} XP**",
+            color=0xf1c40f,
+            timestamp=_now()
+        )
+        embed.set_thumbnail(url=target.display_avatar.url)
+        await interaction.response.send_message(embed=embed)
+
+    @bot.tree.command(name="leaderboard", description="Show the community XP leaderboard")
+    async def leaderboard_command(interaction: discord.Interaction):
+        rows = cs.db.get_leaderboard(limit=10)
+        if not rows:
+            await interaction.response.send_message("No XP data yet!", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="🏆 Community XP Leaderboard",
+            color=0xf1c40f,
+            timestamp=_now()
+        )
+        guild = interaction.guild
+        lines = []
+        medals = ["🥇", "🥈", "🥉"]
+        for i, row in enumerate(rows):
+            member = guild.get_member(row["user_id"])
+            name   = member.display_name if member else f"User {row['user_id']}"
+            prefix = medals[i] if i < 3 else f"**{i+1}.**"
+            lines.append(f"{prefix} {name} — **{float(row['xp']):.1f} XP**")
+
+        embed.description = "\n".join(lines)
+        embed.set_footer(text="Embot Community System")
+        await interaction.response.send_message(embed=embed)
+
+    @bot.tree.command(name="submission_info", description="Look up a submission by its Discord message link or ID")
+    @app_commands.describe(message_id="The ID of the submission message")
+    async def submission_info(interaction: discord.Interaction, message_id: str):
+        try:
+            mid = int(message_id)
+        except ValueError:
+            await interaction.response.send_message("❌ Invalid message ID.", ephemeral=True)
+            return
+
+        sub = cs.db.by_message(mid)
+        if not sub:
+            await interaction.response.send_message("❌ No submission found for that message ID.", ephemeral=True)
+            return
+
+        versions = cs.db.by_group(sub["group_id"])
+        member   = interaction.guild.get_member(sub["user_id"])
+        name     = member.display_name if member else f"User {sub['user_id']}"
+
+        # Calculate group XP from votes
+        with cs.db._conn() as c:
+            xp_row = c.execute(
+                "SELECT COALESCE(SUM(xp_delta),0) AS total FROM votes WHERE group_id=?",
+                (sub["group_id"],)
+            ).fetchone()
+        total_xp = int(xp_row["total"]) if xp_row else 0
+
+        embed = discord.Embed(
+            title=f"📋 Submission: {sub['title'] or 'Untitled'}",
+            color=0x5865f2,
+            timestamp=_now()
+        )
+        embed.add_field(name="Author",    value=member.mention if member else name, inline=True)
+        embed.add_field(name="Version",   value=sub["version"],                     inline=True)
+        embed.add_field(name="Group XP",  value=f"{total_xp} XP",                  inline=True)
+        embed.add_field(name="Versions",  value=str(len(versions)),                 inline=True)
+        embed.add_field(name="Group ID",  value=f"`{sub['group_id']}`",             inline=False)
+        embed.set_footer(text=f"Submission ID: {sub['id']}")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @bot.tree.command(name="spotlight_preview", description="Preview this week's Spotlight Friday winner")
+    @app_commands.default_permissions(administrator=True)
+    async def spotlight_preview(interaction: discord.Interaction):
+        exclude = cs.db.get_config("spotlight_exclude_user_id")
+        top = cs.db.top_submission_this_week(exclude_user=exclude)
+        if not top:
+            await interaction.response.send_message(
+                "No qualifying submission this week (all scores are zero or negative).",
+                ephemeral=True
+            )
+            return
+        member = interaction.guild.get_member(top["user_id"])
+        name   = member.display_name if member else f"User {top['user_id']}"
+        embed  = discord.Embed(
+            title="🌟 Spotlight Preview",
+            description=f"**{top['title'] or 'Untitled'}** by {member.mention if member else name}\n"
+                        f"Score: **{int(top['total_xp'])} XP** this week",
+            color=0xf1c40f,
+            timestamp=_now()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @bot.tree.command(name="spotlight_run", description="Force-run Spotlight Friday now (admin only)")
+    @app_commands.default_permissions(administrator=True)
+    async def spotlight_run(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        await cs.run_spotlight(interaction.guild)
+        await interaction.followup.send("✅ Spotlight task executed.", ephemeral=True)
+
+    cs.clog("Community module setup complete")

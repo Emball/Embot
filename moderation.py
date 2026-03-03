@@ -26,7 +26,8 @@ CONFIG = {
     "owner_id": OWNER_ID,
     "channels": {
         "join_logs_channel_id": 1229868495307669608,
-        "bot_logs_channel_id": 1229871835978666115
+        "bot_logs_channel_id": 1229871835978666115,
+        "rules_channel_name": "rules"   # Name of your #rules channel
     },
     "elevated_roles": ["Moderator", "Admin", "Owner"],
     "moderation": {
@@ -528,6 +529,194 @@ class MediaScanner:
                     await ch.send(embed=embed)
             except Exception:
                 pass
+
+
+# ==================== RULES MANAGER ====================
+
+class RulesManager:
+    """
+    Manages the server rules embed in the #rules channel.
+
+    Design guarantees:
+    - The rules embed is always derived directly from rules.json.
+    - On every bot startup (on_ready) the manager checks whether the previously
+      posted embed is still present and whether its content matches the current
+      rules file. If the message is missing or the rules have changed since it
+      was posted, the old message is deleted and a fresh embed is sent.
+    - A background task polls rules.json every 60 seconds so edits made while the
+      bot is running are pushed to Discord automatically.
+    - The ID of the posted message is persisted to disk (rules_state.json) so
+      restarts never lose track of the live message.
+    """
+
+    RULES_FILE = Path(__file__).parent / "rules.json"
+    STATE_FILE = Path(__file__).parent / "data" / "rules_state.json"
+
+    def __init__(self, bot):
+        self.bot = bot
+        self._state: dict = self._load_state()
+        self._posted_hash: Optional[str] = self._state.get("rules_hash")
+        self._posted_message_id: Optional[int] = self._state.get("message_id")
+
+    def _load_state(self) -> dict:
+        try:
+            with open(self.STATE_FILE, "r") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+        except Exception as e:
+            self.bot.logger.log("RULES", f"Could not load rules state: {e}", "WARNING")
+            return {}
+
+    def _save_state(self):
+        try:
+            self.STATE_FILE.parent.mkdir(exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=str(self.STATE_FILE.parent), suffix=".tmp")
+            with os.fdopen(fd, "w") as f:
+                json.dump({
+                    "message_id": self._posted_message_id,
+                    "rules_hash": self._posted_hash,
+                }, f, indent=2)
+            os.replace(tmp, self.STATE_FILE)
+        except Exception as e:
+            self.bot.logger.log("RULES", f"Could not save rules state: {e}", "WARNING")
+
+    def load_rules(self) -> Optional[dict]:
+        """Return the parsed rules.json, or None if it cannot be read."""
+        try:
+            with open(self.RULES_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            self.bot.logger.log("RULES", "rules.json not found", "WARNING")
+            return None
+        except Exception as e:
+            self.bot.logger.log("RULES", f"Failed to load rules.json: {e}", "ERROR")
+            return None
+
+    @staticmethod
+    def _hash_rules(data: dict) -> str:
+        import hashlib
+        return hashlib.sha256(
+            json.dumps(data, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
+
+    def get_rule_text(self, rule_number: int) -> Optional[str]:
+        """Return a formatted string for a single rule number, or None."""
+        data = self.load_rules()
+        if not data:
+            return None
+        for rule in data.get("rules", []):
+            if rule.get("number") == rule_number:
+                return f"**Rule {rule['number']} — {rule['title']}**: {rule['description']}"
+        return None
+
+    def list_rules_summary(self) -> list:
+        """Return a list of short Rule N — Title strings."""
+        data = self.load_rules()
+        if not data:
+            return []
+        return [f"Rule {r['number']} — {r['title']}" for r in data.get("rules", [])]
+
+    def build_embed(self, data: dict) -> discord.Embed:
+        color = data.get("color", 0x3498db)
+        embed = discord.Embed(
+            title=f"📜  {data.get('title', 'Server Rules')}",
+            description=data.get("description", ""),
+            color=color,
+            timestamp=datetime.utcnow(),
+        )
+        for rule in data.get("rules", []):
+            embed.add_field(
+                name=f"Rule {rule['number']}  ·  {rule['title']}",
+                value=rule["description"],
+                inline=False,
+            )
+        embed.set_footer(text=data.get("footer", "Please follow the rules"))
+        return embed
+
+    def _get_rules_channel(self, guild: discord.Guild) -> Optional[discord.TextChannel]:
+        name = CONFIG["channels"].get("rules_channel_name", "rules")
+        return discord.utils.get(guild.text_channels, name=name)
+
+    async def sync(self, guild: discord.Guild, *, force: bool = False) -> bool:
+        """
+        Ensure the #rules channel contains an up-to-date embed.
+        Returns True if a new message was posted, False if already current.
+        """
+        data = self.load_rules()
+        if not data:
+            return False
+
+        current_hash = self._hash_rules(data)
+        channel = self._get_rules_channel(guild)
+        if not channel:
+            self.bot.logger.log("RULES", f"#rules channel not found in {guild.name}", "WARNING")
+            return False
+
+        existing_ok = False
+        if self._posted_message_id and not force:
+            try:
+                msg = await channel.fetch_message(self._posted_message_id)
+                if current_hash == self._posted_hash:
+                    existing_ok = True
+                else:
+                    await msg.delete()
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                self.bot.logger.log("RULES", f"Could not fetch rules message: {e}", "WARNING")
+
+        if existing_ok:
+            return False
+
+        # Delete any leftover bot embeds in the channel
+        try:
+            async for msg in channel.history(limit=50):
+                if msg.author == guild.me and msg.embeds:
+                    await msg.delete()
+        except Exception:
+            pass
+
+        embed = self.build_embed(data)
+        try:
+            new_msg = await channel.send(embed=embed)
+            self._posted_message_id = new_msg.id
+            self._posted_hash = current_hash
+            self._save_state()
+            self.bot.logger.log("RULES", f"Rules embed posted (message {new_msg.id})")
+            return True
+        except Exception as e:
+            self.bot.logger.log("RULES", f"Failed to post rules embed: {e}", "ERROR")
+            return False
+
+    async def on_ready(self, guild: discord.Guild):
+        """Called from on_ready — checks and syncs every guild."""
+        await self.sync(guild)
+
+    def start_watcher(self, guild: discord.Guild):
+        """Start the background polling task for this guild."""
+        self._watch_guild = guild
+        if not self._watcher_task_running():
+            self._watch_task = self.bot.loop.create_task(self._watch_loop())
+
+    def _watcher_task_running(self) -> bool:
+        return hasattr(self, "_watch_task") and not self._watch_task.done()
+
+    async def _watch_loop(self):
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            await asyncio.sleep(60)
+            try:
+                guild = self._watch_guild
+                if guild:
+                    data = self.load_rules()
+                    if data:
+                        current_hash = self._hash_rules(data)
+                        if current_hash != self._posted_hash:
+                            self.bot.logger.log("RULES", "rules.json change detected — syncing embed")
+                            await self.sync(guild, force=True)
+            except Exception as e:
+                self.bot.logger.log("RULES", f"Watcher error: {e}", "WARNING")
 
 
 # ==================== MODERATION SYSTEM (UNIFIED) ====================
@@ -1533,9 +1722,27 @@ class ModerationSystem:
 # ==================== UNIFIED COMMAND LOGIC ====================
 
 async def _do_ban(ctx: ModContext, mod_system: ModerationSystem,
-                  user: discord.User, reason: str, delete_days: int = 0, fake: bool = False):
+                  user: discord.User, reason: str = None, delete_days: int = 0,
+                  fake: bool = False, rule_number: int = None):
     if not has_elevated_role(ctx.author):
         return await ctx.error(ERROR_NO_PERMISSION)
+
+    # --- Rule-number handling ---
+    rule_text = None
+    if rule_number is not None:
+        rules_mgr: Optional[RulesManager] = getattr(ctx.bot, "rules_manager", None)
+        if rules_mgr:
+            rule_text = rules_mgr.get_rule_text(rule_number)
+        if not rule_text:
+            return await ctx.error(
+                f"❌ Rule **{rule_number}** not found. Use  to see the current rule list."
+            )
+        # Build the full reason from the rule, appending any extra note
+        if reason and reason.strip():
+            reason = f"{rule_text} | {reason.strip()}"
+        else:
+            reason = rule_text
+
     ok, err = validate_reason(reason)
     if not ok:
         return await ctx.error(err)
@@ -1549,12 +1756,17 @@ async def _do_ban(ctx: ModContext, mod_system: ModerationSystem,
 
     delete_days = max(0, min(7, delete_days))
     try:
+        # Build DM embed — show rule number prominently when applicable
+        dm_reason_field = reason
+        if rule_number is not None and rule_text:
+            dm_reason_field = f"**Rule {rule_number} violation**\n{rule_text}"
+
         # Send Appeal DM
         try:
             dm = discord.Embed(title="🔨 You have been banned",
                                description=f"You have been banned from **{ctx.guild.name}**",
                                color=0x992d22, timestamp=datetime.utcnow())
-            dm.add_field(name="Reason", value=reason, inline=False)
+            dm.add_field(name="Reason", value=dm_reason_field, inline=False)
             dm.add_field(name="Moderator", value=str(ctx.author), inline=True)
             dm.add_field(name="📝 Appeal Process",
                          value="If you believe this ban was unjustified, submit an appeal below.",
@@ -1573,7 +1785,15 @@ async def _do_ban(ctx: ModContext, mod_system: ModerationSystem,
         embed = discord.Embed(title="✅ User Banned",
                               description=f"{user.mention} has been banned.",
                               color=0x992d22, timestamp=datetime.utcnow())
-        embed.add_field(name="Reason", value=reason, inline=False)
+        if rule_number is not None:
+            embed.add_field(name="Rule Violated", value=f"Rule {rule_number}", inline=True)
+            embed.add_field(name="Rule Text", value=rule_text, inline=False)
+            if reason != rule_text:  # extra note was provided
+                extra = reason[len(rule_text):].lstrip(" |").strip()
+                if extra:
+                    embed.add_field(name="Additional Note", value=extra, inline=False)
+        else:
+            embed.add_field(name="Reason", value=reason, inline=False)
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
         embed.add_field(name="Messages Deleted", value=f"{delete_days} days", inline=True)
         inchat_msg_id = await ctx.reply(embed=embed)
@@ -2138,13 +2358,23 @@ def setup(bot):
 
     # ---- SLASH COMMANDS ----
     @bot.tree.command(name="ban", description="Ban a user from the server")
-    @app_commands.describe(user="User to ban", reason="Reason (min 10 chars)",
-                           delete_days="Days of messages to delete (0-7, default 0)",
-                           fake="Simulate without executing")
+    @app_commands.describe(
+        user="User to ban",
+        reason="Reason for the ban (min 10 chars) — not required if rule is provided",
+        rule="Rule number violated (overrides or supplements reason)",
+        delete_days="Days of messages to delete (0-7, default 0)",
+        fake="Simulate without executing",
+    )
     @app_commands.default_permissions(ban_members=True)
     async def slash_ban(interaction: discord.Interaction, user: discord.User,
-                        reason: str, delete_days: Optional[int] = 0, fake: bool = False):
-        await _do_ban(ModContext(interaction), mod_system, user, reason, delete_days, fake=fake)
+                        reason: Optional[str] = None, rule: Optional[int] = None,
+                        delete_days: Optional[int] = 0, fake: bool = False):
+        if rule is None and not reason:
+            await interaction.response.send_message(
+                "❌ You must provide either a  or a  number.", ephemeral=True)
+            return
+        await _do_ban(ModContext(interaction), mod_system, user, reason, delete_days,
+                      fake=fake, rule_number=rule)
 
     @bot.tree.command(name="unban", description="Unban a user from the server")
     @app_commands.describe(user_id="User ID to unban", reason="Reason for unban",
@@ -2260,18 +2490,46 @@ def setup(bot):
     # ---- PREFIX COMMANDS ----
     @bot.command(name="ban")
     async def prefix_ban(ctx, user: discord.User = None, *, args: str = ""):
+        """
+        Usage:
+          ?ban @user <reason> [delete_days] [fake]
+          ?ban @user rule:<number> [note] [delete_days] [fake]
+        """
         if not user:
-            return await ctx.send("❌ Usage: `?ban @user <reason> [delete_days] [fake]`", delete_after=8)
+            return await ctx.send(
+                "❌ Usage: `?ban @user <reason> [delete_days] [fake]`\n"
+                "         `?ban @user rule:<number> [note] [delete_days] [fake]`",
+                delete_after=10)
         parts_all = args.split()
         fake = parts_all[-1].lower() == "fake" if parts_all else False
-        if fake: args = " ".join(parts_all[:-1])
+        if fake:
+            parts_all = parts_all[:-1]
+            args = " ".join(parts_all)
+
+        # Check for rule:<number> token anywhere in args
+        rule_number = None
+        remaining_parts = []
+        for part in parts_all:
+            if part.lower().startswith("rule:") and part[5:].isdigit():
+                rule_number = int(part[5:])
+            else:
+                remaining_parts.append(part)
+        args = " ".join(remaining_parts)
+
         delete_days = 0
-        reason = args
-        parts = args.rsplit(None, 1)
-        if len(parts) == 2 and parts[-1].isdigit() and int(parts[-1]) <= 7:
-            delete_days = int(parts[-1])
-            reason = parts[0]
-        await _do_ban(ModContext(ctx), mod_system, user, reason, delete_days, fake=fake)
+        reason = args or None
+        if args:
+            parts = args.rsplit(None, 1)
+            if len(parts) == 2 and parts[-1].isdigit() and int(parts[-1]) <= 7:
+                delete_days = int(parts[-1])
+                reason = parts[0] or None
+
+        if rule_number is None and not reason:
+            return await ctx.send(
+                "❌ You must provide either a reason or `rule:<number>`.", delete_after=8)
+
+        await _do_ban(ModContext(ctx), mod_system, user, reason, delete_days,
+                      fake=fake, rule_number=rule_number)
 
     @bot.command(name="unban")
     async def prefix_unban(ctx, user_id: str = None, *, reason: str = "No reason provided"):
@@ -2659,5 +2917,45 @@ def setup(bot):
     @bot.listen()
     async def on_member_join(member):
         await mod_system.restore_member_roles(member)
+
+    # ---- RULES MANAGER ----
+    rules_manager = RulesManager(bot)
+    bot.rules_manager = rules_manager
+
+    @bot.listen("on_ready")
+    async def _rules_on_ready():
+        for guild in bot.guilds:
+            await rules_manager.on_ready(guild)
+            rules_manager.start_watcher(guild)
+        bot.logger.log(MODULE_NAME, "Rules manager synced on ready")
+
+    # ---- RULES SLASH COMMANDS ----
+
+    @bot.tree.command(name="rules", description="List all server rules")
+    async def slash_rules(interaction: discord.Interaction):
+        """Sends an ephemeral embed with a summary of the rules."""
+        data = rules_manager.load_rules()
+        if not data:
+            await interaction.response.send_message(
+                "❌ Rules file not found or could not be loaded.", ephemeral=True)
+            return
+        embed = rules_manager.build_embed(data)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @bot.tree.command(name="updaterules",
+                      description="Force-refresh the #rules channel embed from rules.json")
+    @app_commands.default_permissions(administrator=True)
+    async def slash_updaterules(interaction: discord.Interaction):
+        if not has_elevated_role(interaction.user):
+            await interaction.response.send_message(ERROR_NO_PERMISSION, ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        posted = await rules_manager.sync(interaction.guild, force=True)
+        if posted:
+            await interaction.followup.send(
+                "✅ Rules embed has been refreshed in the rules channel.", ephemeral=True)
+        else:
+            await interaction.followup.send(
+                "ℹ️ Rules embed is already up to date.", ephemeral=True)
 
     bot.logger.log(MODULE_NAME, "Moderation setup complete")

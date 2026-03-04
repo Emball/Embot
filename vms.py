@@ -1093,25 +1093,42 @@ class VMSManager:
             print(f"[{MODULE_NAME}] Reset {len(reset_ids)} archived-but-untranscribed VM(s) to pending")
 
         # ── Phase 3: Rename pending files to canonical ───────────────────────
+        # Re-fetch canonical map (Phase 1 may have changed it)
+        existing_canonical = {
+            r[0]: r[1]
+            for r in self._db_all("SELECT filename, id FROM vms")
+        }
+
         needs_rename = self._db_all(
             """SELECT id, filepath FROM vms
                WHERE processed = 0
                  AND filename != ('vm-' || id || '.ogg')"""
         )
-        updates = []
-        for vm_id, fp in needs_rename:
-            try:
-                new_path = _rename_to_canonical(Path(fp), vm_id)
-                updates.append((new_path.name, str(new_path), vm_id))
-            except Exception as exc:
-                print(f"[{MODULE_NAME}] Rename failed for VM #{vm_id}: {exc}")
-            if len(updates) >= BULK_BATCH_SIZE:
-                self._db_batch_update(
-                    "UPDATE vms SET filename=?, filepath=? WHERE id=?", updates)
-                updates = []
-        if updates:
-            self._db_batch_update(
-                "UPDATE vms SET filename=?, filepath=? WHERE id=?", updates)
+        dupes = 0
+        conn = self._conn()
+        try:
+            for vm_id, fp in needs_rename:
+                canon_name = _vm_canonical_name(vm_id)
+                # Collision: another row already has this canonical name
+                if canon_name in existing_canonical and existing_canonical[canon_name] != vm_id:
+                    conn.execute("DELETE FROM vms WHERE id=?", (vm_id,))
+                    dupes += 1
+                    continue
+                try:
+                    new_path = _rename_to_canonical(Path(fp), vm_id)
+                    conn.execute(
+                        "UPDATE vms SET filename=?, filepath=? WHERE id=?",
+                        (new_path.name, str(new_path), vm_id)
+                    )
+                    existing_canonical[canon_name] = vm_id
+                except Exception as exc:
+                    print(f"[{MODULE_NAME}] Rename failed for VM #{vm_id}: {exc}")
+            conn.commit()
+        finally:
+            conn.close()
+        if dupes:
+            print(f"[{MODULE_NAME}] Removed {dupes} duplicate pending row(s)")
+
 
         # ── Collect valid pending rows for Phase 4 ───────────────────────────
         pending = self._db_all(

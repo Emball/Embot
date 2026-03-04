@@ -21,9 +21,9 @@ parser.add_argument('-dev', '--development', action='store_true',
                     help='Enable development mode (hot-reload, versioning, git integration)')
 args = parser.parse_args()
 
-# Get script directory and create data folder
+# Get script directory and create logs folder
 script_dir = Path(__file__).parent.absolute()
-data_dir = script_dir / "data"
+data_dir = script_dir / "logs"
 data_dir.mkdir(exist_ok=True)
 
 # Initialize bot with intents
@@ -164,7 +164,7 @@ def load_version():
     """Load version from _version.py file"""
     try:
         # Read the file directly without importing to avoid dependency issues
-        version_file = Path("_version.py")
+        version_file = Path(__file__).parent / "_version.py"
         if version_file.exists():
             with open(version_file, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -182,9 +182,14 @@ def load_version():
         return "0.0.0.0"
 
 def load_modules():
-    """Dynamically load all modules from the current directory"""
-    modules_dir = os.path.dirname(os.path.abspath(__file__))
-    
+    """Dynamically load all modules from the modules/ subdirectory"""
+    modules_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "modules")
+    os.makedirs(modules_dir, exist_ok=True)
+
+    # Add modules/ to sys.path so modules can import each other
+    if modules_dir not in sys.path:
+        sys.path.insert(0, modules_dir)
+
     loaded_count = 0
     failed_count = 0
     
@@ -195,9 +200,9 @@ def load_modules():
     # NEVER clear commands here - only do it once at startup if needed
     # Commands persist across reloads
     
-    # Discover and load all Python modules in the current directory
+    # Discover and load all Python modules in the modules/ directory
     for file in os.listdir(modules_dir):
-        if not file.endswith('.py') or file == 'main.py' or file.startswith('_'):
+        if not file.endswith('.py') or file.startswith('_'):
             continue
         
         # Skip dev.py if not in development mode
@@ -456,9 +461,9 @@ def setup_console_commands():
             return
         
         module_name = args.strip()
-        file_path = Path(f"{module_name}.py")
+        file_path = Path(__file__).parent / "modules" / f"{module_name}.py"
         if not file_path.exists():
-            print(f"⚠️ Module '{module_name}.py' not found")
+            print(f"⚠️ Module '{module_name}.py' not found in modules/")
             return
         
         print(f"🔄 Reloading {module_name}...")
@@ -517,12 +522,13 @@ def setup_console_commands():
     async def handle_modules(args):
         """List loaded modules command"""
         bot_modules = []
+        _modules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "modules")
         for name, module in sys.modules.items():
             if (hasattr(module, '__file__') and 
                 module.__file__ and 
                 'site-packages' not in module.__file__ and
-                os.path.dirname(os.path.abspath(__file__)) in module.__file__ and
-                name not in ['main', '__main__']):
+                _modules_path in module.__file__ and
+                name not in ['main', '__main__', 'Embot']):
                 bot_modules.append(name)
         
         print(f"\n📦 Loaded Modules ({len(bot_modules)}):")

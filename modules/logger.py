@@ -14,39 +14,24 @@ class EventLogger:
     def __init__(self, bot):
         self.bot = bot
         from pathlib import Path
-        data_dir = Path(__file__).parent / "data"
-        data_dir.mkdir(exist_ok=True)
-        self.config_file = str(data_dir / "logger_config.json")
+        config_dir = Path(__file__).parent.parent / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        self.config_file = str(config_dir / "logger_config.json")
         self.config = self.load_config()
 
         # Pre-upload safety scanner — borrowed from ModerationSystem via bot._mod_system
         self._scanner = None  # MediaScanner, set lazily
         
     def load_config(self):
-        """Load logger configuration"""
+        """Load logger configuration. Raises FileNotFoundError if config/logger_config.json is missing."""
         try:
             with open(self.config_file, 'r') as f:
                 return json.load(f)
         except FileNotFoundError:
-            # Default configuration
-            default_config = {
-                "join_logs_channel_id": None,  # Set via command
-                "bot_logs_channel_id": None,   # Set via command
-                "log_message_edits": True,
-                "log_message_deletes": True,
-                "log_member_joins": True,
-                "log_member_leaves": True,
-                "log_bans": True,
-                "log_unbans": True,
-                "log_role_changes": True,
-                "log_channel_changes": True,
-                "log_server_changes": True,
-                "log_invite_changes": True,
-                "log_voice_changes": True,
-                "log_nickname_changes": True
-            }
-            self.save_config(default_config)
-            return default_config
+            raise FileNotFoundError(
+                f"Missing required config file: {self.config_file}\n"
+                "Ensure config/logger_config.json is present (it should be committed to the repo)."
+            )
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to load logger config", e)
             return {}

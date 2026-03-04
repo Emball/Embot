@@ -1,37 +1,39 @@
-# Python
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
-Winpython64-3.11.9.0dotb5/
+*.pyc
+*.pyo
+*.pyd
 __init__.py
 
-# Large data directories
-data/
-
-# Bot-specific
+# ── Runtime data (never commit) ───────────────────────────────────────────────
+logs/
+cache/
+db/
+temp/
 *.log
-*.json
 *.db
 *.sqlite
-data/
-cache/
-temp/
 *.tmp
-*.bat
 
-# OS
+# ── Secrets & environment ─────────────────────────────────────────────────────
+.env
+config.ini
+Winpython64*/
+venv/
+env/
+
+# ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# Bot token and secrets
-config.ini# Development data files
-version_data.json
-_version.py
-*.pyc
-*.pyo
-*.pyd
-# Environment
-.env
-venv/
-env/
-# Bot data
-!package.json
+# ── Config files ARE committed — do not add *.json here ──────────────────────
+# config/moderation.json    ← user settings, word lists, rules content
+# config/links_config.json  ← link commands
+# config/logger_config.json ← logging toggles and channel IDs
+# config/version_data.json  ← version history
+# _version.py               ← current version string
+
+# Exclude any JSON that ends up outside config/ (e.g. temp exports)
+*.json
+!config/*.json

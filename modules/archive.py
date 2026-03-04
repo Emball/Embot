@@ -23,8 +23,10 @@ MODULE_NAME = "ARCHIVE"
 EMINEM_ROOT = Path(r"D:\Media\Music\Eminem")
 FORMATS = ["FLAC", "MP3"]
 CACHE_CHANNEL_NAME = "songcache"
-INDEX_FILE = "song_index.json"
-CACHE_INDEX = "cache_index.json"
+INDEX_FILE = str(Path(__file__).parent.parent / "cache" / "archive" / "song_index.json")
+CACHE_INDEX = str(Path(__file__).parent.parent / "cache" / "archive" / "cache_index.json")
+# Ensure cache directory exists
+Path(__file__).parent.parent.joinpath("cache", "archive").mkdir(parents=True, exist_ok=True)
 INDEX_REFRESH_HOURS = 24
 CACHE_EXPIRE_DAYS = 7
 VERSION_KEYWORDS = ['live', 'remix', 'demo', 'acoustic', 'version', 'edit', 'radio']

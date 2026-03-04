@@ -10,7 +10,7 @@ VMS — Voice Message System for Embot
 • Saves transcripts to SQLite DB for keyword playback
 • Archives after 150 days, deletes after 365 days
 • Archive job schedule stored in DB — catches missed runs after crashes
-• Periodic random playback in #general (every 40–80 messages, 50% chance)
+• Periodic random playback in #general (every 40–80 messages, always fires — 50% contextual, 50% random)
 • Contextual playback using keyword matching against transcripts
 • Smart selection: 7-day cooldowns, long-VM penalties, recency weighting
 • Responds to @mentions / replies with a random VM (10s cooldown)
@@ -57,7 +57,6 @@ DELETE_AFTER_DAYS         = 365
 ARCHIVE_JOB_INTERVAL_HOURS = 24
 RANDOM_PLAYBACK_MIN       = 40
 RANDOM_PLAYBACK_MAX       = 80
-PLAYBACK_CHANCE           = 0.50      # 50 % chance to trigger playback at threshold
 WHISPER_MODEL_SIZE        = "base"    # tiny / base / small / medium / large
 BACKFILL_DAYS             = 365       # how far back to scrape on an empty cache
 
@@ -2163,26 +2162,23 @@ def setup(bot):
             if count >= threshold:
                 manager._reset_counter(guild_id, channel_id)
 
-                if random.random() < PLAYBACK_CHANCE:
-                    if random.random() < 0.5:
-                        recent = manager.recent_messages(guild_id, channel_id)
-                        vm     = manager.select_contextual(recent)
-                        mode   = "contextual"
-                    else:
-                        vm   = manager.select_random()
-                        mode = "random"
+                # Always fire — 50% contextual, 50% random
+                if random.random() < 0.5:
+                    recent = manager.recent_messages(guild_id, channel_id)
+                    vm     = manager.select_contextual(recent)
+                    mode   = "contextual"
+                else:
+                    vm   = manager.select_random()
+                    mode = "random"
 
-                    if vm:
-                        vm_id, fp, dur = vm
-                        bot.logger.log(MODULE_NAME,
-                            f"Triggering {mode} VM playback (#{vm_id}) "
-                            f"after {count} msgs in #general")
-                        await manager.send_vm(message.channel, vm_id, fp, dur)
-                    else:
-                        bot.logger.log(MODULE_NAME,
-                            f"Playback triggered ({mode}) but no eligible VMs found")
+                if vm:
+                    vm_id, fp, dur = vm
+                    bot.logger.log(MODULE_NAME,
+                        f"Triggering {mode} VM playback (#{vm_id}) "
+                        f"after {count} msgs in #general")
+                    await manager.send_vm(message.channel, vm_id, fp, dur)
                 else:
                     bot.logger.log(MODULE_NAME,
-                        f"Message threshold hit ({count}) — playback skipped (50% roll missed)")
+                        f"Playback triggered ({mode}) but no eligible VMs found")
 
     bot.logger.log(MODULE_NAME, "VMS module setup complete")

@@ -58,6 +58,7 @@ RANDOM_PLAYBACK_MIN       = 40
 RANDOM_PLAYBACK_MAX       = 80
 PLAYBACK_CHANCE           = 0.50      # 50 % chance to trigger playback at threshold
 WHISPER_MODEL_SIZE        = "base"    # tiny / base / small / medium / large
+BACKFILL_DAYS             = 365       # how far back to scrape on an empty cache
 
 # Bulk-processing concurrency
 # Whisper is NOT thread-safe and is compute-bound — running multiple instances
@@ -1448,12 +1449,156 @@ class VMSManager:
             pass
         return []
 
+    # ---------------------------------------------------------------- Backfill --
+
+    async def _backfill_from_discord(self):
+        """
+        Scrape #general for the last BACKFILL_DAYS of voice messages and
+        download any that aren't already in the DB.
+
+        Only runs when /vms is completely empty (fresh install / wiped cache).
+        Uses the bot's own HTTP session so no extra credentials are needed.
+        Skips messages whose discord_message_id is already in the DB.
+        Downloads are written directly to canonical vm-{id}.ogg paths so the
+        subsequent scan/conform pass has nothing extra to do.
+        """
+        # Find #general in any guild the bot is in
+        general_channel = None
+        for guild in self.bot.guilds:
+            ch = discord.utils.get(guild.text_channels, name=GENERAL_CHANNEL_NAME)
+            if ch is not None:
+                general_channel = ch
+                break
+
+        if general_channel is None:
+            self.bot.logger.log(MODULE_NAME,
+                "Backfill: could not find #general in any guild — skipping", "WARNING")
+            return
+
+        from datetime import timezone, timedelta
+        cutoff_dt = discord.utils.utcnow().replace(tzinfo=timezone.utc) - timedelta(days=BACKFILL_DAYS)
+
+        self.bot.logger.log(MODULE_NAME,
+            f"Backfill: scanning #{general_channel.name} in '{general_channel.guild.name}' "
+            f"back to {cutoff_dt.strftime('%Y-%m-%d')}…")
+
+        # Build set of already-known message IDs so we skip them fast
+        known_ids = {
+            r[0]
+            for r in self._db_all("SELECT discord_message_id FROM vms WHERE discord_message_id IS NOT NULL")
+        }
+
+        downloaded  = 0
+        skipped     = 0
+        errors      = 0
+        msgs_seen   = 0   # every message scanned (VM or not) — used for pacing
+
+        # Pacing constants
+        BACKFILL_SLEEP_EVERY  = 200   # pause after every N messages scanned
+        BACKFILL_SLEEP_SECS   = 2.0   # how long to pause
+        BACKFILL_DL_SLEEP     = 0.5   # short sleep after each download
+
+        try:
+            async for message in general_channel.history(limit=None, after=cutoff_dt, oldest_first=True):
+                msgs_seen += 1
+
+                # Gentle pause every N messages to avoid hammering the gateway
+                if msgs_seen % BACKFILL_SLEEP_EVERY == 0:
+                    self.bot.logger.log(MODULE_NAME,
+                        f"Backfill: scanned {msgs_seen} messages "
+                        f"({downloaded} downloaded) — pausing {BACKFILL_SLEEP_SECS}s…")
+                    await asyncio.sleep(BACKFILL_SLEEP_SECS)
+
+                for att in message.attachments:
+                    raw_flags = getattr(message.flags, 'value', 0)
+                    is_vm = (
+                        bool(raw_flags & 8192) or
+                        att.filename.lower() == "voice-message.ogg" or
+                        (att.content_type and "ogg" in att.content_type.lower())
+                    )
+                    if not is_vm:
+                        continue
+
+                    msg_id_str = str(message.id)
+                    if msg_id_str in known_ids:
+                        skipped += 1
+                        continue
+
+                    try:
+                        ts       = int(message.created_at.timestamp())
+                        guild_id = str(message.guild.id) if message.guild else None
+
+                        # Claim a DB id with a placeholder row
+                        conn = self._conn()
+                        try:
+                            cur = conn.execute(
+                                """INSERT INTO vms
+                                   (filename, filepath, discord_message_id, discord_channel_id,
+                                    guild_id, duration_secs, processed, created_at)
+                                   VALUES ('__pending__', '', ?, ?, ?, 0.0, 0, ?)""",
+                                (msg_id_str, str(message.channel.id), guild_id, ts)
+                            )
+                            vm_id = cur.lastrowid
+                            conn.commit()
+                        finally:
+                            conn.close()
+
+                        # Write directly to canonical path
+                        canon_name = _vm_canonical_name(vm_id)
+                        canon_path = self.vms_dir / canon_name
+                        raw        = await att.read()
+                        canon_path.write_bytes(raw)
+
+                        # Get duration and finalise row
+                        duration = _get_ogg_duration(str(canon_path))
+                        self._db_exec(
+                            "UPDATE vms SET filename=?, filepath=?, duration_secs=? WHERE id=?",
+                            (canon_name, str(canon_path), duration, vm_id)
+                        )
+
+                        known_ids.add(msg_id_str)
+                        downloaded += 1
+
+                        if downloaded % 100 == 0:
+                            self.bot.logger.log(MODULE_NAME,
+                                f"Backfill: {downloaded} downloaded so far…")
+
+                        # Brief sleep after each download so we don't burst the CDN
+                        await asyncio.sleep(BACKFILL_DL_SLEEP)
+
+                    except Exception as exc:
+                        self.bot.logger.log(MODULE_NAME,
+                            f"Backfill: failed to download message {message.id}: {exc}", "WARNING")
+                        errors += 1
+
+        except discord.Forbidden:
+            self.bot.logger.log(MODULE_NAME,
+                f"Backfill: no permission to read #{general_channel.name} — skipping", "WARNING")
+            return
+        except Exception as exc:
+            self.bot.logger.log(MODULE_NAME,
+                f"Backfill: history scrape error — {exc}", "ERROR")
+            return
+
+        self.bot.logger.log(MODULE_NAME,
+            f"Backfill complete: {downloaded} downloaded, {skipped} already known, {errors} errors")
+
     # ---------------------------------------------------------------- Startup --
 
     async def startup(self):
-        """Full startup sequence: queue worker → retroactive scan → archive check."""
+        """Full startup sequence: queue worker → backfill (if empty) → scan → archive check."""
         await self._start_queue_worker()
         await asyncio.sleep(0.5)
+
+        # Backfill from Discord if /vms is completely empty
+        if not any(self.vms_dir.glob("*.ogg")):
+            self.bot.logger.log(MODULE_NAME,
+                "Cache is empty — starting Discord backfill before scan…")
+            await self._backfill_from_discord()
+        else:
+            self.bot.logger.log(MODULE_NAME,
+                f"Cache populated — skipping backfill")
+
         await self.process_unprocessed()
         await self.run_archive_if_due()
         self.bot.logger.log(MODULE_NAME, "VMS startup complete")

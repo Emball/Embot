@@ -1738,17 +1738,17 @@ class VMSManager:
                             self.bot.logger.log(MODULE_NAME,
                                 f"Backfill: {downloaded} downloaded so far…")
 
-                # Checkpoint every scan batch so we can resume here on restart.
-                # Written outside the attachment loop so we advance even on
-                # messages that contain no voice attachments.
-                self._save_backfill_checkpoint(message.id)
-
                         await asyncio.sleep(BACKFILL_DL_SLEEP)
 
                     except Exception as exc:
                         self.bot.logger.log(MODULE_NAME,
                             f"Backfill: failed to download message {message.id}: {exc}", "WARNING")
                         errors += 1
+
+                # Checkpoint after processing all attachments in this message.
+                # Stored outside the attachment try/except so it always advances,
+                # even for messages with no voice attachments.
+                self._save_backfill_checkpoint(message.id)
 
         except discord.Forbidden:
             self.bot.logger.log(MODULE_NAME,

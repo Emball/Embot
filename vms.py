@@ -1206,13 +1206,18 @@ def setup(bot):
 
     _archive_loop.start()
 
-    # One-time startup task
-    @bot.listen("on_ready")
-    async def _vms_on_ready():
-        if not getattr(bot, '_vms_started', False):
-            bot._vms_started = True
-            await asyncio.sleep(3)   # let other modules finish their on_ready
-            await manager.startup()
+    # One-time startup task — runs after bot is ready, regardless of when
+    # setup() was called relative to on_ready firing.
+    @tasks.loop(count=1)
+    async def _startup_task():
+        await manager.startup()
+
+    @_startup_task.before_loop
+    async def _before_startup():
+        await bot.wait_until_ready()
+        await asyncio.sleep(3)   # let other modules finish their on_ready
+
+    _startup_task.start()
 
     # ================================================================
     # MESSAGE HANDLER

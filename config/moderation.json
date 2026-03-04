@@ -13,23 +13,6 @@
     "Admin",
     "Owner"
   ],
-  "word_lists": {
-    "tos_violations": [],
-    "banned_words": [
-      "embis",
-      "embiz",
-      "embiss",
-      "https://www.youtube.com/watch?v=fXvOrWWB3Vg",
-      "https://youtu.be/fXvOrWWB3Vg",
-      "leaked porn",
-      "nudes leak",
-      "mbis",
-      "mebis",
-      "Michael Blake Sinclair",
-      "montear",
-      "www.youtube.com/watch?v=fXvOrWWB3Vg"
-    ]
-  },
   "rules": {
     "title": "Server Rules",
     "description": "Please read and follow all rules. Violations may result in warnings, mutes, kicks, or bans.",

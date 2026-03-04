@@ -997,29 +997,49 @@ class VMSManager:
         ]
 
         # ── Phase 1: Conform processed/archived/broken filenames ─────────────
+        # Build a canonical-name → id map first so we can detect collisions
+        # (two rows claiming the same vm-{id}.ogg) before touching the DB.
+        # Collisions happen when duplicate registrations exist from old runs.
+        existing_canonical = {
+            r[0]: r[1]   # filename → id
+            for r in self._db_all("SELECT filename, id FROM vms")
+        }
+
         non_canonical = self._db_all(
             """SELECT id, filepath, filename FROM vms
                WHERE processed IN (1, 2, 4)
                  AND filename != ('vm-' || id || '.ogg')"""
         )
-        updates = []
         conformed = 0
-        for vm_id, fp, old_name in non_canonical:
-            try:
-                new_path = _rename_to_canonical(Path(fp), vm_id)
-                updates.append((new_path.name, str(new_path), vm_id))
-                conformed += 1
-            except Exception as exc:
-                print(f"[{MODULE_NAME}] Conform warning VM #{vm_id} ({old_name}): {exc}")
-            if len(updates) >= BULK_BATCH_SIZE:
-                self._db_batch_update(
-                    "UPDATE vms SET filename=?, filepath=? WHERE id=?", updates)
-                updates = []
-        if updates:
-            self._db_batch_update(
-                "UPDATE vms SET filename=?, filepath=? WHERE id=?", updates)
+        dupes_removed = 0
+        conn = self._conn()
+        try:
+            for vm_id, fp, old_name in non_canonical:
+                canon_name = _vm_canonical_name(vm_id)
+                # Another row already owns this canonical name → stale duplicate
+                if canon_name in existing_canonical and existing_canonical[canon_name] != vm_id:
+                    conn.execute("DELETE FROM vms WHERE id=?", (vm_id,))
+                    dupes_removed += 1
+                    continue
+                try:
+                    new_path = _rename_to_canonical(Path(fp), vm_id)
+                    conn.execute(
+                        "UPDATE vms SET filename=?, filepath=? WHERE id=?",
+                        (new_path.name, str(new_path), vm_id)
+                    )
+                    existing_canonical[canon_name] = vm_id
+                    conformed += 1
+                except Exception as exc:
+                    print(f"[{MODULE_NAME}] Conform warning VM #{vm_id} ({old_name}): {exc}")
+            conn.commit()
+        finally:
+            conn.close()
+
         if conformed:
             print(f"[{MODULE_NAME}] Conformed {conformed} filename(s) to canonical format")
+        if dupes_removed:
+            print(f"[{MODULE_NAME}] Removed {dupes_removed} duplicate DB row(s)")
+
 
         # ── Phase 2: Register untracked files ────────────────────────────────
         # Build lookup sets so we don't hit the DB per-file

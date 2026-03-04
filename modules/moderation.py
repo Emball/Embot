@@ -152,15 +152,6 @@ CREATE TABLE IF NOT EXISTS mod_startup_log (
     startup_time INTEGER NOT NULL
 );
 
--- ── Sensitive word lists (base64-encoded, never stored in plaintext) ──────────
--- category: 'racial_slurs' | 'child_safety'
--- term_b64: base64-encoded canonical root form of the term
-CREATE TABLE IF NOT EXISTS mod_sensitive_lists (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    category    TEXT NOT NULL,
-    term_b64    TEXT NOT NULL,
-    UNIQUE(category, term_b64)
-);
 """
 
 # ── Default seed data ─────────────────────────────────────────────────────────
@@ -247,36 +238,6 @@ def _migrate(db_path: str) -> None:
             if rows:
                 cfg["elevated_roles"] = [r["role_name"] for r in rows]
 
-        # ── Pull word lists ───────────────────────────────────────────────────
-        # racial_slurs and child_safety are no longer stored in JSON —
-        # they live in mod_sensitive_lists (base64-encoded). If the old
-        # mod_word_lists table exists, migrate those categories into the new
-        # DB table and keep only the non-sensitive categories in the JSON.
-        if "mod_word_lists" in tables:
-            import base64 as _b64m
-            rows = conn.execute(
-                "SELECT category, term FROM mod_word_lists ORDER BY category, id"
-            ).fetchall()
-            if rows:
-                sensitive_cats = {"child_safety", "racial_slurs"}
-                wl: dict = {"tos_violations": [], "banned_words": []}
-                for r in rows:
-                    cat, term = r["category"], r["term"]
-                    if cat in sensitive_cats:
-                        # Migrate to mod_sensitive_lists (base64-encoded canonical root)
-                        enc = _b64m.b64encode(term.lower().encode()).decode()
-                        try:
-                            conn.execute(
-                                "INSERT OR IGNORE INTO mod_sensitive_lists "
-                                "(category, term_b64) VALUES (?,?)",
-                                (cat, enc),
-                            )
-                        except Exception:
-                            pass
-                    else:
-                        wl.setdefault(cat, []).append(term)
-                cfg["word_lists"] = wl
-
         # ── Merge rules.json ──────────────────────────────────────────────────
         if has_rules_json:
             try:
@@ -311,83 +272,12 @@ def _migrate(db_path: str) -> None:
 
 def _init_db(db_path: str) -> None:
     """Create schema on first run. Safe to call on every startup."""
-    import base64 as _b64
     conn = sqlite3.connect(db_path)
     try:
         conn.executescript(DB_SCHEMA)
         conn.commit()
-
-        # Seed sensitive lists if empty (first-run only).
-        # Terms are stored as base64 of the canonical root (lowercase).
-        # The fuzzy matcher handles case/punctuation/spacing variants at runtime.
-        _RACIAL_SLUR_ROOTS = [
-            "nigger", "nigga", "chink", "spic", "spick", "beaner", "wetback",
-            "kike", "gook", "zipperhead", "towelhead", "raghead", "sandnigger",
-            "cracker", "honky", "coon", "jigaboo", "porch monkey",
-            "jungle bunny", "spook", "sambo", "pickaninny", "uncle tom",
-            "oreo", "redskin", "squaw", "injun", "heeb", "hymie", "yid",
-            "slope", "slant", "nip", "flip", "wop", "dago", "guinea",
-            "mick", "paddy", "kraut", "fritz", "jap", "cholo",
-            "gringo", "gabacho", "mulatto", "halfbreed", "half-breed",
-            "blackie", "darkie", "brownie", "chinaman",
-            "coolie", "pikey", "gypsy", "gypo", "fenian", "taig",
-        ]
-        _CHILD_SAFETY_ROOTS = [
-            "child porn",
-            "cp",
-            "csam",
-        ]
-
-        existing_slurs = conn.execute(
-            "SELECT COUNT(*) FROM mod_sensitive_lists WHERE category='racial_slurs'"
-        ).fetchone()[0]
-        if existing_slurs == 0:
-            for root in _RACIAL_SLUR_ROOTS:
-                enc = _b64.b64encode(root.encode()).decode()
-                conn.execute(
-                    "INSERT OR IGNORE INTO mod_sensitive_lists (category, term_b64) VALUES (?,?)",
-                    ("racial_slurs", enc),
-                )
-
-        existing_cs = conn.execute(
-            "SELECT COUNT(*) FROM mod_sensitive_lists WHERE category='child_safety'"
-        ).fetchone()[0]
-        if existing_cs == 0:
-            for root in _CHILD_SAFETY_ROOTS:
-                enc = _b64.b64encode(root.encode()).decode()
-                conn.execute(
-                    "INSERT OR IGNORE INTO mod_sensitive_lists (category, term_b64) VALUES (?,?)",
-                    ("child_safety", enc),
-                )
-
-        conn.commit()
     finally:
         conn.close()
-
-
-def _get_sensitive_list(db_path: str, category: str) -> List[str]:
-    """Return decoded terms for a sensitive category from the DB."""
-    import base64 as _b64
-    rows = _db_all(db_path,
-                   "SELECT term_b64 FROM mod_sensitive_lists WHERE category=? ORDER BY id",
-                   (category,))
-    return [_b64.b64decode(r["term_b64"]).decode() for r in rows]
-
-
-def _add_sensitive_term(db_path: str, category: str, term: str) -> None:
-    import base64 as _b64
-    enc = _b64.b64encode(term.lower().encode()).decode()
-    _db_exec(db_path,
-             "INSERT OR IGNORE INTO mod_sensitive_lists (category, term_b64) VALUES (?,?)",
-             (category, enc))
-
-
-def _remove_sensitive_term(db_path: str, category: str, term: str) -> None:
-    import base64 as _b64
-    enc = _b64.b64encode(term.lower().encode()).decode()
-    _db_exec(db_path,
-             "DELETE FROM mod_sensitive_lists WHERE category=? AND term_b64=?",
-             (category, enc))
 
 
 # ==================== DB CONNECTION HELPERS ====================
@@ -426,15 +316,12 @@ def _db_all(db_path: str, query: str, params: tuple = ()):
 class ModConfig:
     """
     Reads user-configurable values from config/moderation.json.
-    Mutations (add/remove word, add/remove role) write back to the JSON file atomically.
-    Sensitive word lists (racial_slurs, child_safety) are stored base64-encoded in the
-    DB and never appear in the JSON config.
+    Mutations (add/remove role) write back to the JSON file atomically.
     Call reload() to pick up manual edits without restarting.
     """
 
-    def __init__(self, db_path: str = None):
+    def __init__(self):
         self._data: dict = _load_config()
-        self._db: str = db_path or _db_path()
 
     def reload(self) -> None:
         """Re-read config/moderation.json from disk."""
@@ -511,51 +398,6 @@ class ModConfig:
             self._data["elevated_roles"] = roles
             _save_config(self._data)
 
-    # ── Word lists ────────────────────────────────────────────────────────────
-
-    def get_word_list(self, category: str) -> List[str]:
-        return list(self._data.get("word_lists", {}).get(category, []))
-
-    def add_word(self, category: str, term: str) -> None:
-        wl = self._data.setdefault("word_lists", {})
-        terms = wl.setdefault(category, [])
-        if term not in terms:
-            terms.append(term)
-            _save_config(self._data)
-
-    def remove_word(self, category: str, term: str) -> None:
-        wl = self._data.get("word_lists", {})
-        terms = wl.get(category, [])
-        if term in terms:
-            terms.remove(term)
-            _save_config(self._data)
-
-    @property
-    def child_safety(self) -> List[str]:
-        """Returns canonical root terms from DB (base64-decoded). Never from JSON."""
-        return _get_sensitive_list(self._db, "child_safety")
-
-    @property
-    def racial_slurs(self) -> List[str]:
-        """Returns canonical root terms from DB (base64-decoded). Never from JSON."""
-        return _get_sensitive_list(self._db, "racial_slurs")
-
-    def add_sensitive_term(self, category: str, term: str) -> None:
-        """Add a term to a sensitive list in the DB."""
-        _add_sensitive_term(self._db, category, term)
-
-    def remove_sensitive_term(self, category: str, term: str) -> None:
-        """Remove a term from a sensitive list in the DB."""
-        _remove_sensitive_term(self._db, category, term)
-
-    @property
-    def tos_violations(self) -> List[str]:
-        return self.get_word_list("tos_violations")
-
-    @property
-    def banned_words(self) -> List[str]:
-        return self.get_word_list("banned_words")
-
     # ── Rules content ─────────────────────────────────────────────────────────
 
     def get_rules(self) -> Optional[dict]:
@@ -602,94 +444,6 @@ def parse_duration(duration: str) -> tuple:
 
 def get_event_logger(bot):
     return getattr(bot, '_logger_event_logger', None)
-
-def matches_banned_term(term: str, content_lower: str) -> bool:
-    """
-    Exact-ish match for the general banned_words list.
-    URLs are matched as substrings; other terms use whole-word boundary matching
-    and also catch simple possessives/contractions (word's, word').
-    The canonical form in the config need only be the root — e.g. 'embis' will
-    also catch 'Embis', 'embis!', "embis's", 'embiz' (z-swap handled here).
-    """
-    term_lower = term.lower()
-
-    # URL terms: plain substring match
-    if "://" in term_lower or "www." in term_lower:
-        return term_lower in content_lower
-
-    # Strip the content of punctuation that could be used to evade word-boundary
-    # detection (except spaces), then do a word-boundary search.
-    stripped = re.sub(r"[^\w\s]", "", content_lower)
-    pattern  = r'\b' + re.escape(term_lower) + r'\b'
-    if re.search(pattern, stripped):
-        return True
-
-    # Also check original content with word boundaries (catches mid-sentence punctuation)
-    if re.search(pattern, content_lower):
-        return True
-
-    return False
-
-
-def matches_sensitive_term(root: str, content: str) -> bool:
-    """
-    Bypass-resistant matcher for racial slurs and child safety terms.
-    'root' is the canonical lowercase form stored in the DB.
-
-    Handles:
-    - Case variations (Nigger, NIGGER)
-    - Repeated characters used to evade filters (niiiigger, niggger)
-    - Space/punctuation insertion (n-i-g-g-e-r, n i g g e r, n.i.g.g.e.r)
-    - Common letter substitutions (i→1, a→@, e→3, o→0, s→$)
-    - Suffix additions (possessives, plurals, punctuation)
-    - z/s swaps (niggaz)
-    """
-    content_lower = content.lower()
-
-    # 1. Direct whole-word match on stripped content (handles punctuation insertion)
-    stripped_content = re.sub(r"[^\w\s]", "", content_lower)
-    if re.search(r'\b' + re.escape(root) + r'\b', stripped_content):
-        return True
-
-    # 2. Collapse repeated characters in content for each unique char in root,
-    #    then re-test (catches n-i-g-g-g-e-r, niiigger, etc.)
-    collapsed = re.sub(r'(.)\1{2,}', r'\1\1', content_lower)  # 3+ repeats → 2
-    collapsed = re.sub(r'(.)\1+', r'\1', collapsed)            # any repeat → 1
-    stripped_collapsed = re.sub(r"[^\w\s]", "", collapsed)
-    if re.search(r'\b' + re.escape(root) + r'\b', stripped_collapsed):
-        return True
-
-    # 3. Strip ALL non-alpha chars from content and root, then substring-search.
-    #    This catches space-separated (n i g g e r) and hyphenated variants.
-    alpha_content = re.sub(r'[^a-z]', '', content_lower)
-    alpha_root    = re.sub(r'[^a-z]', '', root)
-    if alpha_root and alpha_root in alpha_content:
-        return True
-
-    # 4. Leet-speak substitution table — normalise content then re-test root.
-    leet_map = str.maketrans({
-        '1': 'i', '!': 'i', '|': 'i',
-        '3': 'e',
-        '4': 'a', '@': 'a',
-        '0': 'o',
-        '$': 's', '5': 's',
-        '7': 't',
-        '+': 't',
-        '8': 'b',
-    })
-    deleet = content_lower.translate(leet_map)
-    stripped_deleet = re.sub(r"[^\w\s]", "", deleet)
-    if re.search(r'\b' + re.escape(alpha_root) + r'\b',
-                 re.sub(r'[^a-z\s]', '', stripped_deleet)):
-        return True
-
-    # 5. z ↔ s/r swap (niggaz → niggas → nigger family)
-    z_normalised = re.sub(r'z\b', 's', content_lower)
-    stripped_z   = re.sub(r"[^\w\s]", "", z_normalised)
-    if re.search(r'\b' + re.escape(root) + r'\b', stripped_z):
-        return True
-
-    return False
 
 
 # ==================== UNIFIED CONTEXT ====================
@@ -1130,7 +884,7 @@ class ModerationSystem:
         # Initialise DB schema
         _init_db(self._db)
 
-        self.cfg     = ModConfig(db_path=self._db)
+        self.cfg     = ModConfig()
 
         # Persistent Fernet key — derived from FERNET_KEY env var.
         # If the env var is absent a new random key is generated and a loud
@@ -3150,95 +2904,6 @@ def setup(bot):
             return
 
         await _mod.cache_message(message)
-
-        content_lower = message.content.lower()
-
-        # ── Child safety ──────────────────────────────────────────────────────
-        # "cp" and "child porn" trigger a DM redirecting to CSAM terminology
-        # before auto-banning. All other child safety terms go straight to ban.
-        _CS_DM_TERMS = {"cp", "child porn"}
-        for word in _cfg.child_safety:
-            if matches_sensitive_term(word, message.content):
-                try:
-                    await message.delete()
-                    if word in _CS_DM_TERMS:
-                        try:
-                            dm = discord.Embed(
-                                title="⚠️ Terminology Notice",
-                                description=(
-                                    "Your message was removed because it contained "
-                                    "a term associated with child sexual abuse material.\n\n"
-                                    "Please use the term **CSAM** (Child Sexual Abuse Material) "
-                                    "when discussing this topic. This is the standard term "
-                                    "used by law enforcement and child safety organizations."
-                                ),
-                                color=0xe67e22,
-                                timestamp=datetime.now(timezone.utc),
-                            )
-                            dm.set_footer(text="Further violations will result in a permanent ban.")
-                            await message.author.send(embed=dm)
-                        except discord.Forbidden:
-                            pass
-                    await message.guild.ban(
-                        message.author,
-                        reason=f"Auto-ban: Child safety violation (matched '{word}')")
-                    bot.logger.log(
-                        MODULE_NAME, f"AUTO-BAN: {message.author} child safety", "WARNING")
-                    el = get_event_logger(bot)
-                    if el:
-                        await el.log_autoban(
-                            message.guild, message.author,
-                            "Child safety violation", message.channel)
-                except Exception as e:
-                    bot.logger.error(MODULE_NAME, "Auto-ban failed", e)
-                return
-
-        # ── Racial slurs ──────────────────────────────────────────────────────
-        for word in _cfg.racial_slurs:
-            if matches_sensitive_term(word, message.content):
-                try:
-                    await message.delete()
-                    count = _mod.add_strike(
-                        message.author.id, f"Racial slur: '{word}'")
-                    if count >= 2:
-                        await message.guild.ban(
-                            message.author,
-                            reason="Auto-ban: Repeated racial slurs (2 strikes)")
-                        bot.logger.log(
-                            MODULE_NAME,
-                            f"AUTO-BAN: {message.author} repeated slurs", "WARNING")
-                        el = get_event_logger(bot)
-                        if el:
-                            await el.log_autoban_strike(
-                                message.guild, message.author, count,
-                                "Repeated racial slurs", message.channel)
-                    else:
-                        try:
-                            dm = discord.Embed(
-                                title="⚠️ Warning - Strike 1/2",
-                                description="Your message was deleted for inappropriate language.",
-                                color=0xf39c12)
-                            dm.add_field(
-                                name="Action",
-                                value="Second strike = automatic ban.", inline=False)
-                            await message.author.send(embed=dm)
-                        except Exception:
-                            pass
-                        bot.logger.log(
-                            MODULE_NAME, f"STRIKE 1: {message.author} slur", "WARNING")
-                except Exception as e:
-                    bot.logger.error(MODULE_NAME, "Auto-mod slur handling failed", e)
-                return
-
-        for word in _cfg.banned_words:
-            if matches_banned_term(word, content_lower):
-                try:
-                    await message.delete()
-                    bot.logger.log(
-                        MODULE_NAME, f"Deleted banned word from {message.author}")
-                except Exception as e:
-                    bot.logger.error(MODULE_NAME, "Message deletion failed", e)
-                return
 
     @bot.listen()
     async def on_message_delete(message):

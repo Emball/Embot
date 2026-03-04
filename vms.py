@@ -362,7 +362,11 @@ def _quarantine_file(filepath: str) -> str:
     dst = _broken_dir() / src.name
     try:
         if src.exists():
-            src.rename(dst)
+            if src.exists():
+                try:
+                    src.rename(dst)
+                except (FileExistsError, OSError):
+                    src.unlink(missing_ok=True)  # dst already exists, drop src
             print(f"[{MODULE_NAME}] Quarantined corrupt file → {dst}")
         return str(dst)
     except Exception as exc:
@@ -383,74 +387,77 @@ def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool]:
     """
     Full synchronous processing for one OGG file.
     Returns (transcript, duration_secs, waveform_b64, is_broken).
-
-    is_broken=True means the file has been moved to /broken and the DB
-    record should be marked accordingly.
+    NEVER raises — all exceptions are caught and result in is_broken=True
+    so a worker thread dying can never crash the BulkProcessor or startup task.
     """
-    # ── Waveform and duration first (both tolerate bad files gracefully) ──
-    duration = _get_ogg_duration(filepath)
-    waveform = _generate_waveform(filepath)
-    model    = _load_whisper()
-
-    transcript: Optional[str] = None
-
-    if model is None:
-        return transcript, duration, waveform, False
-
     try:
+        duration = _get_ogg_duration(filepath)
+        waveform = _generate_waveform(filepath)
+        model    = _load_whisper()
+
+        if model is None:
+            return None, duration, waveform, False
+
         import whisper as _whisper
 
-        # Load raw audio — this can succeed even on corrupt files
+        # ── Load audio ──────────────────────────────────────────────────────
         try:
             audio = _whisper.load_audio(filepath)
         except Exception as exc:
-            print(f"[{MODULE_NAME}] Cannot read audio ({filepath}): {exc}")
+            print(f"[{MODULE_NAME}] Cannot read audio ({filepath}): {exc} — quarantining")
             _quarantine_file(filepath)
             return None, 0.0, waveform, True
 
-        # Validate before touching the model
         if not _is_audio_valid(audio):
             print(f"[{MODULE_NAME}] Audio too short/empty ({filepath}) — quarantining")
             _quarantine_file(filepath)
             return None, 0.0, waveform, True
 
-        # Pad/trim to 30-second chunk then compute mel
-        audio = _whisper.pad_or_trim(audio)
+        # ── Mel spectrogram ─────────────────────────────────────────────────
         try:
-            mel = _whisper.log_mel_spectrogram(audio).to(model.device)
-        except (RuntimeError, ValueError) as exc:
-            print(f"[{MODULE_NAME}] Mel spectrogram failed ({filepath}): {exc} — quarantining")
+            audio = _whisper.pad_or_trim(audio)
+            mel   = _whisper.log_mel_spectrogram(audio).to(model.device)
+        except Exception as exc:
+            print(f"[{MODULE_NAME}] Mel failed ({filepath}): {exc} — quarantining")
             _quarantine_file(filepath)
             return None, 0.0, waveform, True
 
-        # Validate mel shape — zero time-steps means corrupt audio
-        if mel.shape[-1] == 0:
-            print(f"[{MODULE_NAME}] Zero-length mel ({filepath}) — quarantining")
-            _quarantine_file(filepath)
-            return None, 0.0, waveform, True
 
-        # Detect language and decode
+        # ── Language detection + decode ──────────────────────────────────────
+        # Both calls run the model on the mel tensor — wrap them together so
+        # any RuntimeError (reshape, tensor shape mismatch, etc.) is caught
+        # regardless of which internal step triggers it.
         try:
             _, probs = model.detect_language(mel)
             options  = _whisper.DecodingOptions(fp16=False)
             result   = _whisper.decode(model, mel, options)
             transcript = (result.text or "").strip() or None
+            return transcript, duration, waveform, False
+
         except (RuntimeError, ValueError) as exc:
             print(f"[{MODULE_NAME}] Decode failed ({filepath}): {exc} — quarantining")
             _quarantine_file(filepath)
             return None, duration, waveform, True
+
         except Exception as exc:
             exc_str = str(exc)
             if "Linear(" in exc_str or "in_features" in exc_str:
                 print(f"[{MODULE_NAME}] Whisper internal error ({filepath}) — quarantining")
-                _quarantine_file(filepath)
-                return None, duration, waveform, True
-            print(f"[{MODULE_NAME}] Transcription error ({filepath}): {exc_str}")
+            else:
+                print(f"[{MODULE_NAME}] Transcription error ({filepath}): {exc_str} — quarantining")
+            _quarantine_file(filepath)
+            return None, duration, waveform, True
 
     except Exception as exc:
-        print(f"[{MODULE_NAME}] Unexpected processing error ({filepath}): {exc}")
+        # Absolute last resort — should never reach here, but guarantees the
+        # worker thread never raises and crashes the executor.
+        print(f"[{MODULE_NAME}] Fatal processing error ({filepath}): {exc} — quarantining")
+        try:
+            _quarantine_file(filepath)
+        except Exception:
+            pass
+        return None, 0.0, "", True
 
-    return transcript, duration, waveform, False
 
 # ==================== DISCORD VOICE MESSAGE API ====================
 

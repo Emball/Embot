@@ -1064,7 +1064,8 @@ class CommunitySystem:
                 f"changed: {', '.join(change_parts) or 'content only'} "
                 f"→ {kwargs.get('version', sub['version'])}"
             )
-        # else: no meaningful changes — skip logging to keep console clean
+        else:
+            self.clog(f"Synced edit for submission {sub['id']} (content updated)")
 
     # ── voting ──
 

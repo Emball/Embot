@@ -1557,16 +1557,57 @@ class VMSManager:
 
     # ---------------------------------------------------------------- Backfill --
 
-    async def _backfill_from_discord(self, resume_after_id: int = None):
+    def _get_backfill_cursor(self) -> Optional[int]:
+        """
+        Return the last Discord message ID successfully scanned during a
+        previous (possibly interrupted) backfill, or None if no cursor exists.
+
+        We piggyback on the existing vms_scheduled_jobs table so no schema
+        migration is needed — works with any existing DB.
+        """
+        row = self._db_one(
+            "SELECT last_run FROM vms_scheduled_jobs WHERE job_name='backfill_cursor'"
+        )
+        if row and row[0]:
+            try:
+                return int(row[0])
+            except (ValueError, TypeError):
+                pass
+        return None
+
+    def _save_backfill_cursor(self, message_id: int):
+        """Persist the highest message ID scanned so far."""
+        self._db_exec(
+            """INSERT INTO vms_scheduled_jobs (job_name, last_run) VALUES ('backfill_cursor', ?)
+               ON CONFLICT(job_name) DO UPDATE SET last_run=excluded.last_run""",
+            (message_id,)
+        )
+
+    def _is_backfill_complete(self) -> bool:
+        """Return True if a previous backfill ran to completion."""
+        row = self._db_one(
+            "SELECT last_run FROM vms_scheduled_jobs WHERE job_name='backfill_complete'"
+        )
+        return bool(row and row[0])
+
+    def _mark_backfill_complete(self):
+        """Record that backfill finished successfully."""
+        self._db_exec(
+            """INSERT INTO vms_scheduled_jobs (job_name, last_run) VALUES ('backfill_complete', ?)
+               ON CONFLICT(job_name) DO UPDATE SET last_run=excluded.last_run""",
+            (int(time.time()),)
+        )
+
+    async def _backfill_from_discord(self):
         """
         Scrape #general for the last BACKFILL_DAYS of voice messages and
         download any that aren't already in the DB.
 
-        Only runs when /vms is completely empty (fresh install / wiped cache).
-        Starts BulkProcessor immediately so transcription begins in parallel
-        with downloading — each file is fed to BulkProcessor as soon as it
-        lands on disk.  Calls done_feeding() when the download loop finishes
-        so the worker knows to drain and exit.
+        On first run: scans from the date cutoff forward.
+        On resume after interruption: picks up from the last saved cursor
+        (highest Discord message ID previously scanned) so we never re-walk
+        the already-processed portion of history.  Works retroactively with
+        any existing DB — no data migration required.
         """
         self._backfill_running = True
 
@@ -1585,18 +1626,22 @@ class VMSManager:
             return
 
         from datetime import timezone, timedelta
-        cutoff_dt = discord.utils.utcnow().replace(tzinfo=timezone.utc) - timedelta(days=BACKFILL_DAYS)
 
-        if resume_after_id:
-            after_obj = discord.Object(id=resume_after_id)
-            self.bot.logger.log(MODULE_NAME,
-                f"Backfill: resuming after message {resume_after_id} — "
-                f"skipping already-known messages via known_ids set")
+        # Resume from cursor if a previous run was interrupted, otherwise use
+        # the date cutoff.  The cursor is the last Discord snowflake we saw, so
+        # passing it as `after=` skips everything already scanned.
+        resume_cursor = self._get_backfill_cursor()
+        if resume_cursor:
+            after_param  = discord.Object(id=resume_cursor)
+            resume_label = f"message ID {resume_cursor} (resume after interruption)"
         else:
-            after_obj = cutoff_dt
-            self.bot.logger.log(MODULE_NAME,
-                f"Backfill: scanning #{general_channel.name} in '{general_channel.guild.name}' "
-                f"back to {cutoff_dt.strftime('%Y-%m-%d')} — BulkProcessor will transcribe concurrently…")
+            cutoff_dt    = discord.utils.utcnow().replace(tzinfo=timezone.utc) - timedelta(days=BACKFILL_DAYS)
+            after_param  = cutoff_dt
+            resume_label = f"date {cutoff_dt.strftime('%Y-%m-%d')} (fresh start)"
+
+        self.bot.logger.log(MODULE_NAME,
+            f"Backfill: scanning #{general_channel.name} in '{general_channel.guild.name}' "
+            f"after {resume_label} — BulkProcessor will transcribe concurrently…")
 
         # Load Whisper fully into memory before we start downloading so the
         # BulkProcessor worker isn't sitting idle waiting on model load while
@@ -1639,13 +1684,15 @@ class VMSManager:
         BACKFILL_DL_SLEEP    = 0.5
 
         try:
-            async for message in general_channel.history(limit=None, after=after_obj, oldest_first=True):
+            async for message in general_channel.history(limit=None, after=after_param, oldest_first=True):
                 msgs_seen += 1
 
                 if msgs_seen % BACKFILL_SLEEP_EVERY == 0:
                     self.bot.logger.log(MODULE_NAME,
                         f"Backfill: scanned {msgs_seen} messages "
                         f"({downloaded} downloaded) — pausing {BACKFILL_SLEEP_SECS}s…")
+                    # Checkpoint: save this message's ID so a restart resumes here
+                    self._save_backfill_cursor(message.id)
                     await asyncio.sleep(BACKFILL_SLEEP_SECS)
 
                 for att in message.attachments:
@@ -1722,6 +1769,12 @@ class VMSManager:
         except Exception as exc:
             self.bot.logger.log(MODULE_NAME,
                 f"Backfill: history scrape error — {exc}", "ERROR")
+        else:
+            # Loop completed without exception — mark done and clear cursor
+            self._mark_backfill_complete()
+            self._db_exec(
+                "DELETE FROM vms_scheduled_jobs WHERE job_name='backfill_cursor'"
+            )
         finally:
             self._backfill_running = False
             # Signal BulkProcessor that backfill is done producing.
@@ -1740,27 +1793,45 @@ class VMSManager:
         """
         Full startup sequence:
           1. Queue worker (live VMs)
-          2a. If /vms is empty — backfill from Discord AND scan concurrently,
-              both feeding a single BulkProcessor that transcribes as files arrive.
-          2b. Otherwise — scan only, feed BulkProcessor as normal.
+          2a. Cache empty OR backfill was previously interrupted (cursor exists
+              and backfill_complete is not set) — run/resume backfill AND scan
+              concurrently, both feeding a single BulkProcessor.
+          2b. Backfill already completed — scan only.
           3. Archive check.
         """
         await self._start_queue_worker()
         await asyncio.sleep(0.5)
 
-        has_files    = any(self.vms_dir.glob("*.ogg"))
-        last_msg_row = self._db_one(
-            "SELECT MAX(CAST(discord_message_id AS INTEGER)) FROM vms WHERE discord_message_id IS NOT NULL"
+        needs_backfill = (
+            not any(self.vms_dir.glob("*.ogg"))   # fresh install
+            or not self._is_backfill_complete()    # backfill never finished (interrupted or first run)
         )
-        last_msg_id = last_msg_row[0] if last_msg_row and last_msg_row[0] else None
 
-        if not has_files or last_msg_id:
-            if last_msg_id and has_files:
-                self.bot.logger.log(MODULE_NAME,
-                    f"Resuming backfill from last known message ID {last_msg_id}…")
-            else:
+        if needs_backfill:
+            if not any(self.vms_dir.glob("*.ogg")):
                 self.bot.logger.log(MODULE_NAME,
                     "Cache is empty — starting Discord backfill and scan concurrently…")
+            else:
+                cursor = self._get_backfill_cursor()
+                if cursor:
+                    self.bot.logger.log(MODULE_NAME,
+                        f"Backfill was interrupted at message ID {cursor} — resuming…")
+                else:
+                    # Old interrupted DB: no cursor saved yet — derive resume point
+                    # from the highest discord_message_id already in the DB.
+                    row = self._db_one(
+                        "SELECT MAX(CAST(discord_message_id AS INTEGER)) FROM vms "
+                        "WHERE discord_message_id IS NOT NULL"
+                    )
+                    if row and row[0]:
+                        self._save_backfill_cursor(int(row[0]))
+                        self.bot.logger.log(MODULE_NAME,
+                            f"Backfill resuming from last known message ID {row[0]} "
+                            f"(derived from existing DB — no cursor was previously saved)")
+                    else:
+                        self.bot.logger.log(MODULE_NAME,
+                            "Backfill incomplete and no cursor found — restarting from date cutoff")
+
             self._bulk_stop.clear()
             self._bulk_proc = BulkProcessor(
                 db_path=self.db_path,
@@ -1770,7 +1841,7 @@ class VMSManager:
             )
             self._bulk_proc.start()
             await asyncio.gather(
-                self._backfill_from_discord(resume_after_id=last_msg_id),
+                self._backfill_from_discord(),
                 self.process_unprocessed(),
             )
         else:

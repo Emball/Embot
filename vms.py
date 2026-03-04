@@ -38,7 +38,7 @@ import shutil
 import sqlite3
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Tuple
@@ -425,11 +425,10 @@ def _quarantine_file(filepath: str) -> str:
     dst = _broken_dir() / src.name
     try:
         if src.exists():
-            if src.exists():
-                try:
-                    src.rename(dst)
-                except (FileExistsError, OSError):
-                    src.unlink(missing_ok=True)  # dst already exists, drop src
+            try:
+                src.rename(dst)
+            except (FileExistsError, OSError):
+                src.unlink(missing_ok=True)  # dst already exists, drop src
             print(f"[{MODULE_NAME}] Quarantined corrupt file → {dst}")
         return str(dst)
     except Exception as exc:
@@ -446,10 +445,12 @@ def _is_audio_valid(audio) -> bool:
     return True
 
 
-def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool]:
+def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool, str]:
     """
     Full synchronous processing for one OGG file.
-    Returns (transcript, duration_secs, waveform_b64, is_broken).
+    Returns (transcript, duration_secs, waveform_b64, is_broken, actual_filepath).
+    actual_filepath is the file's current path on disk — equals filepath normally,
+    or the quarantine destination when is_broken=True.
     NEVER raises — all exceptions are caught and result in is_broken=True
     so a worker thread dying can never crash the BulkProcessor or startup task.
     """
@@ -459,7 +460,7 @@ def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool]:
         model    = _load_whisper()
 
         if model is None:
-            return None, duration, waveform, False
+            return None, duration, waveform, False, filepath
 
         import whisper as _whisper
 
@@ -468,13 +469,13 @@ def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool]:
             audio = _whisper.load_audio(filepath)
         except Exception as exc:
             print(f"[{MODULE_NAME}] Cannot read audio ({filepath}): {exc} — quarantining")
-            _quarantine_file(filepath)
-            return None, 0.0, waveform, True
+            broken_path = _quarantine_file(filepath)
+            return None, 0.0, waveform, True, broken_path
 
         if not _is_audio_valid(audio):
             print(f"[{MODULE_NAME}] Audio too short/empty ({filepath}) — quarantining")
-            _quarantine_file(filepath)
-            return None, 0.0, waveform, True
+            broken_path = _quarantine_file(filepath)
+            return None, 0.0, waveform, True, broken_path
 
         # ── Mel spectrogram ─────────────────────────────────────────────────
         try:
@@ -482,8 +483,8 @@ def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool]:
             mel   = _whisper.log_mel_spectrogram(audio).to(model.device)
         except Exception as exc:
             print(f"[{MODULE_NAME}] Mel failed ({filepath}): {exc} — quarantining")
-            _quarantine_file(filepath)
-            return None, 0.0, waveform, True
+            broken_path = _quarantine_file(filepath)
+            return None, 0.0, waveform, True, broken_path
 
 
         # ── Language detection + decode ──────────────────────────────────────
@@ -495,12 +496,12 @@ def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool]:
             options  = _whisper.DecodingOptions(fp16=False)
             result   = _whisper.decode(model, mel, options)
             transcript = (result.text or "").strip() or None
-            return transcript, duration, waveform, False
+            return transcript, duration, waveform, False, filepath
 
         except (RuntimeError, ValueError) as exc:
             print(f"[{MODULE_NAME}] Decode failed ({filepath}): {exc} — quarantining")
-            _quarantine_file(filepath)
-            return None, duration, waveform, True
+            broken_path = _quarantine_file(filepath)
+            return None, duration, waveform, True, broken_path
 
         except Exception as exc:
             exc_str = str(exc)
@@ -508,18 +509,19 @@ def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool]:
                 print(f"[{MODULE_NAME}] Whisper internal error ({filepath}) — quarantining")
             else:
                 print(f"[{MODULE_NAME}] Transcription error ({filepath}): {exc_str} — quarantining")
-            _quarantine_file(filepath)
-            return None, duration, waveform, True
+            broken_path = _quarantine_file(filepath)
+            return None, duration, waveform, True, broken_path
 
     except Exception as exc:
         # Absolute last resort — should never reach here, but guarantees the
         # worker thread never raises and crashes the executor.
         print(f"[{MODULE_NAME}] Fatal processing error ({filepath}): {exc} — quarantining")
+        broken_path = filepath
         try:
-            _quarantine_file(filepath)
+            broken_path = _quarantine_file(filepath)
         except Exception:
             pass
-        return None, 0.0, "", True
+        return None, 0.0, "", True, broken_path
 
 
 # ==================== DISCORD VOICE MESSAGE API ====================
@@ -631,11 +633,10 @@ class BulkProcessor:
     • Call feed(vm_id, filepath) from any thread/coroutine to add work at any time.
     • Call done_feeding() when ALL producers are finished; the worker drains
       whatever remains and exits cleanly.
-    • Uses a single ThreadPoolExecutor worker — Whisper is compute-bound and
-      not thread-safe; one worker is correct regardless of GPU/CPU.
-    • Results are committed to SQLite in batches (BULK_BATCH_SIZE) so a crash
-      mid-run doesn't lose all progress — already-committed rows are skipped on
-      the next startup.
+    • Runs Whisper synchronously in the worker thread — no ThreadPoolExecutor.
+      Whisper is not thread-safe; sequential processing is the correct design.
+    • Results are committed to SQLite after every single file so a crash loses
+      at most the one in-progress transcription, never a whole batch.
     • A threading.Event allows the main bot to signal a graceful shutdown.
     """
 
@@ -655,6 +656,14 @@ class BulkProcessor:
         pairs from the startup scan.  Call done_feeding() once all producers
         are done adding work.
         """
+        # Drain any stale sentinels left from a previous run so a restarted
+        # processor isn't killed immediately by a leftover _BULK_SENTINEL.
+        while not self._work_q.empty():
+            try:
+                self._work_q.get_nowait()
+            except queue.Empty:
+                break
+
         if initial_files:
             for item in initial_files:
                 self._work_q.put(item)
@@ -691,101 +700,68 @@ class BulkProcessor:
     # ── Internal ────────────────────────────────────────────────────────────
 
     def _run(self):
-        n_workers    = BULK_GPU_WORKERS if _CUDA_AVAILABLE else BULK_CPU_WORKERS
-        done         = 0
-        errors       = 0
-        batch_buf    = []   # [(vm_id, transcript, duration, waveform, filepath)]
-        batch_broken = []   # [(broken_path, vm_id)]
+        """
+        Simple sequential worker — correct for Whisper which is not thread-safe.
 
-        self.logger.log(MODULE_NAME, "BulkProcessor worker started — draining queue…")
+        Loop:
+          1. Block on the queue (up to 0.5s) waiting for the next file.
+          2. If the queue is temporarily empty (backfill still downloading),
+             keep waiting — never spin-loop.
+          3. Process the file synchronously in this thread (Whisper runs here).
+          4. Commit the single result to the DB immediately — every transcription
+             is persisted before the next one starts, so a crash loses at most
+             the one in-progress file, never a whole batch.
+          5. Repeat until sentinel or stop_event.
+        """
+        done   = 0
+        errors = 0
+
+        self.logger.log(MODULE_NAME, "BulkProcessor worker started — waiting for files…")
 
         try:
-            with ThreadPoolExecutor(max_workers=n_workers,
-                                    thread_name_prefix="vms_bulk") as pool:
-                pending: dict = {}   # future → (vm_id, filepath)
-                alive = True         # False once sentinel received
+            while not self.stop_event.is_set():
+                # Block waiting for the next item; use a timeout so we can
+                # respond to stop_event even if the queue stays empty.
+                try:
+                    item = self._work_q.get(timeout=0.5)
+                except queue.Empty:
+                    continue   # queue temporarily dry — backfill still downloading
 
-                def _try_submit():
-                    """
-                    Pull one item (blocking with timeout so the harvest loop
-                    stays responsive), submit it, return False on sentinel/stop.
-                    Returns None on timeout (queue temporarily empty — keep waiting).
-                    """
-                    try:
-                        item = self._work_q.get(timeout=0.1)
-                    except queue.Empty:
-                        return None   # nothing yet — caller should keep looping
-                    if item is _BULK_SENTINEL or self.stop_event.is_set():
-                        return False
-                    vm_id, fp = item
-                    if Path(fp).exists():
-                        fut = pool.submit(_process_file_sync, fp)
-                        pending[fut] = (vm_id, fp)
-                    else:
-                        self.logger.log(MODULE_NAME,
-                            f"BulkProcessor: file missing, skipping VM #{vm_id}", "WARNING")
-                    return True
+                if item is _BULK_SENTINEL:
+                    break   # producer signalled done
 
-                # Prime the executor — wait until we actually get the first item
-                # (queue may be empty briefly at startup before backfill downloads anything)
-                for _ in range(n_workers):
-                    result = _try_submit()
-                    while result is None:
-                        result = _try_submit()
-                    if result is False:
-                        alive = False
-                        break
+                if self.stop_event.is_set():
+                    break
 
-                while alive or pending:
-                    if self.stop_event.is_set():
-                        self.logger.log(MODULE_NAME,
-                            "BulkProcessor: stop requested — exiting early")
-                        pool.shutdown(wait=False, cancel_futures=True)
-                        break
+                vm_id, fp = item
 
-                    # Harvest completed futures
-                    completed = [f for f in list(pending) if f.done()]
-                    for future in completed:
-                        vm_id, fp = pending.pop(future)
-                        try:
-                            transcript, duration, waveform, is_broken = future.result()
-                            if is_broken:
-                                broken_path = str(_broken_dir() / Path(fp).name)
-                                batch_broken.append((broken_path, vm_id))
-                            else:
-                                batch_buf.append((vm_id, transcript or "", duration, waveform, fp))
-                            done += 1
-                        except Exception as exc:
-                            self.logger.log(MODULE_NAME,
-                                f"BulkProcessor: error on VM #{vm_id}: {exc}", "WARNING")
-                            errors += 1
-                            done   += 1
+                if not Path(fp).exists():
+                    self.logger.log(MODULE_NAME,
+                        f"BulkProcessor: file missing, skipping VM #{vm_id}", "WARNING")
+                    done += 1
+                    continue
 
-                        # Commit if batch is full
-                        if len(batch_buf) >= BULK_BATCH_SIZE or len(batch_broken) >= BULK_BATCH_SIZE:
-                            self._commit_batch(batch_buf)
-                            self._commit_broken(batch_broken)
-                            batch_buf    = []
-                            batch_broken = []
-                            self.logger.log(MODULE_NAME,
-                                f"BulkProcessor: {done} processed ({errors} errors) — batch committed")
+                # ── Process (blocking — Whisper runs here) ──────────────────
+                try:
+                    transcript, duration, waveform, is_broken, actual_fp = \
+                        _process_file_sync(fp)
+                except Exception as exc:
+                    self.logger.log(MODULE_NAME,
+                        f"BulkProcessor: unexpected error on VM #{vm_id}: {exc}", "WARNING")
+                    errors += 1
+                    done   += 1
+                    continue
 
-                        # Refill freed executor slot.
-                        # None = queue temporarily empty (backfill still downloading) —
-                        # leave alive=True, slot stays open, will fill next iteration.
-                        if alive:
-                            result = _try_submit()
-                            if result is False:
-                                alive = False
+                # ── Commit immediately — one row per transcription ───────────
+                if is_broken:
+                    self._commit_broken([(actual_fp, vm_id)])
+                else:
+                    self._commit_batch([(vm_id, transcript or "", duration, waveform, actual_fp)])
 
-                    # The 0.1s timeout in _try_submit already provides yielding
-                    # when the queue is empty; no extra sleep needed
-
-            # Final commit for any remainder
-            if batch_buf:
-                self._commit_batch(batch_buf)
-            if batch_broken:
-                self._commit_broken(batch_broken)
+                done += 1
+                if done % BULK_BATCH_SIZE == 0:
+                    self.logger.log(MODULE_NAME,
+                        f"BulkProcessor: {done} processed ({errors} errors)")
 
         except Exception as exc:
             self.logger.log(MODULE_NAME,
@@ -891,8 +867,9 @@ class VMSManager:
         self.archive_dir = _archive_dir()
         self._token: str = os.getenv("DISCORD_BOT_TOKEN", "")
         self._session: Optional[aiohttp.ClientSession] = None
-        # Executor for live (single-file) transcriptions
-        self._executor      = ThreadPoolExecutor(max_workers=2,
+        # Executor for live (single-file) transcriptions.
+        # Whisper is NOT thread-safe — one worker is correct regardless of CPU count.
+        self._executor      = ThreadPoolExecutor(max_workers=1,
                                                  thread_name_prefix="vms_live")
         # Separate executor for the startup scan so it never queues behind
         # live transcription work and cannot block the event loop
@@ -964,20 +941,19 @@ class VMSManager:
         """
         while True:
             try:
-                vm_id, filepath, _unused, reply_to = await self.queue.get()
+                vm_id, filepath, reply_to = await self.queue.get()
                 self.bot.logger.log(MODULE_NAME,
                     f"Transcribing VM #{vm_id}: {Path(filepath).name}")
                 try:
-                    transcript, duration, waveform, is_broken = await asyncio.get_event_loop().run_in_executor(
+                    transcript, duration, waveform, is_broken, actual_fp = await asyncio.get_running_loop().run_in_executor(
                         self._executor, _process_file_sync, filepath
                     )
 
                     if is_broken:
-                        # File has been moved to /broken — mark DB row accordingly
-                        broken_path = str(_broken_dir() / Path(filepath).name)
+                        # actual_fp is the quarantine destination returned by _process_file_sync
                         self._db_exec(
                             "UPDATE vms SET processed=4, filepath=? WHERE id=?",
-                            (broken_path, vm_id)
+                            (actual_fp, vm_id)
                         )
                         self.bot.logger.log(MODULE_NAME,
                             f"VM #{vm_id} marked broken and quarantined")
@@ -992,8 +968,8 @@ class VMSManager:
 
                     # File is already canonically named (save_voice_message names
                     # it correctly upfront). Just use the current path as-is.
-                    canon_fp   = filepath
-                    canon_name = Path(filepath).name
+                    canon_fp   = actual_fp
+                    canon_name = Path(actual_fp).name
 
                     in_archive = str(Path(canon_fp).parent) == str(self.archive_dir)
                     new_state  = 2 if in_archive else 1
@@ -1038,7 +1014,7 @@ class VMSManager:
     async def enqueue(self, vm_id: int, filepath: str,
                       reply_to: Optional[discord.Message] = None):
         """Add a live voice message to the transcription queue."""
-        await self.queue.put((vm_id, filepath, None, reply_to))
+        await self.queue.put((vm_id, filepath, reply_to))
         self.bot.logger.log(MODULE_NAME, f"VM #{vm_id} queued for transcription")
 
     # ------------------------------------------------------- Save Voice Msg --
@@ -1051,7 +1027,7 @@ class VMSManager:
 
         Naming flow:
           1. Pre-insert a placeholder row to claim the auto-assigned DB id
-          2. Derive the canonical filename: vm-{id}.ogg
+          2. Derive the canonical filename (vm_{id}.ogg or rich format)
           3. Write bytes directly to that path — no temp file, no rename
           4. UPDATE the row with the real filepath, duration, and metadata
 
@@ -1086,7 +1062,7 @@ class VMSManager:
             canon_path.write_bytes(raw)
 
             # ── Step 4: Get duration, then finalise the DB row ────────────
-            duration = await asyncio.get_event_loop().run_in_executor(
+            duration = await asyncio.get_running_loop().run_in_executor(
                 self._executor, _get_ogg_duration, str(canon_path)
             )
             self._db_exec(
@@ -1108,11 +1084,11 @@ class VMSManager:
         """
         Synchronous worker — safe to run in a thread executor.
 
-        Phase 1: Conform already-processed files to vm-{id}.ogg, batching
+        Phase 1: Conform already-processed files to canonical vm_{id}.ogg (or rich) format, batching
                  DB updates (SCAN_BATCH_SIZE rows per commit).
         Phase 2: Register untracked .ogg files from vms/, archive/, broken/.
                  Each file is inserted one at a time to obtain its auto-assigned
-                 DB id, immediately renamed to vm-{id}.ogg on disk, and the row
+                 DB id, immediately renamed to canonical format on disk, and the row
                  updated — so every registered file is canonical from birth and
                  Phase 3 collision problems can never occur.
         Phase 2b: Reset archived-but-untranscribed rows back to pending.
@@ -1127,14 +1103,14 @@ class VMSManager:
 
         # ── Phase 1: Conform processed/archived/broken filenames ─────────────
         # Build a canonical-name → id map first so we can detect collisions
-        # (two rows claiming the same vm-{id}.ogg) before touching the DB.
+        # (two rows claiming the same canonical filename) before touching the DB.
         # Collisions happen when duplicate registrations exist from old runs.
         existing_canonical = {
             r[0]: r[1]   # filename → id
             for r in self._db_all("SELECT filename, id FROM vms")
         }
 
-        # Non-canonical = old vm-{id}.ogg format (dash, not underscore).
+        # Non-canonical = old vm-{id}.ogg format (dash separator, not underscore).
         # New format is vm_{username}_{msgid}_{date}.ogg or vm_{id}.ogg fallback —
         # both start with "vm_". Only files still in the old dash format need conforming.
         non_canonical = self._db_all(
@@ -1147,22 +1123,25 @@ class VMSManager:
         conn = self._conn()
         try:
             for vm_id, fp, old_name in non_canonical:
-                # Try to pull metadata from the DB row to build a rich name;
-                # fall back to vm_{id}.ogg if metadata is missing.
+                # Fetch metadata from the DB row to build a rich canonical name.
                 row = conn.execute(
                     "SELECT discord_message_id, created_at FROM vms WHERE id=?", (vm_id,)
                 ).fetchone()
                 msg_id   = row[0] if row else None
                 ts       = row[1] if row else None
-                # Username not stored separately — leave as fallback for old rows
-                canon_name = _vm_canonical_name(vm_id, None, msg_id, ts)
+                # Recover username from the existing filename if it's already in
+                # rich format (vm_{username}_{msgid}_{date}.ogg); None for old
+                # dash-format files, which fall back to vm_{id}.ogg.
+                parsed   = _parse_vm_filename(old_name)
+                username = parsed.get("username")
+                canon_name = _vm_canonical_name(vm_id, username, msg_id, ts)
 
                 if canon_name in existing_canonical and existing_canonical[canon_name] != vm_id:
                     conn.execute("DELETE FROM vms WHERE id=?", (vm_id,))
                     dupes_removed += 1
                     continue
                 try:
-                    new_path = _rename_to_canonical(Path(fp), vm_id, None, msg_id, ts)
+                    new_path = _rename_to_canonical(Path(fp), vm_id, username, msg_id, ts)
                     conn.execute(
                         "UPDATE vms SET filename=?, filepath=? WHERE id=?",
                         (new_path.name, str(new_path), vm_id)
@@ -1182,7 +1161,7 @@ class VMSManager:
 
         # ── Phase 2: Register untracked files ────────────────────────────────
         # Insert one row at a time so we get the auto-assigned id immediately,
-        # rename the file to vm-{id}.ogg on disk, then update the row.
+        # rename the file to canonical format on disk, then update the row.
         # This means every registered file is canonical from the moment it's
         # written — no Phase 3 rename pass needed, no collision logic required.
         existing_paths = {r[0] for r in self._db_all("SELECT filepath FROM vms")}
@@ -1211,12 +1190,13 @@ class VMSManager:
                     )
                     vm_id = cur.lastrowid
 
-                    # Rename on disk to canonical immediately
+                    # Rename on disk to canonical immediately (vm_{id}.ogg fallback
+                    # or vm_{username}_{msgid}_{date}.ogg if metadata is available)
                     try:
                         new_path = _rename_to_canonical(ogg, vm_id)
                     except Exception as exc:
                         print(f"[{MODULE_NAME}] Rename failed during registration "
-                              f"({ogg.name} → vm-{vm_id}.ogg): {exc} — keeping original name")
+                              f"({ogg.name} → canonical): {exc} — keeping original name")
                         new_path = ogg
 
                     canon_name = new_path.name
@@ -1304,7 +1284,7 @@ class VMSManager:
         self.bot.logger.log(MODULE_NAME,
             "Startup scan: conforming names and registering files in all dirs…")
 
-        valid = await asyncio.get_event_loop().run_in_executor(
+        valid = await asyncio.get_running_loop().run_in_executor(
             self._scan_executor, self._scan_and_conform
         )
 
@@ -1318,7 +1298,8 @@ class VMSManager:
         self.bot.logger.log(MODULE_NAME,
             f"Scan found {len(valid)} pending VM(s) — feeding BulkProcessor")
 
-        # Start BulkProcessor if backfill didn't already start it
+        # Start BulkProcessor only if it isn't already running (startup() starts
+        # it when doing a concurrent backfill+scan; this covers the scan-only path).
         if self._bulk_proc is None or not self._bulk_proc.is_running():
             self._bulk_stop.clear()
             self._bulk_proc = BulkProcessor(
@@ -1614,7 +1595,7 @@ class VMSManager:
         # BulkProcessor worker isn't sitting idle waiting on model load while
         # files are already piling up in the queue.
         self.bot.logger.log(MODULE_NAME, "Backfill: pre-loading Whisper model…")
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         model = await loop.run_in_executor(self._executor, _load_whisper)
         if model is None:
             self.bot.logger.log(MODULE_NAME,
@@ -1623,15 +1604,17 @@ class VMSManager:
         else:
             self.bot.logger.log(MODULE_NAME, "Backfill: Whisper ready")
 
-        # Start BulkProcessor now so it's ready to receive files immediately
-        self._bulk_stop.clear()
-        self._bulk_proc = BulkProcessor(
-            db_path=self.db_path,
-            vms_dir=self.vms_dir,
-            logger=self.bot.logger,
-            stop_event=self._bulk_stop,
-        )
-        self._bulk_proc.start()
+        # Start BulkProcessor now so it's ready to receive files immediately.
+        # Skip if startup() already created it (concurrent backfill+scan path).
+        if self._bulk_proc is None or not self._bulk_proc.is_running():
+            self._bulk_stop.clear()
+            self._bulk_proc = BulkProcessor(
+                db_path=self.db_path,
+                vms_dir=self.vms_dir,
+                logger=self.bot.logger,
+                stop_event=self._bulk_stop,
+            )
+            self._bulk_proc.start()
 
         # Build set of already-known message IDs so we skip them fast
         known_ids = {
@@ -1699,8 +1682,11 @@ class VMSManager:
                         raw        = await att.read()
                         canon_path.write_bytes(raw)
 
-                        # Get duration and finalise row
-                        duration = _get_ogg_duration(str(canon_path))
+                        # Get duration (offloaded — mutagen is blocking file I/O)
+                        # and finalise the DB row before feeding to BulkProcessor.
+                        duration = await asyncio.get_running_loop().run_in_executor(
+                            None, _get_ogg_duration, str(canon_path)
+                        )
                         self._db_exec(
                             "UPDATE vms SET filename=?, filepath=?, duration_secs=? WHERE id=?",
                             (canon_name, str(canon_path), duration, vm_id)
@@ -1758,6 +1744,16 @@ class VMSManager:
         if not any(self.vms_dir.glob("*.ogg")):
             self.bot.logger.log(MODULE_NAME,
                 "Cache is empty — starting Discord backfill and scan concurrently…")
+            # Start BulkProcessor once here, before both producers, so neither
+            # branch can race to create it simultaneously inside asyncio.gather.
+            self._bulk_stop.clear()
+            self._bulk_proc = BulkProcessor(
+                db_path=self.db_path,
+                vms_dir=self.vms_dir,
+                logger=self.bot.logger,
+                stop_event=self._bulk_stop,
+            )
+            self._bulk_proc.start()
             # Run both concurrently — backfill downloads while scan conforms
             # any pre-existing DB rows; both feed the same BulkProcessor.
             await asyncio.gather(

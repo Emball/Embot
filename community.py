@@ -657,6 +657,11 @@ class CommunitySystem:
         if not has_file and not has_link:
             return "Your submission must include at least one **attached file** or **link**."
 
+        # Artwork submissions do not require a title or description — the image speaks for itself.
+        is_artwork = message.channel.name == ARTWORK_CHANNEL_NAME
+        if is_artwork:
+            return None
+
         title = _extract_title(content)
         if not title or len(title.strip()) < MIN_DESCRIPTION_LENGTH:
             return (

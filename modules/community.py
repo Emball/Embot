@@ -584,7 +584,8 @@ class CommunityDB:
 class CommunitySystem:
     def __init__(self, bot):
         self.bot = bot
-        db_path = Path(__file__).parent / "data" / "community.db"
+        db_path = Path(__file__).parent.parent / "db" / "community.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         db_path.parent.mkdir(exist_ok=True)
         self.db = CommunityDB(db_path)
         self._submission_channel_ids: set[int] = set()
@@ -1340,8 +1341,7 @@ class CommunitySystem:
 # ─────────────────────────── SETUP ──────────────────────────────
 
 def setup(bot):
-    data_dir = Path(__file__).parent / "data"
-    data_dir.mkdir(exist_ok=True)
+    # (db directory is created by db_path reference above)
 
     cs = CommunitySystem(bot)
     bot._community_system = cs

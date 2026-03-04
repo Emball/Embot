@@ -9,7 +9,7 @@ import discord
 from discord.ext import commands
 from pathlib import Path
 from datetime import datetime, timezone
-import json
+import sqlite3
 import asyncio
 
 MODULE_NAME = "STARBOARD"
@@ -39,32 +39,90 @@ CONFIG = {
 #  Nothing below this line needs to be changed
 # ══════════════════════════════════════════════════════════════════════════════
 
-_data_dir = Path(__file__).parent / "data"
-_data_dir.mkdir(exist_ok=True)
-_db_path = _data_dir / "starboard_cache.json"
+def _script_dir() -> Path:
+    return Path(__file__).parent.parent.absolute()  # modules/ → Embot/
 
-# ── Persistent cache schema ───────────────────────────────────────────────
-#
-# {
-#   "entries": {
-#     "<source_msg_id>": {
-#       "starboard_msg_id": str,       # ID of the posted starboard message
-#       "channel_id":       str,       # source channel ID
-#       "author_id":        str,       # source message author ID
-#       "author_name":      str,       # display name at time of first star
-#       "peak_stars":       int,       # highest star count ever reached
-#       "current_stars":    int,       # last known star count
-#       "first_starred_at": str,       # ISO timestamp when first posted
-#       "last_updated_at":  str,       # ISO timestamp of last edit
-#       "content_preview":  str,       # first 100 chars of message content
-#     }
-#   }
-# }
+def _db_path() -> Path:
+    return _script_dir() / "db" / "starboard.db"
 
-_cache: dict = {"entries": {}}
+# ── SQLite schema ─────────────────────────────────────────────────────────
+
+DB_SCHEMA = """
+CREATE TABLE IF NOT EXISTS starboard_entries (
+    source_msg_id     TEXT PRIMARY KEY,
+    starboard_msg_id  TEXT NOT NULL,
+    channel_id        TEXT NOT NULL,
+    author_id         TEXT NOT NULL,
+    author_name       TEXT NOT NULL,
+    peak_stars        INTEGER NOT NULL DEFAULT 0,
+    current_stars     INTEGER NOT NULL DEFAULT 0,
+    first_starred_at  TEXT NOT NULL,
+    last_updated_at   TEXT NOT NULL,
+    content_preview   TEXT NOT NULL DEFAULT ''
+);
+"""
+
+def _get_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(str(_db_path()))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.executescript(DB_SCHEMA)
+    conn.commit()
+    return conn
+
+
+def _init_db() -> None:
+    """Initialise DB (create tables, migrate legacy JSON if present)."""
+    _db_path().parent.mkdir(parents=True, exist_ok=True)
+    conn = _get_conn()
+    conn.close()
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# ── DB helpers ────────────────────────────────────────────────────────────
+
+def _get_entry(msg_key: str) -> dict | None:
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM starboard_entries WHERE source_msg_id = ?", (msg_key,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def _upsert_entry(msg_key: str, data: dict) -> None:
+    with _get_conn() as conn:
+        conn.execute("""
+            INSERT INTO starboard_entries
+              (source_msg_id, starboard_msg_id, channel_id, author_id, author_name,
+               peak_stars, current_stars, first_starred_at, last_updated_at, content_preview)
+            VALUES
+              (:source_msg_id, :starboard_msg_id, :channel_id, :author_id, :author_name,
+               :peak_stars, :current_stars, :first_starred_at, :last_updated_at, :content_preview)
+            ON CONFLICT(source_msg_id) DO UPDATE SET
+              starboard_msg_id  = excluded.starboard_msg_id,
+              peak_stars        = excluded.peak_stars,
+              current_stars     = excluded.current_stars,
+              last_updated_at   = excluded.last_updated_at,
+              content_preview   = excluded.content_preview
+        """, {**data, "source_msg_id": msg_key})
+        conn.commit()
+
+
+def _delete_entry(msg_key: str) -> None:
+    with _get_conn() as conn:
+        conn.execute("DELETE FROM starboard_entries WHERE source_msg_id = ?", (msg_key,))
+        conn.commit()
+
+
+def _entry_count() -> int:
+    with _get_conn() as conn:
+        return conn.execute("SELECT COUNT(*) FROM starboard_entries").fetchone()[0]
+
 
 # Per-message-id asyncio locks so unrelated messages never block each other.
-# A single global lock would cause every reaction to queue behind every other.
 _msg_locks: dict[str, asyncio.Lock] = {}
 
 
@@ -72,36 +130,6 @@ def _get_msg_lock(msg_id: str) -> asyncio.Lock:
     if msg_id not in _msg_locks:
         _msg_locks[msg_id] = asyncio.Lock()
     return _msg_locks[msg_id]
-
-
-# ── Disk I/O ──────────────────────────────────────────────────────────────
-
-def _load_cache() -> None:
-    global _cache
-    if _db_path.exists():
-        try:
-            with open(_db_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                # Migrate old flat format (just msg_id → sb_msg_id strings)
-                if data and isinstance(next(iter(data.values()), None), str):
-                    _cache = {"entries": {k: {"starboard_msg_id": v} for k, v in data.items()}}
-                else:
-                    _cache = data
-                if "entries" not in _cache:
-                    _cache = {"entries": _cache}
-                return
-        except Exception:
-            pass
-    _cache = {"entries": {}}
-
-
-def _save_cache() -> None:
-    with open(_db_path, "w", encoding="utf-8") as f:
-        json.dump(_cache, f, indent=2)
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 # ── Embed / content builders ──────────────────────────────────────────────
@@ -189,11 +217,8 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
 
     msg_key = str(payload.message_id)
 
-    # Per-message lock — serialises concurrent reactions for the SAME message
-    # without blocking reactions on completely different messages.
     async with _get_msg_lock(msg_key):
 
-        # Always fetch fresh so reaction count is accurate at this exact moment.
         try:
             message = await source_channel.fetch_message(payload.message_id)
         except (discord.NotFound, discord.Forbidden):
@@ -204,7 +229,7 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
             return
 
         count = _count_reactions(message, CONFIG["emoji"])
-        entry = _cache["entries"].get(msg_key)
+        entry = _get_entry(msg_key)
 
         # ── Below threshold ──────────────────────────────────────────────
         if count < CONFIG["threshold"]:
@@ -214,8 +239,7 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
                     await sb_msg.delete()
                 except (discord.NotFound, discord.Forbidden):
                     pass
-                del _cache["entries"][msg_key]
-                _save_cache()
+                _delete_entry(msg_key)
             return
 
         # ── At or above threshold ────────────────────────────────────────
@@ -223,8 +247,6 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
         embed = _build_embed(message, count)
 
         if entry:
-            # ── Update existing starboard post ───────────────────────────
-            # Only edit if the count actually changed to avoid redundant API calls.
             if count == entry.get("current_stars") and entry.get("starboard_msg_id"):
                 return
 
@@ -232,27 +254,27 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
                 sb_msg = await starboard_channel.fetch_message(int(entry["starboard_msg_id"]))
                 await sb_msg.edit(content=content, embed=embed)
             except discord.NotFound:
-                # Was manually deleted — recreate it, update cache
                 sb_msg = await starboard_channel.send(content=content, embed=embed)
                 entry["starboard_msg_id"] = str(sb_msg.id)
             except discord.Forbidden:
                 bot.logger.log(MODULE_NAME, "Missing permissions to edit starboard message", "WARNING")
                 return
 
-            entry["current_stars"] = count
-            entry["peak_stars"] = max(entry.get("peak_stars", count), count)
-            entry["last_updated_at"] = _now_iso()
-            _save_cache()
+            _upsert_entry(msg_key, {
+                **entry,
+                "current_stars":  count,
+                "peak_stars":     max(entry.get("peak_stars", count), count),
+                "last_updated_at": _now_iso(),
+            })
 
         else:
-            # ── First time hitting threshold — post to starboard ─────────
             try:
                 sb_msg = await starboard_channel.send(content=content, embed=embed)
             except discord.Forbidden:
                 bot.logger.log(MODULE_NAME, "Missing permissions to post to starboard channel", "WARNING")
                 return
 
-            _cache["entries"][msg_key] = {
+            _upsert_entry(msg_key, {
                 "starboard_msg_id": str(sb_msg.id),
                 "channel_id":       str(source_channel.id),
                 "author_id":        str(message.author.id),
@@ -262,15 +284,14 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
                 "first_starred_at": _now_iso(),
                 "last_updated_at":  _now_iso(),
                 "content_preview":  (message.content or "")[:100],
-            }
-            _save_cache()
+            })
             bot.logger.log(MODULE_NAME, f"Posted to starboard: msg {msg_key} by {message.author} ({count} stars)")
 
 
 # ── Setup ─────────────────────────────────────────────────────────────────
 
 def setup(bot: commands.Bot):
-    _load_cache()
+    _init_db()
 
     if not CONFIG["channel_id"]:
         bot.logger.log(MODULE_NAME, "⚠️  channel_id is not set in CONFIG — starboard will not post until configured", "WARNING")
@@ -279,7 +300,7 @@ def setup(bot: commands.Bot):
             MODULE_NAME,
             f"Starboard → channel {CONFIG['channel_id']} | "
             f"threshold {CONFIG['threshold']} | emoji {CONFIG['emoji']} | "
-            f"entries loaded: {len(_cache['entries'])}"
+            f"entries loaded: {_entry_count()}"
         )
 
     @bot.listen("on_raw_reaction_add")
@@ -303,7 +324,7 @@ def setup(bot: commands.Bot):
         msg_key = str(payload.message_id)
 
         async with _get_msg_lock(msg_key):
-            entry = _cache["entries"].get(msg_key)
+            entry = _get_entry(msg_key)
             if not entry:
                 return
 
@@ -315,7 +336,6 @@ def setup(bot: commands.Bot):
                 except (discord.NotFound, discord.Forbidden):
                     pass
 
-            del _cache["entries"][msg_key]
-            _save_cache()
+            _delete_entry(msg_key)
 
     bot.logger.log(MODULE_NAME, "Starboard module loaded.")

@@ -1,6 +1,7 @@
 import discord
 from discord.ext import tasks
 import os
+from pathlib import Path
 from datetime import datetime, timedelta
 import pytz
 
@@ -12,7 +13,7 @@ class IconManager:
     def __init__(self, bot):
         self.bot = bot
         # Use path relative to the current script location (bot directory)
-        self.icons_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icons')
+        self.icons_dir = str(Path(__file__).parent.parent / 'icons')
         self.est = pytz.timezone('America/Detroit')
         
         # Icon configuration: filename -> (start_date, end_date, description)

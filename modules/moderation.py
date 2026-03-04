@@ -34,44 +34,18 @@ ERROR_HIGHER_ROLE        = "❌ You cannot perform this action on someone with a
 # ==================== PATH HELPERS ====================
 
 def _script_dir() -> Path:
-    return Path(__file__).parent.absolute()
-
-def _data_dir() -> Path:
-    p = _script_dir() / "data"
-    p.mkdir(exist_ok=True)
-    return p
+    """Root Embot/ directory (two levels up from modules/)."""
+    return Path(__file__).parent.parent.absolute()
 
 def _db_path() -> str:
-    return str(_data_dir() / "moderation.db")
+    p = _script_dir() / "db"
+    p.mkdir(parents=True, exist_ok=True)
+    return str(p / "moderation.db")
 
 # ==================== DATABASE SCHEMA ====================
 
 DB_SCHEMA = """
 PRAGMA journal_mode=WAL;
-
--- ── Config (key/value) ────────────────────────────────────────────────────────
--- Replaces the CONFIG dict and all top-level constants.
--- All bot-tunable settings live here; change them at runtime without restarting.
-CREATE TABLE IF NOT EXISTS mod_config (
-    key     TEXT PRIMARY KEY,
-    value   TEXT NOT NULL
-);
-
--- ── Elevated roles ────────────────────────────────────────────────────────────
--- Replaces ELEVATED_ROLES list.
-CREATE TABLE IF NOT EXISTS mod_elevated_roles (
-    role_name   TEXT PRIMARY KEY
-);
-
--- ── Word lists ────────────────────────────────────────────────────────────────
--- Replaces CHILD_SAFETY, RACIAL_SLURS, TOS_VIOLATIONS, BANNED_WORDS lists.
--- category: 'child_safety' | 'racial_slurs' | 'tos_violations' | 'banned_words'
-CREATE TABLE IF NOT EXISTS mod_word_lists (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    category    TEXT NOT NULL,
-    term        TEXT NOT NULL,
-    UNIQUE(category, term)
-);
 
 -- ── Role persistence ──────────────────────────────────────────────────────────
 -- Replaces member_roles.json
@@ -183,70 +157,136 @@ CREATE TABLE IF NOT EXISTS mod_startup_log (
 # ── Default seed data ─────────────────────────────────────────────────────────
 # Applied once on first init; never overwrites existing rows.
 
-_DEFAULT_CONFIG = {
-    "owner_id":              "1328822521084117033",
-    "join_logs_channel_id":  "1229868495307669608",
-    "bot_logs_channel_id":   "1229871835978666115",
-    "rules_channel_name":    "rules",
-    "min_reason_length":     "10",
-    "muted_role_name":       "Muted",
-    "report_time_cst":       "00:00",
-    "context_message_count": "30",
-    "invite_cleanup_days":   "7",
-}
+# ── Config file path ─────────────────────────────────────────────────────────
 
-_DEFAULT_ELEVATED_ROLES = ["Moderator", "Admin", "Owner"]
+def _config_path() -> Path:
+    p = _script_dir() / "config"
+    p.mkdir(parents=True, exist_ok=True)
+    return p / "moderation.json"
 
-_DEFAULT_WORD_LISTS = {
-    "child_safety": [
-        "child porn", "Teen leaks",
-    ],
-    "racial_slurs": [
-        "chink", "beaner", "n i g g e r", "nigger", "nigger'", "Nigger",
-        "niggers", "niiger", "niigger",
-    ],
-    "tos_violations": [],
-    "banned_words": [
-        "embis", "embis'", "Embis", "embis!", "Embis!", "embis's", "embiss", "embiz",
-        "https://www.youtube.com/watch?v=fXvOrWWB3Vg",
-        "https://youtu.be/fXvOrWWB3Vg",
-        "https://youtu.be/fXvOrWWB3Vg?si=rSS11Yf2si_MVauu",
-        "leaked porn", "nudes leak",
-        "mbis", "m'bis", "Mbis", "mbs", "mebis",
-        "Michael Blake Sinclair", "Michael Sinclair",
-        "montear",
-        "www.youtube.com/watch?v=fXvOrWWB3Vg",
-        "youtube.com/watch?v=fXvOrWWB3Vg",
-    ],
-}
+def _load_config() -> dict:
+    """Load config/moderation.json. Raises FileNotFoundError if missing."""
+    path = _config_path()
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Missing required config file: {path}\n"
+            "Ensure config/moderation.json is present (it should be committed to the repo)."
+        )
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-def _init_db(db_path: str):
-    """Create schema and seed defaults on first run. Safe to call on every startup."""
+def _save_config(data: dict) -> None:
+    """Atomically write config/moderation.json."""
+    path = _config_path()
+    import tempfile
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        raise
+
+
+def _migrate(db_path: str) -> None:
+    """
+    One-time migration: pull config/roles/wordlists out of the DB and
+    merge rules.json into config/moderation.json, then drop those DB tables.
+
+    Safe to call on every startup — it checks whether migration is needed first.
+    """
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+
+        needs_migration = bool(
+            tables & {"mod_config", "mod_elevated_roles", "mod_word_lists"}
+        )
+        rules_file = Path(__file__).parent.parent / "rules.json"
+        has_rules_json = rules_file.exists()
+
+        if not needs_migration and not has_rules_json:
+            return  # Nothing to do
+
+        # Load existing JSON config (or defaults) as the merge base
+        cfg = _load_config()
+
+        # ── Pull values from mod_config ───────────────────────────────────────
+        if "mod_config" in tables:
+            for row in conn.execute("SELECT key, value FROM mod_config").fetchall():
+                k, v = row["key"], row["value"]
+                # Cast numeric strings back to int where the default is int
+                # Cast to int if value looks like a plain integer
+                try:
+                    if str(v) == str(int(v)):
+                        v = int(v)
+                except (ValueError, TypeError):
+                    pass
+                cfg[k] = v
+
+        # ── Pull elevated roles ───────────────────────────────────────────────
+        if "mod_elevated_roles" in tables:
+            rows = conn.execute("SELECT role_name FROM mod_elevated_roles").fetchall()
+            if rows:
+                cfg["elevated_roles"] = [r["role_name"] for r in rows]
+
+        # ── Pull word lists ───────────────────────────────────────────────────
+        if "mod_word_lists" in tables:
+            rows = conn.execute(
+                "SELECT category, term FROM mod_word_lists ORDER BY category, id"
+            ).fetchall()
+            if rows:
+                known_categories = {"child_safety", "racial_slurs", "tos_violations", "banned_words"}
+                wl: dict = {c: [] for c in known_categories}
+                for r in rows:
+                    wl.setdefault(r["category"], []).append(r["term"])
+                cfg["word_lists"] = wl
+
+        # ── Merge rules.json ──────────────────────────────────────────────────
+        if has_rules_json:
+            try:
+                with open(rules_file, "r", encoding="utf-8") as f:
+                    rules_data = json.load(f)
+                cfg["rules"] = rules_data
+            except Exception as e:
+                import sys
+                print(f"[MODERATION] Migration: failed to read rules.json: {e}", file=sys.stderr)
+
+        # ── Write merged config ───────────────────────────────────────────────
+        _save_config(cfg)
+
+        # ── Drop migrated DB tables ───────────────────────────────────────────
+        for tbl in ("mod_word_lists", "mod_elevated_roles", "mod_config"):
+            if tbl in tables:
+                conn.execute(f"DROP TABLE IF EXISTS {tbl}")
+        conn.commit()
+
+        # ── Remove rules.json ─────────────────────────────────────────────────
+        if has_rules_json:
+            try:
+                rules_file.unlink()
+            except Exception:
+                pass
+
+        import sys
+        print("[MODERATION] Migration complete → config/moderation.json", file=sys.stderr)
+    finally:
+        conn.close()
+
+
+def _init_db(db_path: str) -> None:
+    """Create schema on first run. Safe to call on every startup."""
     conn = sqlite3.connect(db_path)
     try:
         conn.executescript(DB_SCHEMA)
-        conn.commit()
-
-        # Seed config (INSERT OR IGNORE — never overwrites live values)
-        conn.executemany(
-            "INSERT OR IGNORE INTO mod_config (key, value) VALUES (?, ?)",
-            list(_DEFAULT_CONFIG.items()),
-        )
-
-        # Seed elevated roles
-        conn.executemany(
-            "INSERT OR IGNORE INTO mod_elevated_roles (role_name) VALUES (?)",
-            [(r,) for r in _DEFAULT_ELEVATED_ROLES],
-        )
-
-        # Seed word lists
-        for category, terms in _DEFAULT_WORD_LISTS.items():
-            conn.executemany(
-                "INSERT OR IGNORE INTO mod_word_lists (category, term) VALUES (?, ?)",
-                [(category, t) for t in terms],
-            )
-
         conn.commit()
     finally:
         conn.close()
@@ -287,22 +327,25 @@ def _db_all(db_path: str, query: str, params: tuple = ()):
 
 class ModConfig:
     """
-    Thin wrapper around mod_config — reads live values from DB on every access.
-    All mutations write through to the DB immediately.
+    Reads user-configurable values from config/moderation.json.
+    Mutations (add/remove word, add/remove role) write back to the JSON file atomically.
+    Call reload() to pick up manual edits without restarting.
     """
 
-    def __init__(self, db_path: str):
-        self._db = db_path
+    def __init__(self):
+        self._data: dict = _load_config()
+
+    def reload(self) -> None:
+        """Re-read config/moderation.json from disk."""
+        self._data = _load_config()
 
     def get(self, key: str, default=None):
-        row = _db_one(self._db, "SELECT value FROM mod_config WHERE key=?", (key,))
-        return row["value"] if row else default
+        return self._data.get(key, default)
 
-    def set(self, key: str, value):
-        _db_exec(self._db,
-                 "INSERT INTO mod_config (key, value) VALUES (?,?) "
-                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                 (key, str(value)))
+    def set(self, key: str, value) -> None:
+        """Persist a single key change to disk."""
+        self._data[key] = value
+        _save_config(self._data)
 
     def get_int(self, key: str, default: int = 0) -> int:
         try:
@@ -351,36 +394,40 @@ class ModConfig:
     # ── Elevated roles ────────────────────────────────────────────────────────
 
     def get_elevated_roles(self) -> List[str]:
-        rows = _db_all(self._db, "SELECT role_name FROM mod_elevated_roles")
-        return [r["role_name"] for r in rows]
+        return list(self._data.get("elevated_roles", []))
 
-    def add_elevated_role(self, role_name: str):
-        _db_exec(self._db,
-                 "INSERT OR IGNORE INTO mod_elevated_roles (role_name) VALUES (?)",
-                 (role_name,))
+    def add_elevated_role(self, role_name: str) -> None:
+        roles = self.get_elevated_roles()
+        if role_name not in roles:
+            roles.append(role_name)
+            self._data["elevated_roles"] = roles
+            _save_config(self._data)
 
-    def remove_elevated_role(self, role_name: str):
-        _db_exec(self._db,
-                 "DELETE FROM mod_elevated_roles WHERE role_name=?",
-                 (role_name,))
+    def remove_elevated_role(self, role_name: str) -> None:
+        roles = self.get_elevated_roles()
+        if role_name in roles:
+            roles.remove(role_name)
+            self._data["elevated_roles"] = roles
+            _save_config(self._data)
 
     # ── Word lists ────────────────────────────────────────────────────────────
 
     def get_word_list(self, category: str) -> List[str]:
-        rows = _db_all(self._db,
-                       "SELECT term FROM mod_word_lists WHERE category=?",
-                       (category,))
-        return [r["term"] for r in rows]
+        return list(self._data.get("word_lists", {}).get(category, []))
 
-    def add_word(self, category: str, term: str):
-        _db_exec(self._db,
-                 "INSERT OR IGNORE INTO mod_word_lists (category, term) VALUES (?, ?)",
-                 (category, term))
+    def add_word(self, category: str, term: str) -> None:
+        wl = self._data.setdefault("word_lists", {})
+        terms = wl.setdefault(category, [])
+        if term not in terms:
+            terms.append(term)
+            _save_config(self._data)
 
-    def remove_word(self, category: str, term: str):
-        _db_exec(self._db,
-                 "DELETE FROM mod_word_lists WHERE category=? AND term=?",
-                 (category, term))
+    def remove_word(self, category: str, term: str) -> None:
+        wl = self._data.get("word_lists", {})
+        terms = wl.get(category, [])
+        if term in terms:
+            terms.remove(term)
+            _save_config(self._data)
 
     @property
     def child_safety(self) -> List[str]:
@@ -397,6 +444,20 @@ class ModConfig:
     @property
     def banned_words(self) -> List[str]:
         return self.get_word_list("banned_words")
+
+    # ── Rules content ─────────────────────────────────────────────────────────
+
+    def get_rules(self) -> Optional[dict]:
+        """Return the rules dict from config, or None if absent/empty."""
+        rules = self._data.get("rules")
+        if rules and rules.get("rules"):
+            return rules
+        return None
+
+    def save_rules(self, rules_data: dict) -> None:
+        """Write updated rules content back to config."""
+        self._data["rules"] = rules_data
+        _save_config(self._data)
 
 
 # ==================== HELPERS ====================
@@ -926,11 +987,9 @@ class MediaScanner:
 class RulesManager:
     """
     Manages the server rules embed in the #rules channel.
-    Rules content still comes from rules.json (it's not config — it's content).
+    Rules content lives in config/moderation.json under the "rules" key.
     Only the *state* (posted message ID + hash) is persisted in the DB.
     """
-
-    RULES_FILE = Path(__file__).parent / "rules.json"
 
     def __init__(self, bot, db_path: str, cfg: ModConfig):
         self.bot      = bot
@@ -958,15 +1017,15 @@ class RulesManager:
     # ── Rules file helpers ────────────────────────────────────────────────────
 
     def load_rules(self) -> Optional[dict]:
-        try:
-            with open(self.RULES_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except FileNotFoundError:
-            self.bot.logger.log("RULES", "rules.json not found", "WARNING")
-            return None
-        except Exception as e:
-            self.bot.logger.log("RULES", f"Failed to load rules.json: {e}", "ERROR")
-            return None
+        """Load rules content from config/moderation.json."""
+        data = self.cfg.get_rules()
+        if data is None:
+            self.bot.logger.log("RULES", "No rules content found in config/moderation.json", "WARNING")
+        return data
+
+    def save_rules(self, data: dict) -> None:
+        """Persist updated rules content back to config/moderation.json."""
+        self.cfg.save_rules(data)
 
     @staticmethod
     def _hash_rules(data: dict) -> str:
@@ -1079,7 +1138,7 @@ class RulesManager:
                         _, posted_hash = self._get_state(guild.id)
                         if current_hash != posted_hash:
                             self.bot.logger.log(
-                                "RULES", "rules.json change detected — syncing embed")
+                                "RULES", "rules content change detected — syncing embed")
                             await self.sync(guild, force=True)
             except Exception as e:
                 self.bot.logger.log("RULES", f"Watcher error: {e}", "WARNING")
@@ -1096,16 +1155,19 @@ class ModerationSystem:
     def __init__(self, bot):
         self.bot     = bot
         self._db     = _db_path()
-        self.cfg     = ModConfig(self._db)
+        # Run migration before anything else (safe no-op if already done)
+        _migrate(self._db)
 
-        # Initialise schema + seed defaults
+        # Initialise DB schema
         _init_db(self._db)
+
+        self.cfg     = ModConfig()
 
         # Per-process Fernet key
         self._fernet = Fernet(Fernet.generate_key())
 
         # Encrypted media staging directory
-        self.media_dir = _data_dir() / "media_cache"
+        self.media_dir = _script_dir() / "cache" / "moderation"
         self.media_dir.mkdir(exist_ok=True)
 
         # Pre-upload safety scanner

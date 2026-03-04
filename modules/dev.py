@@ -14,7 +14,7 @@ import difflib
 MODULE_NAME = "DEV"
 
 # Configuration
-VERSION_DATA_FILE = "version_data.json"
+VERSION_DATA_FILE = str(Path(__file__).parent.parent / "cache" / "dev" / "version_data.json")
 TRACKED_EXTENSIONS = ['.py']
 # Exclude files that the bot writes to (prevents self-triggering)
 EXCLUDE_FILES = [
@@ -30,7 +30,7 @@ EXCLUDE_FILES = [
     '*.pyo',
     '*.pyd'
 ]
-EXCLUDE_DIRS = ['Winpython64', 'python-3', 'venv', 'env', '.git', '__pycache__', 'data', 'icons']
+EXCLUDE_DIRS = ['Winpython64', 'python-3', 'venv', 'env', '.git', '__pycache__', 'cache', 'db', 'logs', 'icons', 'config']
 
 # Enhanced semantic versioning thresholds (actual lines changed, not estimated)
 BREAKING_THRESHOLD = 500    # Breaking changes (major version bump)
@@ -289,7 +289,7 @@ icons/
     def _get_version_from_file(self):
         """Read version from _version.py file directly"""
         try:
-            version_file = Path("_version.py")
+            version_file = Path(__file__).parent.parent / "_version.py"
             if version_file.exists():
                 with open(version_file, 'r', encoding='utf-8') as f:
                     content = f.read()
@@ -310,7 +310,7 @@ icons/
         try:
             version_content = f'__version__ = "{version}"\n'
             
-            with open("_version.py", 'w', encoding='utf-8') as f:
+            with open(str(Path(__file__).parent.parent / "_version.py"), 'w', encoding='utf-8') as f:
                 f.write(version_content)
 
             self.bot.logger.log(MODULE_NAME, f"Saved version to _version.py: v{version}")
@@ -320,6 +320,7 @@ icons/
     def _load_version_data(self):
         """Load version data from file"""
         try:
+            Path(VERSION_DATA_FILE).parent.mkdir(parents=True, exist_ok=True)
             # Always get version from _version.py
             current_version = self._get_version_from_file()
             

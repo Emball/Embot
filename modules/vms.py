@@ -93,40 +93,37 @@ STOP_WORDS = {
 # ==================== PATH HELPERS ====================
 
 def _script_dir() -> Path:
-    return Path(__file__).parent.absolute()
-
-def _data_dir() -> Path:
-    """Root data directory — /data relative to script."""
-    p = _script_dir() / "data"
-    p.mkdir(exist_ok=True)
-    return p
+    """Root Embot/ directory (two levels up from modules/)."""
+    return Path(__file__).parent.parent.absolute()
 
 def _vms_dir() -> Path:
     """Voice message audio files live here."""
-    p = _data_dir() / "vms"
+    p = _script_dir() / "cache" / "vms"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 def _archive_dir() -> Path:
     """Archived voice messages live here."""
-    p = _data_dir() / "vms" / "archive"
+    p = _script_dir() / "cache" / "vms" / "archive"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 def _db_path() -> str:
     """SQLite database path."""
-    return str(_vms_dir() / "vms.db")
+    p = _script_dir() / "db"
+    p.mkdir(parents=True, exist_ok=True)
+    return str(p / "vms.db")
 
 def _broken_dir() -> Path:
     """Corrupt or unprocessable voice message files are moved here."""
-    p = _data_dir() / "vms" / "broken"
+    p = _script_dir() / "cache" / "vms" / "broken"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 def _whisper_model_dir() -> Path:
     """Whisper model cache directory."""
-    p = _data_dir()
-    p.mkdir(exist_ok=True)
+    p = _script_dir() / "cache" / "whisper_models"
+    p.mkdir(parents=True, exist_ok=True)
     return p
 
 # ==================== NAMING CONVENTION ====================

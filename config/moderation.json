@@ -1,0 +1,66 @@
+{
+  "owner_id": 1328822521084117033,
+  "join_logs_channel_id": 1229868495307669608,
+  "bot_logs_channel_id": 1229871835978666115,
+  "rules_channel_name": "rules",
+  "min_reason_length": 10,
+  "muted_role_name": "Muted",
+  "report_time_cst": "00:00",
+  "context_message_count": 30,
+  "invite_cleanup_days": 7,
+  "elevated_roles": [
+    "Moderator",
+    "Admin",
+    "Owner"
+  ],
+  "word_lists": {
+    "tos_violations": [],
+    "banned_words": [
+      "embis",
+      "embis'",
+      "Embis",
+      "embis!",
+      "Embis!",
+      "embis's",
+      "embiss",
+      "embiz",
+      "https://www.youtube.com/watch?v=fXvOrWWB3Vg",
+      "https://youtu.be/fXvOrWWB3Vg",
+      "https://youtu.be/fXvOrWWB3Vg?si=rSS11Yf2si_MVauu",
+      "leaked porn",
+      "nudes leak",
+      "mbis",
+      "m'bis",
+      "Mbis",
+      "mbs",
+      "mebis",
+      "Michael Blake Sinclair",
+      "Michael Sinclair",
+      "montear",
+      "www.youtube.com/watch?v=fXvOrWWB3Vg",
+      "youtube.com/watch?v=fXvOrWWB3Vg"
+    ],
+    "racial_slurs": [
+      "chink",
+      "beaner",
+      "n i g g e r",
+      "nigger",
+      "nigger'",
+      "Nigger",
+      "niggers",
+      "niiger",
+      "niigger"
+    ],
+    "child_safety": [
+      "child porn",
+      "Teen leaks"
+    ]
+  },
+  "rules": {
+    "title": "Server Rules",
+    "description": "",
+    "color": 3447003,
+    "footer": "Please follow the rules",
+    "rules": []
+  }
+}

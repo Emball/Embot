@@ -5,6 +5,7 @@ from discord import app_commands
 from typing import Optional
 import json
 import os
+from pathlib import Path
 
 MODULE_NAME = "LINKS"
 
@@ -13,85 +14,24 @@ class LinkManager:
     
     def __init__(self, bot):
         self.bot = bot
-        self.config_file = "links_config.json"
+        self.config_file = str(Path(__file__).parent.parent / "config" / "links_config.json")
         self.links = self.load_links()
         self.prefix = "?"  # Default prefix for link commands
     
     def load_links(self):
-        """Load links from configuration file"""
+        """Load links from config/links_config.json. Raises FileNotFoundError if missing."""
         try:
             with open(self.config_file, 'r') as f:
                 return json.load(f)
         except FileNotFoundError:
-            # Default links - populate these manually in links_config.json
-            default_links = {
-                "tracker": {
-                    "url": "",
-                    "description": "sends the tracker",
-                    "enabled": True
-                },
-                "archive": {
-                    "url": "",
-                    "description": "sends the archive",
-                    "enabled": True
-                },
-                "roycetracker": {
-                    "url": "",
-                    "description": "roycetracker",
-                    "enabled": True
-                },
-                "roycearchive": {
-                    "url": "",
-                    "description": "roycearchive",
-                    "enabled": True
-                },
-                "srtracker": {
-                    "url": "",
-                    "description": "shady records tracker",
-                    "enabled": True
-                },
-                "proofarchive": {
-                    "url": "",
-                    "description": "proof archive",
-                    "enabled": True
-                },
-                "prooftracker": {
-                    "url": "",
-                    "description": "proof tracker",
-                    "enabled": True
-                },
-                "website": {
-                    "url": "",
-                    "description": "jb and embis website",
-                    "enabled": True
-                },
-                "youtube": {
-                    "url": "",
-                    "description": "Emball youtube channel",
-                    "enabled": True
-                },
-                "detracker": {
-                    "url": "",
-                    "description": "de tracker",
-                    "enabled": True
-                },
-                "cashistracker": {
-                    "url": "",
-                    "description": "cashis tracker",
-                    "enabled": True
-                },
-                "dretracker": {
-                    "url": "",
-                    "description": "dre tracker franki fix",
-                    "enabled": True
-                }
-            }
-            self.save_links(default_links)
-            return default_links
+            raise FileNotFoundError(
+                f"Missing required config file: {self.config_file}\n"
+                "Ensure config/links_config.json is present (it should be committed to the repo)."
+            )
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to load links config", e)
             return {}
-    
+
     def save_links(self, links=None):
         """Save links to configuration file atomically"""
         if links is None:

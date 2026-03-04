@@ -14,6 +14,8 @@ import hashlib
 import re
 import json
 import uuid
+import random
+import string
 import threading
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Tuple
@@ -105,11 +107,127 @@ async def _hash_url(url: str) -> Optional[str]:
 async def _hash_attachment(att: discord.Attachment) -> Optional[str]:
     return await _hash_url(att.url)
 
+_SHORT_ID_CHARS = string.ascii_letters + string.digits  # 62 chars → ~56 trillion combos at 9 chars
+
+def _short_id(length: int = 9) -> str:
+    """Generate a YouTube-style short alphanumeric ID (e.g. 'aB3xK9mRq')."""
+    return "".join(random.choices(_SHORT_ID_CHARS, k=length))
+
+def _display_name(bot, guild_id: int, user_id: int) -> str:
+    """Resolve a user ID to a display name for logging. Falls back to shortened ID."""
+    try:
+        guild = bot.get_guild(guild_id)
+        if guild:
+            member = guild.get_member(user_id)
+            if member:
+                return member.display_name
+    except Exception:
+        pass
+    return f"user:{user_id}"
+
 
 
 # ─────────────────────────── DATABASE ───────────────────────────
 
 class CommunityDB:
+    # ─────────────────────────────────────────────────────────────────────────
+    # MIGRATION REGISTRY
+    # Each entry is (version: int, description: str, sql: str).
+    # To evolve the schema: append a new tuple — never edit existing ones.
+    # The migration engine runs only the versions the current DB hasn't seen yet.
+    # ─────────────────────────────────────────────────────────────────────────
+    _MIGRATIONS: list[tuple[int, str, str]] = [
+        (1, "Initial schema", """
+            CREATE TABLE IF NOT EXISTS community_config (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS submissions (
+                id                 TEXT PRIMARY KEY,
+                group_id           TEXT NOT NULL,
+                user_id            INTEGER NOT NULL,
+                channel_id         INTEGER NOT NULL,
+                message_id         INTEGER NOT NULL,
+                thread_id          INTEGER,
+                title              TEXT,
+                content            TEXT NOT NULL,
+                content_normalized TEXT NOT NULL,
+                file_hashes        TEXT NOT NULL DEFAULT '[]',
+                links              TEXT NOT NULL DEFAULT '[]',
+                version            TEXT NOT NULL DEFAULT 'v1.0',
+                version_major      INTEGER NOT NULL DEFAULT 1,
+                version_minor      INTEGER NOT NULL DEFAULT 0,
+                is_deleted         INTEGER NOT NULL DEFAULT 0,
+                is_current         INTEGER NOT NULL DEFAULT 1,
+                created_at         TEXT NOT NULL,
+                updated_at         TEXT NOT NULL,
+                last_checked_at    TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_sub_group   ON submissions(group_id);
+            CREATE INDEX IF NOT EXISTS idx_sub_user    ON submissions(user_id);
+            CREATE INDEX IF NOT EXISTS idx_sub_msg     ON submissions(message_id);
+            CREATE INDEX IF NOT EXISTS idx_sub_created ON submissions(created_at);
+
+            CREATE TABLE IF NOT EXISTS votes (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id         TEXT NOT NULL,
+                user_id          INTEGER NOT NULL,
+                emoji            TEXT NOT NULL,
+                xp_delta         INTEGER NOT NULL,
+                voted_message_id INTEGER NOT NULL,
+                created_at       TEXT NOT NULL,
+                UNIQUE(group_id, user_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_vote_group   ON votes(group_id);
+            CREATE INDEX IF NOT EXISTS idx_vote_created ON votes(created_at);
+
+            CREATE TABLE IF NOT EXISTS xp_ledger (
+                user_id    INTEGER PRIMARY KEY,
+                xp         REAL NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS thread_xp_log (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                submitter_id INTEGER NOT NULL,
+                thread_id    INTEGER NOT NULL,
+                message_id   INTEGER NOT NULL UNIQUE,
+                xp_delta     REAL NOT NULL DEFAULT 0.1,
+                created_at   TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS spotlight_history (
+                week_key      TEXT PRIMARY KEY,
+                group_id      TEXT,
+                submission_id TEXT,
+                posted_at     TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS file_hash_registry (
+                hash          TEXT NOT NULL,
+                submission_id TEXT NOT NULL,
+                user_id       INTEGER NOT NULL,
+                created_at    TEXT NOT NULL,
+                PRIMARY KEY (hash, submission_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_hash ON file_hash_registry(hash);
+        """),
+
+        # ── Future migrations go here ──────────────────────────────────────
+        # Simple additions (new tables, indexes) can use plain SQL with IF NOT EXISTS.
+        #
+        # For ALTER TABLE (adding columns), use a Python callable instead of a SQL
+        # string — the engine supports both. The callable receives the connection and
+        # the two helper methods so you can guard against re-runs:
+        #
+        # (2, "Add channel_name to submissions", lambda c, col_ok, tbl_ok: (
+        #     c.execute("ALTER TABLE submissions ADD COLUMN channel_name TEXT")
+        #     if not col_ok(c, "submissions", "channel_name") else None
+        # )),
+        # ──────────────────────────────────────────────────────────────────
+    ]
+
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self._lock = threading.Lock()
@@ -123,85 +241,75 @@ class CommunityDB:
         c.execute("PRAGMA foreign_keys=ON")
         return c
 
+    # ── migration engine ──
+    def _get_schema_version(self, c: sqlite3.Connection) -> int:
+        """Read the current schema version from the migration_log table."""
+        try:
+            row = c.execute(
+                "SELECT MAX(version) AS v FROM schema_migration_log"
+            ).fetchone()
+            return int(row["v"]) if row and row["v"] is not None else 0
+        except sqlite3.OperationalError:
+            return 0  # Table doesn't exist yet — fresh or pre-migration DB
+
+    def _column_exists(self, c: sqlite3.Connection, table: str, column: str) -> bool:
+        """Return True if `column` already exists in `table`. Use before ALTER TABLE ADD COLUMN."""
+        rows = c.execute(f"PRAGMA table_info({table})").fetchall()
+        return any(row["name"] == column for row in rows)
+
+    def _table_exists(self, c: sqlite3.Connection, table: str) -> bool:
+        """Return True if `table` exists in the database."""
+        row = c.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        return row is not None
+
     def _init(self):
+        """
+        Bootstrap the migration log table, then run any pending migrations in order.
+        Each migration runs inside its own transaction and is recorded atomically.
+        Migrations that have already been applied are skipped via INSERT OR IGNORE.
+        Use _column_exists() and _table_exists() inside migration callables to guard
+        ALTER TABLE statements against re-runs.
+        """
+        # Bootstrap the migration log table outside of any migration
         with self._conn() as c:
-            c.executescript("""
-                CREATE TABLE IF NOT EXISTS community_config (
-                    key   TEXT PRIMARY KEY,
-                    value TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS submissions (
-                    id                 TEXT PRIMARY KEY,
-                    group_id           TEXT NOT NULL,
-                    user_id            INTEGER NOT NULL,
-                    channel_id         INTEGER NOT NULL,
-                    message_id         INTEGER NOT NULL,
-                    thread_id          INTEGER,
-                    title              TEXT,
-                    content            TEXT NOT NULL,
-                    content_normalized TEXT NOT NULL,
-                    file_hashes        TEXT NOT NULL DEFAULT '[]',
-                    links              TEXT NOT NULL DEFAULT '[]',
-                    version            TEXT NOT NULL DEFAULT 'v1.0',
-                    version_major      INTEGER NOT NULL DEFAULT 1,
-                    version_minor      INTEGER NOT NULL DEFAULT 0,
-                    is_deleted         INTEGER NOT NULL DEFAULT 0,
-                    is_current         INTEGER NOT NULL DEFAULT 1,
-                    created_at         TEXT NOT NULL,
-                    updated_at         TEXT NOT NULL,
-                    last_checked_at    TEXT
-                );
-                CREATE INDEX IF NOT EXISTS idx_sub_group   ON submissions(group_id);
-                CREATE INDEX IF NOT EXISTS idx_sub_user    ON submissions(user_id);
-                CREATE INDEX IF NOT EXISTS idx_sub_msg     ON submissions(message_id);
-                CREATE INDEX IF NOT EXISTS idx_sub_created ON submissions(created_at);
-
-                CREATE TABLE IF NOT EXISTS votes (
-                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                    group_id         TEXT NOT NULL,
-                    user_id          INTEGER NOT NULL,
-                    emoji            TEXT NOT NULL,
-                    xp_delta         INTEGER NOT NULL,
-                    voted_message_id INTEGER NOT NULL,
-                    created_at       TEXT NOT NULL,
-                    UNIQUE(group_id, user_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_vote_group   ON votes(group_id);
-                CREATE INDEX IF NOT EXISTS idx_vote_created ON votes(created_at);
-
-                CREATE TABLE IF NOT EXISTS xp_ledger (
-                    user_id    INTEGER PRIMARY KEY,
-                    xp         REAL NOT NULL DEFAULT 0,
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS thread_xp_log (
-                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                    submitter_id INTEGER NOT NULL,
-                    thread_id    INTEGER NOT NULL,
-                    message_id   INTEGER NOT NULL UNIQUE,
-                    xp_delta     REAL NOT NULL DEFAULT 0.1,
-                    created_at   TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS spotlight_history (
-                    week_key      TEXT PRIMARY KEY,
-                    group_id      TEXT,
-                    submission_id TEXT,
-                    posted_at     TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS file_hash_registry (
-                    hash          TEXT NOT NULL,
-                    submission_id TEXT NOT NULL,
-                    user_id       INTEGER NOT NULL,
-                    created_at    TEXT NOT NULL,
-                    PRIMARY KEY (hash, submission_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_hash ON file_hash_registry(hash);
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS schema_migration_log (
+                    version     INTEGER PRIMARY KEY,
+                    description TEXT NOT NULL,
+                    applied_at  TEXT NOT NULL
+                )
             """)
             c.commit()
+
+        pending = [m for m in self._MIGRATIONS
+                   if m[0] > self._get_schema_version(self._conn())]
+
+        if not pending:
+            return  # Nothing to do
+
+        for version, description, sql in pending:
+            print(f"[COMMUNITY] [INFO] Applying migration v{version}: {description}")
+            try:
+                with self._conn() as c:
+                    if callable(sql):
+                        sql(c, self._column_exists, self._table_exists)
+                    else:
+                        c.executescript(sql)
+                    c.execute(
+                        "INSERT OR IGNORE INTO schema_migration_log (version, description, applied_at) "
+                        "VALUES (?, ?, ?)",
+                        (version, description, _now_str())
+                    )
+                    c.commit()
+                print(f"[COMMUNITY] [INFO] Migration v{version} applied successfully.")
+            except Exception as e:
+                print(
+                    f"[COMMUNITY] [ERROR] Migration v{version} FAILED: {e}\n"
+                    f"  The database has NOT been modified for this migration."
+                )
+                raise  # Re-raise so the bot startup fails loudly rather than silently corrupting
 
     # ── config ──
     def get_config(self, key: str, default=None):
@@ -639,11 +747,14 @@ class CommunitySystem:
                     await message.delete()
                 except Exception:
                     pass
+                guild = message.guild
+                owner_member = guild.get_member(owner["user_id"]) if guild else None
+                owner_name = owner_member.display_name if owner_member else f"another member"
                 embed = discord.Embed(
                     title="🚨 Duplicate Submission Detected",
                     description=(
-                        "Your submission was removed because an attached file has already been "
-                        "submitted by another member. Please only submit your own original work."
+                        f"Your submission was removed because an attached file has already been "
+                        f"submitted by **{owner_name}**. Please only submit your own original work."
                     ),
                     color=0xe74c3c,
                     timestamp=_now()
@@ -651,8 +762,8 @@ class CommunitySystem:
                 embed.set_footer(text="Embot Community System")
                 await self._dm_or_ping(message.author, embed)
                 self.clog(
-                    f"Duplicate attachment hash from {message.author} "
-                    f"— matches another user's submission."
+                    f"Duplicate attachment from {message.author.display_name} "
+                    f"— matches submission by {owner_name}."
                 )
                 return
 
@@ -664,18 +775,21 @@ class CommunitySystem:
                     await message.delete()
                 except Exception:
                     pass
+                guild = message.guild
+                owner_member = guild.get_member(owner_row["user_id"]) if guild else None
+                owner_name = owner_member.display_name if owner_member else "another member"
                 embed = discord.Embed(
                     title="🚨 Duplicate Link Detected",
                     description=(
-                        "Your submission was removed because that link has already been "
-                        "submitted by another member. Please only submit your own original work."
+                        f"Your submission was removed because that link has already been "
+                        f"submitted by **{owner_name}**. Please only submit your own original work."
                     ),
                     color=0xe74c3c,
                     timestamp=_now()
                 )
                 embed.set_footer(text="Embot Community System")
                 await self._dm_or_ping(message.author, embed)
-                self.clog(f"Duplicate link from {message.author} — matches another user's submission.")
+                self.clog(f"Duplicate link from {message.author.display_name} — matches submission by {owner_name}.")
                 return
 
         # ── Version detection ──
@@ -714,9 +828,9 @@ class CommunitySystem:
                 timestamp=_now()
             )
             dm_version_embed.set_footer(text="Embot Community System")
-            self.clog(f"New version {version_str} for group {group_id} by {message.author}")
+            self.clog(f"New version {version_str} for submission {group_id} by {message.author.display_name}")
         else:
-            group_id     = str(uuid.uuid4())
+            group_id     = _short_id()
             version_str  = "v1.0"
             version_major = 1
             version_minor = 0
@@ -727,7 +841,7 @@ class CommunitySystem:
                 linked_group = self.db.group_for_hash(h)
                 if linked_group:
                     self.clog(
-                        f"Submission by {message.author} linked to existing group "
+                        f"Submission by {message.author.display_name} linked to existing submission "
                         f"{linked_group} via file hash"
                     )
                     break
@@ -736,7 +850,7 @@ class CommunitySystem:
                     linked_group = self.db.group_for_link(link, user_id)
                     if linked_group:
                         self.clog(
-                            f"Submission by {message.author} linked to existing group "
+                            f"Submission by {message.author.display_name} linked to existing submission "
                             f"{linked_group} via URL match"
                         )
                         break
@@ -745,7 +859,7 @@ class CommunitySystem:
 
         # ── Create submission record ──
         # file_hashes stores attachment hashes only. Links are stored as plain text in `links`.
-        sub_id = str(uuid.uuid4())
+        sub_id = _short_id()
         sub_record = {
             "id":                 sub_id,
             "group_id":           group_id,
@@ -810,8 +924,8 @@ class CommunitySystem:
         log_embed.set_footer(text=f"Submission ID: {sub_id}")
         await self._bot_log(guild, log_embed)
         self.clog(
-            f"Submission registered: {title!r} by {message.author} "
-            f"({version_str}, group={group_id})"
+            f"Submission registered: {title!r} by {message.author.display_name} "
+            f"({version_str}, submission={group_id})"
         )
 
     # ── edit handler ──
@@ -920,8 +1034,8 @@ class CommunitySystem:
             except Exception as e:
                 self.cerr("Failed to DM version-edit notice", e)
             self.clog(
-                f"Retroactive version tag detected in edit for submission {sub['id']} "
-                f"→ v{maj}.{min_} (group {sub['group_id']})"
+                f"Retroactive version tag in edit for submission {sub['id']} "
+                f"→ v{maj}.{min_}"
             )
         elif changed:
             new_minor = sub["version_minor"] + 1
@@ -950,8 +1064,7 @@ class CommunitySystem:
                 f"changed: {', '.join(change_parts) or 'content only'} "
                 f"→ {kwargs.get('version', sub['version'])}"
             )
-        else:
-            self.clog(f"Synced edit for submission {sub['id']} (no meaningful changes)")
+        # else: no meaningful changes — skip logging to keep console clean
 
     # ── voting ──
 
@@ -972,9 +1085,10 @@ class CommunitySystem:
 
         if voter_id == submitter:
             # Self-voting is not allowed — remove the reaction silently
+            voter_name = _display_name(self.bot, payload.guild_id, voter_id)
             self.clog(
-                f"Self-vote blocked: user {voter_id} attempted to vote {emoji} "
-                f"on their own submission (group {sub['group_id']})",
+                f"Self-vote blocked: {voter_name} attempted to vote {emoji} "
+                f"on their own submission ({sub['group_id']})",
                 "WARNING"
             )
             try:
@@ -1012,13 +1126,15 @@ class CommunitySystem:
                     pass
 
         self.db.add_xp(submitter, xp_delta)
+        voter_name = _display_name(self.bot, payload.guild_id, voter_id)
+        submitter_name = _display_name(self.bot, payload.guild_id, submitter)
         vote_action = "changed" if old_vote else "cast"
         change_detail = (
             f" (was {old_vote['emoji']} {old_vote['xp_delta']:+d} XP)" if old_vote else ""
         )
         self.clog(
-            f"Vote {vote_action}: {emoji} ({xp_delta:+d} XP) by user {voter_id} "
-            f"on group {group_id} — submitter {submitter}{change_detail}"
+            f"Vote {vote_action}: {emoji} ({xp_delta:+d} XP) by {voter_name} "
+            f"on submission {group_id} — submitter {submitter_name}{change_detail}"
         )
 
     async def handle_reaction_remove(self, payload: discord.RawReactionActionEvent):
@@ -1041,9 +1157,10 @@ class CommunitySystem:
         # Only remove if the reaction removed matches stored vote
         self.db.remove_vote(group_id, payload.user_id)
         self.db.add_xp(sub["user_id"], -old_vote["xp_delta"])
+        voter_name = _display_name(self.bot, payload.guild_id, payload.user_id)
         self.clog(
-            f"Vote removed: {emoji} by user {payload.user_id} "
-            f"on group {group_id}"
+            f"Vote removed: {emoji} by {voter_name} "
+            f"on submission {group_id}"
         )
 
     # ── submission deletion ──
@@ -1057,8 +1174,7 @@ class CommunitySystem:
         self.db.update_submission(sub["id"], is_deleted=1)
         self.clog(
             f"Submission {sub['id']} marked deleted "
-            f"(message {payload.message_id} removed from channel {payload.channel_id}, "
-            f"group {sub['group_id']})"
+            f"(message {payload.message_id} removed from channel {payload.channel_id})"
         )
 
         # If the deleted submission was the current version, promote the next most-recent
@@ -1102,6 +1218,59 @@ class CommunitySystem:
 
         if self.db.log_thread_xp(submitter_id, channel.id, message.id):
             self.db.add_xp(submitter_id, 0.1)
+
+    # ── submission integrity ──
+
+    async def check_submission_integrity(self, guild: discord.Guild):
+        """
+        Verify that active submissions still have their setup reactions and threads intact.
+        Restores missing reactions and logs anomalies. Runs periodically.
+        """
+        subs = self.db.get_checkable_submissions(limit=50)
+        for sub in subs:
+            channel = guild.get_channel(sub["channel_id"])
+            if not channel:
+                continue
+            try:
+                message = await channel.fetch_message(sub["message_id"])
+            except (discord.NotFound, discord.Forbidden):
+                # Message was deleted externally
+                if not sub["is_deleted"]:
+                    self.db.update_submission(sub["id"], is_deleted=1)
+                    self.clog(
+                        f"Integrity: submission {sub['id']} message no longer exists — marked deleted.",
+                        "WARNING"
+                    )
+                continue
+            except Exception:
+                continue
+
+            # Check setup reactions
+            existing_emojis = {str(r.emoji) for r in message.reactions}
+            for emoji in SETUP_EMOJIS:
+                if emoji not in existing_emojis:
+                    try:
+                        await message.add_reaction(emoji)
+                        self.clog(
+                            f"Integrity: restored missing reaction {emoji} on submission {sub['id']}.",
+                            "WARNING"
+                        )
+                    except Exception as e:
+                        self.cerr(f"Integrity: failed to restore reaction {emoji} on {sub['id']}", e)
+
+            # Check thread still exists if one was created
+            if sub["thread_id"]:
+                thread = guild.get_thread(sub["thread_id"])
+                if thread is None:
+                    try:
+                        thread = await guild.fetch_channel(sub["thread_id"])
+                    except Exception:
+                        thread = None
+                if thread is None:
+                    self.clog(
+                        f"Integrity: thread for submission {sub['id']} is missing or archived.",
+                        "WARNING"
+                    )
 
     # ── Spotlight Friday ──
 
@@ -1243,6 +1412,21 @@ def setup(bot):
         await bot.wait_until_ready()
 
     spotlight_task.start()
+
+    # ── Task: Submission integrity check (every 10 minutes) ──
+    @tasks.loop(minutes=10)
+    async def integrity_task():
+        try:
+            for guild in bot.guilds:
+                await cs.check_submission_integrity(guild)
+        except Exception as e:
+            cs.cerr("Integrity check error", e)
+
+    @integrity_task.before_loop
+    async def before_integrity():
+        await bot.wait_until_ready()
+
+    integrity_task.start()
 
     # ── Slash commands ──
 

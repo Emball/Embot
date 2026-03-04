@@ -1610,6 +1610,19 @@ class VMSManager:
             f"Backfill: scanning #{general_channel.name} in '{general_channel.guild.name}' "
             f"back to {cutoff_dt.strftime('%Y-%m-%d')} — BulkProcessor will transcribe concurrently…")
 
+        # Load Whisper fully into memory before we start downloading so the
+        # BulkProcessor worker isn't sitting idle waiting on model load while
+        # files are already piling up in the queue.
+        self.bot.logger.log(MODULE_NAME, "Backfill: pre-loading Whisper model…")
+        loop = asyncio.get_event_loop()
+        model = await loop.run_in_executor(self._executor, _load_whisper)
+        if model is None:
+            self.bot.logger.log(MODULE_NAME,
+                "Backfill: Whisper failed to load — transcription will be skipped, "
+                "files will still be downloaded", "WARNING")
+        else:
+            self.bot.logger.log(MODULE_NAME, "Backfill: Whisper ready")
+
         # Start BulkProcessor now so it's ready to receive files immediately
         self._bulk_stop.clear()
         self._bulk_proc = BulkProcessor(

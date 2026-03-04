@@ -976,148 +976,174 @@ class VMSManager:
 
     # ----------------------------------------------- Retroactive Processing --
 
-    async def process_unprocessed(self):
+    def _scan_and_conform(self) -> list:
         """
-        Startup scan — covers /data/vms/, /data/vms/archive/, and /data/vms/broken/.
+        Synchronous worker — safe to run in a thread executor.
 
-        Phase 1 — CONFORM: rename already-processed files in all dirs that
-                   don't yet follow vm-{id}.ogg.
-        Phase 2 — REGISTER: find .ogg files in all three dirs not in the DB
-                   and insert them with NULL discord metadata.
-        Phase 3 — RENAME: give every newly-registered pending file its
-                   canonical name inside whichever dir it already lives in.
-        Phase 4 — DISPATCH: send all processed=0 rows to BulkProcessor or
-                   the live queue.
+        Phase 1: Conform already-processed files to vm-{id}.ogg, batching
+                 DB updates (BULK_BATCH_SIZE rows per commit).
+        Phase 2: Register untracked .ogg files from vms/, archive/, broken/
+                 using batched INSERTs; reads duration inline (no per-file
+                 async calls needed — we're already off the event loop).
+        Phase 2b: Reset archived-but-untranscribed rows back to pending.
+        Phase 3: Rename all pending non-canonical files, batching DB updates.
 
-        Archive files that lack a transcript are re-queued for transcription
-        (processed set back to 0) so BulkProcessor picks them up.
-        Broken-dir files are registered as processed=4 — no reprocessing.
+        Returns list of (vm_id, filepath) pairs ready for dispatch.
         """
-        self.bot.logger.log(MODULE_NAME,
-            "Startup scan: conforming names and registering files in all dirs…")
-
         scan_dirs = [
-            (self.vms_dir,    "vms"),
-            (self.archive_dir, "archive"),
-            (_broken_dir(),   "broken"),
+            (self.vms_dir,     "vms",     0),
+            (self.archive_dir, "archive", 2),
+            (_broken_dir(),    "broken",  4),
         ]
 
-        # ── Phase 1: Conform already-processed / archived files ──────────────
+        # ── Phase 1: Conform processed/archived/broken filenames ─────────────
         non_canonical = self._db_all(
             """SELECT id, filepath, filename FROM vms
                WHERE processed IN (1, 2, 4)
                  AND filename != ('vm-' || id || '.ogg')"""
         )
+        updates = []
         conformed = 0
         for vm_id, fp, old_name in non_canonical:
-            old_path = Path(fp)
             try:
-                new_path = _rename_to_canonical(old_path, vm_id)
-                self._db_exec(
-                    "UPDATE vms SET filename=?, filepath=? WHERE id=?",
-                    (new_path.name, str(new_path), vm_id)
-                )
+                new_path = _rename_to_canonical(Path(fp), vm_id)
+                updates.append((new_path.name, str(new_path), vm_id))
                 conformed += 1
             except Exception as exc:
-                self.bot.logger.log(MODULE_NAME,
-                    f"Could not conform VM #{vm_id} ({old_name}): {exc}", "WARNING")
+                print(f"[{MODULE_NAME}] Conform warning VM #{vm_id} ({old_name}): {exc}")
+            if len(updates) >= BULK_BATCH_SIZE:
+                self._db_batch_update(
+                    "UPDATE vms SET filename=?, filepath=? WHERE id=?", updates)
+                updates = []
+        if updates:
+            self._db_batch_update(
+                "UPDATE vms SET filename=?, filepath=? WHERE id=?", updates)
         if conformed:
-            self.bot.logger.log(MODULE_NAME,
-                f"Conformed {conformed} existing VM filename(s) to canonical format")
+            print(f"[{MODULE_NAME}] Conformed {conformed} filename(s) to canonical format")
 
-        # ── Phase 2: Register untracked files from every dir ─────────────────
+        # ── Phase 2: Register untracked files ────────────────────────────────
+        # Build lookup sets so we don't hit the DB per-file
+        existing_names = {r[0] for r in self._db_all("SELECT filename FROM vms")}
+        existing_paths = {r[0] for r in self._db_all("SELECT filepath FROM vms")}
+
+        inserts = []   # (filename, filepath, processed, created_at, duration)
         new_counts = {}
-        for scan_dir, label in scan_dirs:
+        for scan_dir, label, proc_state in scan_dirs:
             new = 0
             for ogg in sorted(scan_dir.glob("*.ogg")):
-                if self._db_one("SELECT id FROM vms WHERE filename=?", (ogg.name,)):
-                    continue
-                if self._db_one("SELECT id FROM vms WHERE filepath=?", (str(ogg),)):
+                if ogg.name in existing_names or str(ogg) in existing_paths:
                     continue
                 mtime = int(ogg.stat().st_mtime)
-                dur   = await asyncio.get_event_loop().run_in_executor(
-                    self._executor, _get_ogg_duration, str(ogg)
-                )
-                if label == "broken":
-                    # Register broken files as already-quarantined (processed=4)
-                    self._db_exec(
-                        """INSERT OR IGNORE INTO vms
-                           (filename, filepath, processed, created_at, duration_secs)
-                           VALUES (?, ?, 4, ?, ?)""",
-                        (ogg.name, str(ogg), mtime, dur)
-                    )
-                elif label == "archive":
-                    # Register archived files — mark as archived (processed=2)
-                    # but with no transcript so Phase 4 will re-queue them
-                    self._db_exec(
-                        """INSERT OR IGNORE INTO vms
-                           (filename, filepath, processed, created_at, duration_secs)
-                           VALUES (?, ?, 2, ?, ?)""",
-                        (ogg.name, str(ogg), mtime, dur)
-                    )
-                else:
-                    self._db_exec(
-                        """INSERT OR IGNORE INTO vms
-                           (filename, filepath, processed, created_at, duration_secs)
-                           VALUES (?, ?, 0, ?, ?)""",
-                        (ogg.name, str(ogg), mtime, dur)
-                    )
+                dur   = _get_ogg_duration(str(ogg))
+                inserts.append((ogg.name, str(ogg), proc_state, mtime, dur))
+                existing_names.add(ogg.name)
+                existing_paths.add(str(ogg))
                 new += 1
+                if len(inserts) >= BULK_BATCH_SIZE:
+                    self._db_batch_insert(inserts)
+                    inserts = []
             if new:
                 new_counts[label] = new
+        if inserts:
+            self._db_batch_insert(inserts)
         if new_counts:
             parts = ", ".join(f"{n} in /{l}" for l, n in new_counts.items())
-            self.bot.logger.log(MODULE_NAME,
-                f"Registered untracked files: {parts} "
-                f"(discord metadata will be NULL for retroactive entries)")
+            print(f"[{MODULE_NAME}] Registered untracked files: {parts} "
+                  f"(discord metadata NULL for retroactive entries)")
 
-        # ── Phase 2b: Reset archived-but-untranscribed rows to pending ───────
-        # These are in the archive dir but were never transcribed (e.g. pre-existing
-        # files or files archived before transcription completed).
-        untranscribed_archived = self._db_all(
+        # ── Phase 2b: Reset archived-but-untranscribed to pending ────────────
+        untranscribed = self._db_all(
             """SELECT id, filepath FROM vms
                WHERE processed = 2
                  AND (transcript IS NULL OR transcript = '')"""
         )
-        reset = 0
-        for vm_id, fp in untranscribed_archived:
-            if Path(fp).exists():
-                self._db_exec(
-                    "UPDATE vms SET processed=0 WHERE id=?", (vm_id,)
-                )
-                reset += 1
-        if reset:
-            self.bot.logger.log(MODULE_NAME,
-                f"Reset {reset} archived-but-untranscribed VM(s) to pending")
+        reset_ids = [vid for vid, fp in untranscribed if Path(fp).exists()]
+        if reset_ids:
+            for i in range(0, len(reset_ids), BULK_BATCH_SIZE):
+                chunk = reset_ids[i:i + BULK_BATCH_SIZE]
+                placeholders = ",".join("?" * len(chunk))
+                conn = self._conn()
+                try:
+                    conn.execute(
+                        f"UPDATE vms SET processed=0 WHERE id IN ({placeholders})",
+                        chunk)
+                    conn.commit()
+                finally:
+                    conn.close()
+            print(f"[{MODULE_NAME}] Reset {len(reset_ids)} archived-but-untranscribed VM(s) to pending")
 
-        # ── Phase 3: Rename all pending files that aren't canonical yet ───────
+        # ── Phase 3: Rename pending files to canonical ───────────────────────
         needs_rename = self._db_all(
             """SELECT id, filepath FROM vms
                WHERE processed = 0
                  AND filename != ('vm-' || id || '.ogg')"""
         )
+        updates = []
         for vm_id, fp in needs_rename:
-            old_path = Path(fp)
             try:
-                new_path = _rename_to_canonical(old_path, vm_id)
-                self._db_exec(
-                    "UPDATE vms SET filename=?, filepath=? WHERE id=?",
-                    (new_path.name, str(new_path), vm_id)
-                )
+                new_path = _rename_to_canonical(Path(fp), vm_id)
+                updates.append((new_path.name, str(new_path), vm_id))
             except Exception as exc:
-                self.bot.logger.log(MODULE_NAME,
-                    f"Rename failed for VM #{vm_id}: {exc}", "WARNING")
+                print(f"[{MODULE_NAME}] Rename failed for VM #{vm_id}: {exc}")
+            if len(updates) >= BULK_BATCH_SIZE:
+                self._db_batch_update(
+                    "UPDATE vms SET filename=?, filepath=? WHERE id=?", updates)
+                updates = []
+        if updates:
+            self._db_batch_update(
+                "UPDATE vms SET filename=?, filepath=? WHERE id=?", updates)
 
-        # ── Phase 4: Collect and dispatch all pending rows ────────────────────
+        # ── Collect valid pending rows for Phase 4 ───────────────────────────
         pending = self._db_all(
             "SELECT id, filepath FROM vms WHERE processed=0 AND filepath IS NOT NULL"
         )
         valid   = [(vid, fp) for vid, fp in pending if Path(fp).exists()]
         missing = len(pending) - len(valid)
         if missing:
-            self.bot.logger.log(MODULE_NAME,
-                f"{missing} pending VM(s) have missing files — skipping", "WARNING")
+            print(f"[{MODULE_NAME}] {missing} pending VM(s) have missing files — skipping")
+        return valid
 
+    def _db_batch_update(self, query: str, params: list):
+        """Execute an executemany update in a single connection/commit."""
+        if not params:
+            return
+        conn = self._conn()
+        try:
+            conn.executemany(query, params)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _db_batch_insert(self, rows: list):
+        """Batch-insert untracked file rows."""
+        if not rows:
+            return
+        conn = self._conn()
+        try:
+            conn.executemany(
+                """INSERT OR IGNORE INTO vms
+                   (filename, filepath, processed, created_at, duration_secs)
+                   VALUES (?, ?, ?, ?, ?)""",
+                rows,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    async def process_unprocessed(self):
+        """
+        Startup entry point — offloads all blocking scan/conform/rename work
+        to a thread executor so the event loop never freezes, then dispatches
+        the resulting pending list for transcription.
+        """
+        self.bot.logger.log(MODULE_NAME,
+            "Startup scan: conforming names and registering files in all dirs…")
+
+        valid = await asyncio.get_event_loop().run_in_executor(
+            self._executor, self._scan_and_conform
+        )
+
+        # ── Phase 4: Dispatch (back in async context) ─────────────────────────
         if not valid:
             self.bot.logger.log(MODULE_NAME, "No pending VMs to process")
             return

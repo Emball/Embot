@@ -13,7 +13,6 @@ import json
 import os
 from pathlib import Path
 import io
-from dataclasses import dataclass, field as _field
 from PIL import Image, ImageDraw, ImageFont
 import pytz
 import tempfile
@@ -152,6 +151,16 @@ CREATE TABLE IF NOT EXISTS mod_startup_log (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     startup_time INTEGER NOT NULL
 );
+
+-- ── Sensitive word lists (base64-encoded, never stored in plaintext) ──────────
+-- category: 'racial_slurs' | 'child_safety'
+-- term_b64: base64-encoded canonical root form of the term
+CREATE TABLE IF NOT EXISTS mod_sensitive_lists (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    category    TEXT NOT NULL,
+    term_b64    TEXT NOT NULL,
+    UNIQUE(category, term_b64)
+);
 """
 
 # ── Default seed data ─────────────────────────────────────────────────────────
@@ -239,15 +248,33 @@ def _migrate(db_path: str) -> None:
                 cfg["elevated_roles"] = [r["role_name"] for r in rows]
 
         # ── Pull word lists ───────────────────────────────────────────────────
+        # racial_slurs and child_safety are no longer stored in JSON —
+        # they live in mod_sensitive_lists (base64-encoded). If the old
+        # mod_word_lists table exists, migrate those categories into the new
+        # DB table and keep only the non-sensitive categories in the JSON.
         if "mod_word_lists" in tables:
+            import base64 as _b64m
             rows = conn.execute(
                 "SELECT category, term FROM mod_word_lists ORDER BY category, id"
             ).fetchall()
             if rows:
-                known_categories = {"child_safety", "racial_slurs", "tos_violations", "banned_words"}
-                wl: dict = {c: [] for c in known_categories}
+                sensitive_cats = {"child_safety", "racial_slurs"}
+                wl: dict = {"tos_violations": [], "banned_words": []}
                 for r in rows:
-                    wl.setdefault(r["category"], []).append(r["term"])
+                    cat, term = r["category"], r["term"]
+                    if cat in sensitive_cats:
+                        # Migrate to mod_sensitive_lists (base64-encoded canonical root)
+                        enc = _b64m.b64encode(term.lower().encode()).decode()
+                        try:
+                            conn.execute(
+                                "INSERT OR IGNORE INTO mod_sensitive_lists "
+                                "(category, term_b64) VALUES (?,?)",
+                                (cat, enc),
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        wl.setdefault(cat, []).append(term)
                 cfg["word_lists"] = wl
 
         # ── Merge rules.json ──────────────────────────────────────────────────
@@ -284,12 +311,83 @@ def _migrate(db_path: str) -> None:
 
 def _init_db(db_path: str) -> None:
     """Create schema on first run. Safe to call on every startup."""
+    import base64 as _b64
     conn = sqlite3.connect(db_path)
     try:
         conn.executescript(DB_SCHEMA)
         conn.commit()
+
+        # Seed sensitive lists if empty (first-run only).
+        # Terms are stored as base64 of the canonical root (lowercase).
+        # The fuzzy matcher handles case/punctuation/spacing variants at runtime.
+        _RACIAL_SLUR_ROOTS = [
+            "nigger", "nigga", "chink", "spic", "spick", "beaner", "wetback",
+            "kike", "gook", "zipperhead", "towelhead", "raghead", "sandnigger",
+            "cracker", "honky", "coon", "jigaboo", "porch monkey",
+            "jungle bunny", "spook", "sambo", "pickaninny", "uncle tom",
+            "oreo", "redskin", "squaw", "injun", "heeb", "hymie", "yid",
+            "slope", "slant", "nip", "flip", "wop", "dago", "guinea",
+            "mick", "paddy", "kraut", "fritz", "jap", "cholo",
+            "gringo", "gabacho", "mulatto", "halfbreed", "half-breed",
+            "blackie", "darkie", "brownie", "chinaman",
+            "coolie", "pikey", "gypsy", "gypo", "fenian", "taig",
+        ]
+        _CHILD_SAFETY_ROOTS = [
+            "child porn",
+            "cp",
+            "csam",
+        ]
+
+        existing_slurs = conn.execute(
+            "SELECT COUNT(*) FROM mod_sensitive_lists WHERE category='racial_slurs'"
+        ).fetchone()[0]
+        if existing_slurs == 0:
+            for root in _RACIAL_SLUR_ROOTS:
+                enc = _b64.b64encode(root.encode()).decode()
+                conn.execute(
+                    "INSERT OR IGNORE INTO mod_sensitive_lists (category, term_b64) VALUES (?,?)",
+                    ("racial_slurs", enc),
+                )
+
+        existing_cs = conn.execute(
+            "SELECT COUNT(*) FROM mod_sensitive_lists WHERE category='child_safety'"
+        ).fetchone()[0]
+        if existing_cs == 0:
+            for root in _CHILD_SAFETY_ROOTS:
+                enc = _b64.b64encode(root.encode()).decode()
+                conn.execute(
+                    "INSERT OR IGNORE INTO mod_sensitive_lists (category, term_b64) VALUES (?,?)",
+                    ("child_safety", enc),
+                )
+
+        conn.commit()
     finally:
         conn.close()
+
+
+def _get_sensitive_list(db_path: str, category: str) -> List[str]:
+    """Return decoded terms for a sensitive category from the DB."""
+    import base64 as _b64
+    rows = _db_all(db_path,
+                   "SELECT term_b64 FROM mod_sensitive_lists WHERE category=? ORDER BY id",
+                   (category,))
+    return [_b64.b64decode(r["term_b64"]).decode() for r in rows]
+
+
+def _add_sensitive_term(db_path: str, category: str, term: str) -> None:
+    import base64 as _b64
+    enc = _b64.b64encode(term.lower().encode()).decode()
+    _db_exec(db_path,
+             "INSERT OR IGNORE INTO mod_sensitive_lists (category, term_b64) VALUES (?,?)",
+             (category, enc))
+
+
+def _remove_sensitive_term(db_path: str, category: str, term: str) -> None:
+    import base64 as _b64
+    enc = _b64.b64encode(term.lower().encode()).decode()
+    _db_exec(db_path,
+             "DELETE FROM mod_sensitive_lists WHERE category=? AND term_b64=?",
+             (category, enc))
 
 
 # ==================== DB CONNECTION HELPERS ====================
@@ -329,11 +427,14 @@ class ModConfig:
     """
     Reads user-configurable values from config/moderation.json.
     Mutations (add/remove word, add/remove role) write back to the JSON file atomically.
+    Sensitive word lists (racial_slurs, child_safety) are stored base64-encoded in the
+    DB and never appear in the JSON config.
     Call reload() to pick up manual edits without restarting.
     """
 
-    def __init__(self):
+    def __init__(self, db_path: str = None):
         self._data: dict = _load_config()
+        self._db: str = db_path or _db_path()
 
     def reload(self) -> None:
         """Re-read config/moderation.json from disk."""
@@ -431,11 +532,21 @@ class ModConfig:
 
     @property
     def child_safety(self) -> List[str]:
-        return self.get_word_list("child_safety")
+        """Returns canonical root terms from DB (base64-decoded). Never from JSON."""
+        return _get_sensitive_list(self._db, "child_safety")
 
     @property
     def racial_slurs(self) -> List[str]:
-        return self.get_word_list("racial_slurs")
+        """Returns canonical root terms from DB (base64-decoded). Never from JSON."""
+        return _get_sensitive_list(self._db, "racial_slurs")
+
+    def add_sensitive_term(self, category: str, term: str) -> None:
+        """Add a term to a sensitive list in the DB."""
+        _add_sensitive_term(self._db, category, term)
+
+    def remove_sensitive_term(self, category: str, term: str) -> None:
+        """Remove a term from a sensitive list in the DB."""
+        _remove_sensitive_term(self._db, category, term)
 
     @property
     def tos_violations(self) -> List[str]:
@@ -493,10 +604,92 @@ def get_event_logger(bot):
     return getattr(bot, '_logger_event_logger', None)
 
 def matches_banned_term(term: str, content_lower: str) -> bool:
+    """
+    Exact-ish match for the general banned_words list.
+    URLs are matched as substrings; other terms use whole-word boundary matching
+    and also catch simple possessives/contractions (word's, word').
+    The canonical form in the config need only be the root — e.g. 'embis' will
+    also catch 'Embis', 'embis!', "embis's", 'embiz' (z-swap handled here).
+    """
     term_lower = term.lower()
+
+    # URL terms: plain substring match
     if "://" in term_lower or "www." in term_lower:
         return term_lower in content_lower
-    return bool(re.search(r'\b' + re.escape(term_lower) + r'\b', content_lower))
+
+    # Strip the content of punctuation that could be used to evade word-boundary
+    # detection (except spaces), then do a word-boundary search.
+    stripped = re.sub(r"[^\w\s]", "", content_lower)
+    pattern  = r'\b' + re.escape(term_lower) + r'\b'
+    if re.search(pattern, stripped):
+        return True
+
+    # Also check original content with word boundaries (catches mid-sentence punctuation)
+    if re.search(pattern, content_lower):
+        return True
+
+    return False
+
+
+def matches_sensitive_term(root: str, content: str) -> bool:
+    """
+    Bypass-resistant matcher for racial slurs and child safety terms.
+    'root' is the canonical lowercase form stored in the DB.
+
+    Handles:
+    - Case variations (Nigger, NIGGER)
+    - Repeated characters used to evade filters (niiiigger, niggger)
+    - Space/punctuation insertion (n-i-g-g-e-r, n i g g e r, n.i.g.g.e.r)
+    - Common letter substitutions (i→1, a→@, e→3, o→0, s→$)
+    - Suffix additions (possessives, plurals, punctuation)
+    - z/s swaps (niggaz)
+    """
+    content_lower = content.lower()
+
+    # 1. Direct whole-word match on stripped content (handles punctuation insertion)
+    stripped_content = re.sub(r"[^\w\s]", "", content_lower)
+    if re.search(r'\b' + re.escape(root) + r'\b', stripped_content):
+        return True
+
+    # 2. Collapse repeated characters in content for each unique char in root,
+    #    then re-test (catches n-i-g-g-g-e-r, niiigger, etc.)
+    collapsed = re.sub(r'(.)\1{2,}', r'\1\1', content_lower)  # 3+ repeats → 2
+    collapsed = re.sub(r'(.)\1+', r'\1', collapsed)            # any repeat → 1
+    stripped_collapsed = re.sub(r"[^\w\s]", "", collapsed)
+    if re.search(r'\b' + re.escape(root) + r'\b', stripped_collapsed):
+        return True
+
+    # 3. Strip ALL non-alpha chars from content and root, then substring-search.
+    #    This catches space-separated (n i g g e r) and hyphenated variants.
+    alpha_content = re.sub(r'[^a-z]', '', content_lower)
+    alpha_root    = re.sub(r'[^a-z]', '', root)
+    if alpha_root and alpha_root in alpha_content:
+        return True
+
+    # 4. Leet-speak substitution table — normalise content then re-test root.
+    leet_map = str.maketrans({
+        '1': 'i', '!': 'i', '|': 'i',
+        '3': 'e',
+        '4': 'a', '@': 'a',
+        '0': 'o',
+        '$': 's', '5': 's',
+        '7': 't',
+        '+': 't',
+        '8': 'b',
+    })
+    deleet = content_lower.translate(leet_map)
+    stripped_deleet = re.sub(r"[^\w\s]", "", deleet)
+    if re.search(r'\b' + re.escape(alpha_root) + r'\b',
+                 re.sub(r'[^a-z\s]', '', stripped_deleet)):
+        return True
+
+    # 5. z ↔ s/r swap (niggaz → niggas → nigger family)
+    z_normalised = re.sub(r'z\b', 's', content_lower)
+    stripped_z   = re.sub(r"[^\w\s]", "", z_normalised)
+    if re.search(r'\b' + re.escape(root) + r'\b', stripped_z):
+        return True
+
+    return False
 
 
 # ==================== UNIFIED CONTEXT ====================
@@ -758,230 +951,6 @@ class BanAppealModal(ui.Modal, title="Ban Appeal"):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-# ==================== MEDIA SAFETY SCANNER ====================
-
-_EXPLICIT_LABELS = {
-    "EXPOSED_ANUS", "EXPOSED_BUTTOCKS", "EXPOSED_BREAST_F",
-    "EXPOSED_GENITALIA_F", "EXPOSED_GENITALIA_M", "EXPOSED_BELLY",
-}
-_NUDENET_THRESHOLD = 0.45
-_AGE_THRESHOLD     = 20
-_SCAN_IMAGE_EXTS   = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff', '.tif'}
-_SCAN_VIDEO_EXTS   = {'.mp4', '.mov', '.webm', '.avi', '.mkv'}
-
-_nudenet_model  = None
-_deepface_ready = False
-
-def _load_nudenet():
-    global _nudenet_model
-    if _nudenet_model is None:
-        try:
-            from nudenet import NudeClassifier  # type: ignore
-            _nudenet_model = NudeClassifier()
-        except ImportError:
-            pass
-        except Exception as e:
-            import logging
-            logging.getLogger("MediaScanner").error(f"NudeNet load failed: {e}")
-    return _nudenet_model
-
-def _load_deepface():
-    global _deepface_ready
-    try:
-        import deepface  # noqa  type: ignore
-        _deepface_ready = True
-    except ImportError:
-        _deepface_ready = False
-    return _deepface_ready
-
-import logging as _logging
-_scanner_log = _logging.getLogger("MediaScanner")
-
-@dataclass
-class _FileScanResult:
-    filename: str
-    scannable: bool
-    explicit: bool = False
-    min_age: Optional[float] = None
-    blocked: bool = False
-    reason: str = ""
-
-@dataclass
-class ScanVerdict:
-    blocked: bool
-    safe_files: list = _field(default_factory=list)
-    blocked_files: list = _field(default_factory=list)
-
-
-class MediaScanner:
-    def __init__(self, bot, cfg: ModConfig, get_bot_logs_fn):
-        self.bot            = bot
-        self.cfg            = cfg
-        self._get_bot_logs  = get_bot_logs_fn
-        self._models_loaded = False
-        self._load_lock     = asyncio.Lock()
-
-    async def _ensure_models(self):
-        if self._models_loaded:
-            return
-        async with self._load_lock:
-            if self._models_loaded:
-                return
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _load_nudenet)
-            await loop.run_in_executor(None, _load_deepface)
-            self._models_loaded = True
-
-    async def scan_files(self, files_data: list, guild=None, context: str = "") -> ScanVerdict:
-        await self._ensure_models()
-        loop = asyncio.get_running_loop()
-        safe, blocked = [], []
-
-        for entry in files_data:
-            filename: str = entry['filename']
-            data: bytes   = entry['data']
-            ext = os.path.splitext(filename.lower())[1]
-
-            if ext not in _SCAN_IMAGE_EXTS and ext not in _SCAN_VIDEO_EXTS:
-                safe.append(entry)
-                continue
-
-            result = _FileScanResult(filename=filename, scannable=True)
-            try:
-                is_explicit = await loop.run_in_executor(
-                    None, self._nudenet_scan, data, ext)
-                result.explicit = is_explicit
-                if is_explicit:
-                    min_age = await loop.run_in_executor(
-                        None, self._deepface_age, data)
-                    result.min_age = min_age
-                    if min_age is not None and min_age < _AGE_THRESHOLD:
-                        result.blocked = True
-                        result.reason  = (f"Explicit + apparent age "
-                                          f"{min_age:.1f} < {_AGE_THRESHOLD}")
-            except Exception as e:
-                result.blocked = True
-                result.reason  = f"Scan error (blocked as precaution): {e}"
-                _scanner_log.error(f"Scan error [{filename}]: {e}")
-
-            if result.blocked:
-                blocked.append(result)
-            else:
-                safe.append(entry)
-
-        verdict = ScanVerdict(blocked=bool(blocked), safe_files=safe, blocked_files=blocked)
-        if verdict.blocked:
-            await self._alert(verdict, guild, context)
-        return verdict
-
-    def _nudenet_scan(self, data: bytes, ext: str) -> bool:
-        if _nudenet_model is None:
-            return False
-        if ext in _SCAN_VIDEO_EXTS:
-            data = self._first_frame(data)
-            if data is None:
-                return False
-            ext = '.jpg'
-        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-            tmp.write(data)
-            path = tmp.name
-        try:
-            result = _nudenet_model.classify(path)
-            preds  = list(result.values())[0] if result else {}
-            return any(
-                lbl in _EXPLICIT_LABELS and conf >= _NUDENET_THRESHOLD
-                for lbl, conf in preds.items()
-            )
-        finally:
-            try:
-                os.unlink(path)
-            except Exception:
-                pass
-
-    def _deepface_age(self, data: bytes) -> Optional[float]:
-        if not _deepface_ready:
-            return None
-        try:
-            from deepface import DeepFace  # type: ignore
-            import numpy as np
-            from PIL import Image as _Image
-            arr     = np.array(_Image.open(io.BytesIO(data)).convert("RGB"))
-            results = DeepFace.analyze(arr, actions=["age"],
-                                        enforce_detection=False, silent=True)
-            if isinstance(results, dict):
-                results = [results]
-            ages = [float(r["age"]) for r in results if r.get("age") is not None]
-            return min(ages) if ages else None
-        except Exception as e:
-            _scanner_log.warning(f"DeepFace age error: {e}")
-            return None
-
-    def _first_frame(self, video_data: bytes) -> Optional[bytes]:
-        try:
-            import cv2, numpy as np  # type: ignore
-            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp:
-                tmp.write(video_data)
-                path = tmp.name
-            try:
-                cap = cv2.VideoCapture(path)
-                ret, frame = cap.read()
-                cap.release()
-                if not ret or frame is None:
-                    return None
-                _, buf = cv2.imencode('.jpg', frame)
-                return buf.tobytes()
-            finally:
-                try:
-                    os.unlink(path)
-                except Exception:
-                    pass
-        except ImportError:
-            return None
-        except Exception as e:
-            _scanner_log.error(f"First-frame extraction failed: {e}")
-            return None
-
-    async def _alert(self, verdict: ScanVerdict, guild, context: str):
-        summary = "\n".join(
-            f"• `{r.filename}` — {r.reason}" for r in verdict.blocked_files)
-        embed = discord.Embed(
-            title="🚫 Re-host Blocked — Potential Illegal Content",
-            description=(
-                "One or more files were **blocked from re-hosting**. "
-                "Encrypted copies have been deleted. "
-                "**No image content is included in this report.**"
-            ),
-            color=0xff0000,
-            timestamp=datetime.now(timezone.utc),
-        )
-        embed.add_field(name="Context", value=context or "*(none)*", inline=False)
-        embed.add_field(
-            name=f"Blocked ({len(verdict.blocked_files)})",
-            value=summary[:1024], inline=False)
-        embed.add_field(
-            name="Action Required",
-            value=(
-                "Review via Discord audit logs. If content is illegal, report to "
-                "Discord Trust & Safety and NCMEC CyberTipline (missingkids.org)."
-            ),
-            inline=False,
-        )
-        embed.set_footer(text="No flagged content was uploaded to Discord CDN")
-        try:
-            owner = await self.bot.fetch_user(self.cfg.owner_id)
-            if owner:
-                await owner.send(embed=embed)
-        except Exception:
-            pass
-        if guild:
-            try:
-                ch = self._get_bot_logs(guild)
-                if ch:
-                    await ch.send(embed=embed)
-            except Exception:
-                pass
-
-
 # ==================== RULES MANAGER ====================
 
 class RulesManager:
@@ -1161,7 +1130,7 @@ class ModerationSystem:
         # Initialise DB schema
         _init_db(self._db)
 
-        self.cfg     = ModConfig()
+        self.cfg     = ModConfig(db_path=self._db)
 
         # Persistent Fernet key — derived from FERNET_KEY env var.
         # If the env var is absent a new random key is generated and a loud
@@ -1188,9 +1157,6 @@ class ModerationSystem:
         # Encrypted media staging directory
         self.media_dir = _script_dir() / "cache" / "moderation"
         self.media_dir.mkdir(exist_ok=True)
-
-        # Pre-upload safety scanner
-        self.scanner = MediaScanner(bot, self.cfg, self._get_bot_logs_channel)
 
         # Purge orphaned .enc files from previous run
         _purged = 0
@@ -1802,20 +1768,6 @@ class ModerationSystem:
             return None
         if log_id is None:
             log_id = f"LOG-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
-
-        if files_data:
-            verdict = await self.scanner.scan_files(
-                files_data, guild=guild,
-                context=f"bot-log send (log_id={log_id})")
-            if verdict.blocked and not verdict.safe_files:
-                embed.add_field(
-                    name="⚠️ Attachment(s) Withheld",
-                    value="One or more files were blocked by MediaScanner. "
-                          "The server owner has been alerted.",
-                    inline=False)
-                files_data = None
-            elif verdict.blocked:
-                files_data = verdict.safe_files
 
         try:
             if files_data:
@@ -3201,13 +3153,35 @@ def setup(bot):
 
         content_lower = message.content.lower()
 
+        # ── Child safety ──────────────────────────────────────────────────────
+        # "cp" and "child porn" trigger a DM redirecting to CSAM terminology
+        # before auto-banning. All other child safety terms go straight to ban.
+        _CS_DM_TERMS = {"cp", "child porn"}
         for word in _cfg.child_safety:
-            if matches_banned_term(word, content_lower):
+            if matches_sensitive_term(word, message.content):
                 try:
                     await message.delete()
+                    if word in _CS_DM_TERMS:
+                        try:
+                            dm = discord.Embed(
+                                title="⚠️ Terminology Notice",
+                                description=(
+                                    "Your message was removed because it contained "
+                                    "a term associated with child sexual abuse material.\n\n"
+                                    "Please use the term **CSAM** (Child Sexual Abuse Material) "
+                                    "when discussing this topic. This is the standard term "
+                                    "used by law enforcement and child safety organizations."
+                                ),
+                                color=0xe67e22,
+                                timestamp=datetime.now(timezone.utc),
+                            )
+                            dm.set_footer(text="Further violations will result in a permanent ban.")
+                            await message.author.send(embed=dm)
+                        except discord.Forbidden:
+                            pass
                     await message.guild.ban(
                         message.author,
-                        reason=f"Auto-ban: Child safety violation - '{word}'")
+                        reason=f"Auto-ban: Child safety violation (matched '{word}')")
                     bot.logger.log(
                         MODULE_NAME, f"AUTO-BAN: {message.author} child safety", "WARNING")
                     el = get_event_logger(bot)
@@ -3219,8 +3193,9 @@ def setup(bot):
                     bot.logger.error(MODULE_NAME, "Auto-ban failed", e)
                 return
 
+        # ── Racial slurs ──────────────────────────────────────────────────────
         for word in _cfg.racial_slurs:
-            if matches_banned_term(word, content_lower):
+            if matches_sensitive_term(word, message.content):
                 try:
                     await message.delete()
                     count = _mod.add_strike(

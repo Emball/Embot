@@ -1097,11 +1097,11 @@ class VMSManager:
 
         # ── Phase 2b: Reset archived-but-untranscribed to pending ────────────
         untranscribed = self._db_all(
-            """SELECT id, filepath FROM vms
+            """SELECT id FROM vms
                WHERE processed = 2
                  AND (transcript IS NULL OR transcript = '')"""
         )
-        reset_ids = [vid for vid, fp in untranscribed if Path(fp).exists()]
+        reset_ids = [r[0] for r in untranscribed]  # no path check — files not renamed yet
         if reset_ids:
             for i in range(0, len(reset_ids), SCAN_BATCH_SIZE):
                 chunk = reset_ids[i:i + SCAN_BATCH_SIZE]

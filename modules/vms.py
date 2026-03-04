@@ -2,10 +2,10 @@
 """
 VMS — Voice Message System for Embot
 =====================================
-• Detects & saves Discord voice messages to /data/vms/
-• DB lives at                              /data/vms/vms.db
-• Archives live at                         /data/vms/archive/
-• Transcribes using OpenAI Whisper (auto-downloads model to /data/)
+• Detects & saves Discord voice messages to cache/vms/
+• DB lives at                              db/vms.db
+• Archives live at                         cache/vms/archive/
+• Transcribes using OpenAI Whisper (auto-downloads model to cache/whisper_models/)
 • Posts transcripts as plain blockquote replies (no embeds)
 • Saves transcripts to SQLite DB for keyword playback
 • Archives after 150 days, deletes after 365 days

@@ -19,8 +19,37 @@ from concurrent.futures import ThreadPoolExecutor  # ✅ REMOVED DUPLICATE IMPOR
 METADATA_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 MODULE_NAME = "ARCHIVE"
 
+# Serialises concurrent reads/writes of CACHE_INDEX to prevent JSON corruption
+_cache_lock = asyncio.Lock()
+
 # Configuration
-EMINEM_ROOT = Path(r"D:\Media\Music\Eminem")
+# Set EMINEM_ROOT via the EMINEM_ROOT environment variable or archive_config.json
+import json as _json
+
+def _load_eminem_root() -> Path:
+    """Load EMINEM_ROOT from env var, then config file, then raise a clear error."""
+    env_val = os.environ.get("EMINEM_ROOT")
+    if env_val:
+        return Path(env_val)
+    config_file = Path(__file__).parent.parent / "config" / "archive_config.json"
+    if config_file.exists():
+        try:
+            data = _json.loads(config_file.read_text(encoding="utf-8"))
+            if "eminem_root" in data:
+                return Path(data["eminem_root"])
+        except Exception:
+            pass
+    raise FileNotFoundError(
+        "EMINEM_ROOT is not configured. Set the EMINEM_ROOT environment variable "
+        "or add 'eminem_root' to config/archive_config.json."
+    )
+
+try:
+    EMINEM_ROOT = _load_eminem_root()
+except FileNotFoundError as _e:
+    import sys as _sys
+    print(f"[ARCHIVE] WARNING: {_e}", file=_sys.stderr)
+    EMINEM_ROOT = Path(".")  # safe fallback — commands will fail gracefully
 FORMATS = ["FLAC", "MP3"]
 CACHE_CHANNEL_NAME = "songcache"
 INDEX_FILE = str(Path(__file__).parent.parent / "cache" / "archive" / "song_index.json")
@@ -357,60 +386,64 @@ def select_best_candidate(cands, version=None):
 
 
 async def get_cached_url(bot, file_path):
-    """Get or create a cached Discord URL for a file"""
+    """Get or create a cached Discord URL for a file (race-safe via asyncio.Lock)."""
     p = Path(file_path)
     key = str(p.resolve())
-    
-    try:
-        with open(CACHE_INDEX, 'r', encoding='utf-8') as f:
-            cache = json.load(f)
-    except FileNotFoundError:
-        cache = {}
-    except Exception as e:
-        bot.logger.error(MODULE_NAME, "Error loading cache index", e)
-        cache = {}
 
-    now = datetime.utcnow()
-    if key in cache:
-        cache_time = datetime.fromisoformat(cache[key]['timestamp'])
-        if now - cache_time < timedelta(days=CACHE_EXPIRE_DAYS):
-            bot.logger.log(MODULE_NAME, f"Using cached URL for {p.name}")
-            return cache[key]['url']
-
-    chan = discord.utils.get(bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
-    if not chan:
-        bot.logger.log(MODULE_NAME, f"Missing channel {CACHE_CHANNEL_NAME}", "WARNING")
-        return None
-        
-    if not p.exists():
-        bot.logger.error(MODULE_NAME, f"File not found: {file_path}")
-        return None
-
-    try:
-        bot.logger.log(MODULE_NAME, f"Uploading {p.name} to cache channel")
-        mf = discord.File(p, filename=p.name)
-        msg = await chan.send(file=mf)
-        url = msg.attachments[0].url
-        cache[key] = {'url': url, 'timestamp': now.isoformat(), 'message_id': msg.id}
-        
+    # Module-level lock to serialise concurrent cache reads/writes
+    async with _cache_lock:
         try:
-            with open(CACHE_INDEX, 'w', encoding='utf-8') as f:
-                json.dump(cache, f, ensure_ascii=False, indent=2)
-            bot.logger.log(MODULE_NAME, f"Cached new URL for {p.name}")
+            with open(CACHE_INDEX, 'r', encoding='utf-8') as f:
+                cache = json.load(f)
+        except FileNotFoundError:
+            cache = {}
         except Exception as e:
-            bot.logger.error(MODULE_NAME, "Failed to save cache index", e)
-            
-        return url
+            bot.logger.error(MODULE_NAME, "Error loading cache index", e)
+            cache = {}
 
-    except discord.HTTPException as e:
-        if e.status == 413:
-            bot.logger.log(MODULE_NAME, f"File too large: {p.name} ({p.stat().st_size/1024/1024:.2f} MB)", "WARNING")
-            return "FILE_TOO_LARGE"
-        bot.logger.error(MODULE_NAME, f"Upload failed", e)
-        return None
-    except Exception as e:
-        bot.logger.error(MODULE_NAME, "Unexpected upload error", e)
-        return None
+        now = datetime.utcnow()
+        if key in cache:
+            cache_time = datetime.fromisoformat(cache[key]['timestamp'])
+            if now - cache_time < timedelta(days=CACHE_EXPIRE_DAYS):
+                bot.logger.log(MODULE_NAME, f"Using cached URL for {p.name}")
+                return cache[key]['url']
+
+        chan = discord.utils.get(bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
+        if not chan:
+            bot.logger.log(MODULE_NAME, f"Missing channel {CACHE_CHANNEL_NAME}", "WARNING")
+            return None
+
+        if not p.exists():
+            bot.logger.error(MODULE_NAME, f"File not found: {file_path}")
+            return None
+
+        try:
+            bot.logger.log(MODULE_NAME, f"Uploading {p.name} to cache channel")
+            mf = discord.File(p, filename=p.name)
+            msg = await chan.send(file=mf)
+            url = msg.attachments[0].url
+            cache[key] = {'url': url, 'timestamp': now.isoformat(), 'message_id': msg.id}
+
+            try:
+                tmp = CACHE_INDEX + ".tmp"
+                with open(tmp, 'w', encoding='utf-8') as f:
+                    json.dump(cache, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, CACHE_INDEX)
+                bot.logger.log(MODULE_NAME, f"Cached new URL for {p.name}")
+            except Exception as e:
+                bot.logger.error(MODULE_NAME, "Failed to save cache index", e)
+
+            return url
+
+        except discord.HTTPException as e:
+            if e.status == 413:
+                bot.logger.log(MODULE_NAME, f"File too large: {p.name} ({p.stat().st_size/1024/1024:.2f} MB)", "WARNING")
+                return "FILE_TOO_LARGE"
+            bot.logger.error(MODULE_NAME, f"Upload failed", e)
+            return None
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "Unexpected upload error", e)
+            return None
 
 
 async def send_song_embed(bot, user, metadata, url, file_path):

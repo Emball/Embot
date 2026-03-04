@@ -9,6 +9,7 @@ import discord
 from discord.ext import commands
 from pathlib import Path
 from datetime import datetime, timezone
+import json
 import sqlite3
 import asyncio
 
@@ -20,20 +21,25 @@ MODULE_NAME = "STARBOARD"
 # ║  Fill in your settings here. Restart or `reload starboard` to apply.   ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
-CONFIG = {
-    # ID of the channel where starred messages will be posted
-    # Example: 1234567890123456789
-    "channel_id": 1357896154276429984,
+def _load_starboard_config() -> dict:
+    """Load config/starboard_config.json, falling back to defaults."""
+    config_path = _script_dir() / "config" / "starboard_config.json"
+    defaults = {
+        "channel_id": 0,     # Must be set in starboard_config.json
+        "threshold": 3,
+        "emoji": "⭐",
+        "self_star": False,
+    }
+    if config_path.exists():
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            defaults.update(data)
+        except Exception as e:
+            print(f"[STARBOARD] Failed to load starboard_config.json: {e}")
+    return defaults
 
-    # Number of ⭐ reactions required to post a message to the starboard
-    "threshold": 3,
-
-    # The emoji to watch for (standard unicode or custom emoji string)
-    "emoji": "⭐",
-
-    # Allow message authors to star their own messages?
-    "self_star": False,
-}
+CONFIG = _load_starboard_config()
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Nothing below this line needs to be changed
@@ -123,13 +129,32 @@ def _entry_count() -> int:
 
 
 # Per-message-id asyncio locks so unrelated messages never block each other.
-_msg_locks: dict[str, asyncio.Lock] = {}
+# LRU-capped to prevent unbounded memory growth (each unique message_id that
+# ever receives a reaction would otherwise live here forever).
+from collections import OrderedDict
+
+_MSG_LOCK_CAPACITY = 10_000
+
+class _LRULockCache:
+    """Thread-safe LRU cache of asyncio.Lock objects keyed by message ID string."""
+    def __init__(self, capacity: int):
+        self._cap = capacity
+        self._cache: OrderedDict[str, asyncio.Lock] = OrderedDict()
+
+    def get(self, key: str) -> asyncio.Lock:
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        else:
+            self._cache[key] = asyncio.Lock()
+            if len(self._cache) > self._cap:
+                self._cache.popitem(last=False)
+        return self._cache[key]
+
+_msg_locks = _LRULockCache(_MSG_LOCK_CAPACITY)
 
 
 def _get_msg_lock(msg_id: str) -> asyncio.Lock:
-    if msg_id not in _msg_locks:
-        _msg_locks[msg_id] = asyncio.Lock()
-    return _msg_locks[msg_id]
+    return _msg_locks.get(msg_id)
 
 
 # ── Embed / content builders ──────────────────────────────────────────────

@@ -72,11 +72,27 @@ def setup(bot):
     """Setup function called by main bot to initialize this module"""
     bot.logger.log(MODULE_NAME, "Setting up magic emball command")
 
+    # Per-user cooldown: user_id -> last_used timestamp
+    import time as _time
+    _user_last_used: dict = {}
+    _COOLDOWN_SECONDS = 5
+
     @bot.tree.command(name="magicemball", description="Ask the magic Emball a yes/no question")
     @app_commands.describe(question="Your question for the magic 8-ball")
     async def magic_emball(interaction: discord.Interaction, question: str):
         """Magic Emball with smart logic and regex-based detection"""
         try:
+            # Per-user rate limiting
+            uid = interaction.user.id
+            now = _time.monotonic()
+            last = _user_last_used.get(uid, 0)
+            if now - last < _COOLDOWN_SECONDS:
+                remaining = _COOLDOWN_SECONDS - (now - last)
+                await interaction.response.send_message(
+                    f"⏳ Slow down! Try again in {remaining:.1f}s.", ephemeral=True)
+                return
+            _user_last_used[uid] = now
+
             bot.logger.log(MODULE_NAME, f"Question from {interaction.user}: {question}")
             
             response = None

@@ -1,0 +1,7 @@
+{
+  "channel_id": 0,
+  "threshold": 3,
+  "emoji": "⭐",
+  "self_star": false,
+  "_comment": "Set channel_id to the ID of your starboard channel. Reload the module after editing."
+}

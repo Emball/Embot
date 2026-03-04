@@ -1163,8 +1163,27 @@ class ModerationSystem:
 
         self.cfg     = ModConfig()
 
-        # Per-process Fernet key
-        self._fernet = Fernet(Fernet.generate_key())
+        # Persistent Fernet key — derived from FERNET_KEY env var.
+        # If the env var is absent a new random key is generated and a loud
+        # warning is emitted, because previously encrypted .enc files will
+        # be unreadable after a restart.
+        import base64 as _b64, hashlib as _hl
+        _fernet_secret = os.environ.get("FERNET_KEY")
+        if _fernet_secret:
+            # Derive a 32-byte URL-safe base64 key from the secret
+            _derived = _b64.urlsafe_b64encode(
+                _hl.sha256(_fernet_secret.encode()).digest()
+            )
+            self._fernet = Fernet(_derived)
+        else:
+            self._fernet = Fernet(Fernet.generate_key())
+            bot.logger.log(
+                MODULE_NAME,
+                "⚠️  FERNET_KEY env var not set — a new random encryption key was generated. "
+                "Previously encrypted .enc files from prior sessions are now unreadable. "
+                "Set FERNET_KEY to a fixed secret to persist media encryption across restarts.",
+                "WARNING",
+            )
 
         # Encrypted media staging directory
         self.media_dir = _script_dir() / "cache" / "moderation"

@@ -166,10 +166,18 @@ class MusicPlayer:
             embed.add_field(name="Year", value=self.current.metadata['year'], inline=True)
         
         if not self.queue.empty():
-            # Peek at next song without removing it
-            queue_list = list(self.queue._queue)
-            if queue_list:
-                next_song = queue_list[0]
+            # Safely peek at next song without mutating the queue
+            # We drain into a temp list and then restore all items
+            queue_items: list = []
+            while not self.queue.empty():
+                try:
+                    queue_items.append(self.queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            for item in queue_items:
+                await self.queue.put(item)
+            if queue_items:
+                next_song = queue_items[0]
                 embed.add_field(name="Next Up", value=next_song.title, inline=False)
         
         embed.set_footer(text=f"Loop: {'🔁 ON' if self.loop else '⏹️ OFF'} | Queue: {self.queue.qsize()}")
@@ -263,14 +271,24 @@ class MusicPlayer:
 def setup(bot):
     """Setup function called by main bot to initialize this module"""
     bot.logger.log(MODULE_NAME, "Setting up player module")
-    
+
     # ✅ FIXED CIRCULAR IMPORT - Use local import function
     find_best_match, select_best_candidate, FORMATS = import_archive_functions()
-    
+
     if not find_best_match or not select_best_candidate:
         bot.logger.error(MODULE_NAME, "Failed to import required functions from archive")
         return
-    
+
+    # Check FFmpeg availability before registering commands
+    import shutil as _shutil
+    if not _shutil.which("ffmpeg"):
+        bot.logger.log(
+            MODULE_NAME,
+            "⚠️  FFmpeg not found on PATH — music playback will not work. "
+            "Install FFmpeg and ensure it is accessible from PATH.",
+            "WARNING",
+        )
+
     # Initialize music players dictionary
     bot.music_players = {}
 
@@ -525,20 +543,27 @@ def setup(bot):
         
         if not player.queue.empty():
             queue_items = []
-            queue_list = list(player.queue._queue)[:10]
-            
-            for i, song in enumerate(queue_list, 1):
+            while not player.queue.empty():
+                try:
+                    queue_items.append(player.queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            for item in queue_items:
+                await player.queue.put(item)
+
+            lines = []
+            for i, song in enumerate(queue_items[:10], 1):
                 duration = str(timedelta(seconds=song.duration)) if song.duration > 0 else "?"
-                queue_items.append(f"{i}. **{song.title}** ({duration}) - {song.requested_by.mention}")
-            
+                lines.append(f"{i}. **{song.title}** ({duration}) - {song.requested_by.mention}")
+
             embed.add_field(
-                name=f"Up Next ({player.queue.qsize()} songs)",
-                value="\n".join(queue_items),
+                name=f"Up Next ({len(queue_items)} songs)",
+                value="\n".join(lines),
                 inline=False
             )
-            
-            if player.queue.qsize() > 10:
-                embed.set_footer(text=f"Plus {player.queue.qsize() - 10} more songs...")
+
+            if len(queue_items) > 10:
+                embed.set_footer(text=f"Plus {len(queue_items) - 10} more songs...")
         
         embed.set_footer(text=f"Loop: {'🔁 ON' if player.loop else '⏹️ OFF'}")
         await interaction.response.send_message(embed=embed)

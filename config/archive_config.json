@@ -1,0 +1,4 @@
+{
+  "eminem_root": "/path/to/your/Eminem/music/library",
+  "_comment": "Set eminem_root to the root folder of the Eminem music library, or set the EMINEM_ROOT environment variable instead."
+}

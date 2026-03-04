@@ -32,10 +32,9 @@ class IconManager:
                 'single_day': True
             },
             'Emball_Pride.png': {
-                'start': (6, 1),  # June 1
-                'end': (6, 1),
-                'description': 'Pride Month (First Day)',
-                'single_day': True
+                'start': (6, 1),   # June 1
+                'end': (6, 30),    # June 30 — all of Pride Month
+                'description': 'Pride Month (June)',
             },
             'Emball_Halloween.png': {
                 'start': (10, 1),  # All of October
@@ -56,6 +55,8 @@ class IconManager:
         
         self.default_icon = 'Emball_Pit.png'
         self.current_icon = None
+        self._last_avatar_change: datetime | None = None
+        _AVATAR_CHANGE_COOLDOWN_MINUTES = 65  # Discord allows ~2 changes/hour
     
     def should_use_icon(self, icon_name, now_est):
         """Determine if a specific icon should be active right now"""
@@ -159,26 +160,38 @@ class IconManager:
                     self.bot.logger.error(MODULE_NAME, 
                         f"Failed to update server icon for guild '{guild.name}'", e)
             
-            # Update bot's profile picture
-            try:
-                with open(icon_path, 'rb') as icon_file:
-                    icon_data = icon_file.read()
-                    await self.bot.user.edit(avatar=icon_data)
-                    self.bot.logger.log(MODULE_NAME, 
-                        f"Updated bot profile picture to {icon_name}")
-            except discord.Forbidden:
-                self.bot.logger.error(MODULE_NAME, 
-                    "Missing permissions to change bot profile picture")
-            except discord.HTTPException as e:
-                if e.code == 50035:  # Invalid Form Body - usually means image is too large or invalid format
-                    self.bot.logger.error(MODULE_NAME, 
-                        f"Failed to update bot profile picture - invalid image format or size: {e.text}")
-                else:
-                    self.bot.logger.error(MODULE_NAME, 
-                        f"Failed to update bot profile picture", e)
-            except Exception as e:
-                self.bot.logger.error(MODULE_NAME, 
-                    "Unexpected error updating bot profile picture", e)
+            # Update bot's profile picture (rate-limited: ~2 changes/hour)
+            now = datetime.now(self.est)
+            cooldown_minutes = 65
+            if self._last_avatar_change is not None:
+                elapsed = (now - self._last_avatar_change).total_seconds() / 60
+                if elapsed < cooldown_minutes:
+                    self.bot.logger.log(MODULE_NAME,
+                        f"Skipping avatar update — cooldown ({elapsed:.1f}/{cooldown_minutes} min elapsed)")
+            else:
+                try:
+                    with open(icon_path, 'rb') as icon_file:
+                        icon_data = icon_file.read()
+                        await self.bot.user.edit(avatar=icon_data)
+                        self._last_avatar_change = now
+                        self.bot.logger.log(MODULE_NAME,
+                            f"Updated bot profile picture to {icon_name}")
+                except discord.HTTPException as e:
+                    if e.status == 429:
+                        self.bot.logger.log(MODULE_NAME,
+                            "Avatar rate-limited by Discord — will retry next cycle", "WARNING")
+                    elif e.code == 50035:
+                        self.bot.logger.error(MODULE_NAME,
+                            f"Failed to update bot profile picture - invalid image format or size: {e.text}")
+                    else:
+                        self.bot.logger.error(MODULE_NAME,
+                            f"Failed to update bot profile picture", e)
+                except discord.Forbidden:
+                    self.bot.logger.error(MODULE_NAME,
+                        "Missing permissions to change bot profile picture")
+                except Exception as e:
+                    self.bot.logger.error(MODULE_NAME,
+                        "Unexpected error updating bot profile picture", e)
             
             self.current_icon = icon_name
             

@@ -417,9 +417,9 @@ def show_status():
     latency = getattr(bot, 'latency', 0) * 1000
     print(f"│ Latency: {latency:.0f}ms{' ' * (48 - len(f'{latency:.0f}ms'))} │")
     
-    # Module info - dynamic discovery
+    # Module info - dynamic discovery (snapshot to avoid race with load_modules())
     bot_modules = []
-    for name, module in sys.modules.items():
+    for name, module in list(sys.modules.items()):
         if (hasattr(module, '__file__') and 
             module.__file__ and 
             'site-packages' not in module.__file__ and
@@ -523,7 +523,7 @@ def setup_console_commands():
         """List loaded modules command"""
         bot_modules = []
         _modules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "modules")
-        for name, module in sys.modules.items():
+        for name, module in list(sys.modules.items()):
             if (hasattr(module, '__file__') and 
                 module.__file__ and 
                 'site-packages' not in module.__file__ and
@@ -581,13 +581,14 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
     
-    # Handle rate limits
+    # Handle rate limits — do NOT reinvoke; that causes an infinite retry loop
     if isinstance(error, HTTPException) and error.status == 429:
         retry_after = getattr(error, 'retry_after', 0)
         bot.logger.log("MAIN", f"Rate limited on command {ctx.command}. Retry after: {retry_after}s", "WARNING")
-        await asyncio.sleep(retry_after)
-        # Retry the command after rate limit
-        await ctx.reinvoke()
+        try:
+            await ctx.send(f"⏳ I'm being rate limited. Please try again in {retry_after:.1f}s.")
+        except Exception:
+            pass
     else:
         bot.logger.error("MAIN", f"Command error in {ctx.command}", error)
         await ctx.send(f"An error occurred: {str(error)}")

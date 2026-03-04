@@ -241,6 +241,18 @@ class CommunityDB:
         c.execute("PRAGMA foreign_keys=ON")
         return c
 
+    def query_thread_submission(self, thread_id: int):
+        """
+        Public, lock-guarded query for handle_thread_message.
+        Avoids bypassing _lock by going through _conn() directly.
+        """
+        with self._lock:
+            with self._conn() as c:
+                return c.execute(
+                    "SELECT * FROM submissions WHERE thread_id=? AND is_deleted=0 LIMIT 1",
+                    (thread_id,)
+                ).fetchone()
+
     # ── migration engine ──
     def _get_schema_version(self, c: sqlite3.Connection) -> int:
         """Read the current schema version from the migration_log table."""
@@ -1210,12 +1222,8 @@ class CommunitySystem:
         if not isinstance(channel, discord.Thread):
             return
 
-        # Find submission whose thread_id matches
-        with self.db._conn() as c:
-            row = c.execute(
-                "SELECT * FROM submissions WHERE thread_id=? AND is_deleted=0 LIMIT 1",
-                (channel.id,)
-            ).fetchone()
+        # Find submission whose thread_id matches — uses the lock via public query method
+        row = self.db.query_thread_submission(channel.id)
         if not row:
             return
 
@@ -1352,9 +1360,14 @@ def setup(bot):
         if CST:
             local = now.astimezone(CST)
         else:
-            # Fallback: UTC-6
-            local = now - timedelta(hours=6)
-            local = local.replace(tzinfo=timezone.utc)
+            # DST-safe fallback using stdlib zoneinfo (Python 3.9+)
+            try:
+                from zoneinfo import ZoneInfo
+                local = now.astimezone(ZoneInfo("America/Chicago"))
+            except Exception:
+                # Last-resort: fixed UTC-6 (may be wrong during CDT)
+                local = now - timedelta(hours=6)
+                local = local.replace(tzinfo=timezone.utc)
         return local.weekday() == 4 and local.hour == 15
 
     # ── Event: new messages ──
@@ -1454,9 +1467,10 @@ def setup(bot):
         changed = []
         if projects_channel:
             names = cs._get_submission_channel_names()
-            if PROJECTS_CHANNEL_NAME not in names:
+            if projects_channel.name not in names:
                 names.append(projects_channel.name)
-            cs.db.set_config("projects_channel_id", projects_channel.id)
+            # Store under submission_channels so _get_submission_channel_names() reads it correctly
+            cs.db.set_config("submission_channels", names)
             changed.append(f"Projects: {projects_channel.mention}")
 
         if artwork_channel:

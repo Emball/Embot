@@ -1708,6 +1708,11 @@ class VMSManager:
             async for message in general_channel.history(limit=None, after=scan_after, oldest_first=True):
                 msgs_seen += 1
 
+                # Never save voice messages sent by the bot itself
+                if message.author.bot:
+                    self._save_backfill_checkpoint(message.id)
+                    continue
+
                 if msgs_seen % BACKFILL_SLEEP_EVERY == 0:
                     self.bot.logger.log(MODULE_NAME,
                         f"Backfill: scanned {msgs_seen} messages "
@@ -1888,6 +1893,11 @@ class VMSManager:
             ):
                 msgs_seen += 1
 
+                # Never save voice messages sent by the bot itself
+                if message.author.bot:
+                    self._save_backfill_checkpoint(message.id)
+                    continue
+
                 if msgs_seen % BACKFILL_SLEEP_EVERY == 0:
                     self.bot.logger.log(MODULE_NAME,
                         f"vms-resume: scanned {msgs_seen} messages "
@@ -1977,6 +1987,66 @@ class VMSManager:
             f"{skipped} already known, {errors} errors")
         self._clear_backfill_checkpoint()
 
+    # -------------------------------------------------------- Bot-VM Purge ------
+
+    def _purge_bot_vms(self):
+        """
+        Remove any DB rows (and their files) that belong to the bot itself.
+
+        Two cases are caught:
+          1. Rich-format filenames: vm_Embot_<message_id>_<date>.ogg
+             (the bot's username is encoded in the canonical filename)
+          2. Rows where discord_message_id is shared with known bot messages —
+             not reliably detectable here, so we rely on the filename pattern.
+
+        Called once at startup, before any scan or backfill.
+        """
+        # Match filenames where the username segment is "Embot"
+        # Pattern: vm_Embot_<digits>_<MM-DD-YY>.ogg
+        bot_rows = self._db_all(
+            "SELECT id, filename FROM vms WHERE filename LIKE 'vm\\_Embot\\_%' ESCAPE '\\'"
+        )
+
+        if not bot_rows:
+            return
+
+        self.bot.logger.log(MODULE_NAME,
+            f"Purging {len(bot_rows)} DB entry/entries sent by the bot (Embot)…")
+
+        purged_files = 0
+        purged_rows  = 0
+        for vm_id, filename in bot_rows:
+            # Delete file from every known location
+            for search_dir in (self.vms_dir, self.archive_dir, _broken_dir()):
+                candidate = search_dir / filename
+                if candidate.exists():
+                    try:
+                        candidate.unlink()
+                        purged_files += 1
+                        self.bot.logger.log(MODULE_NAME,
+                            f"Deleted bot VM file: {candidate}")
+                    except Exception as exc:
+                        self.bot.logger.log(MODULE_NAME,
+                            f"Could not delete {candidate}: {exc}", "WARNING")
+
+            # Remove from vms and vms_playback
+            try:
+                conn = self._conn()
+                try:
+                    conn.execute("DELETE FROM vms_playback WHERE vm_id=?", (vm_id,))
+                    conn.execute("DELETE FROM vms WHERE id=?", (vm_id,))
+                    conn.commit()
+                    purged_rows += 1
+                finally:
+                    conn.close()
+            except Exception as exc:
+                self.bot.logger.log(MODULE_NAME,
+                    f"DB purge error for VM #{vm_id}: {exc}", "WARNING")
+
+        self.bot.logger.log(MODULE_NAME,
+            f"Bot-VM purge complete: {purged_rows} row(s) removed, "
+            f"{purged_files} file(s) deleted")
+
     # ---------------------------------------------------------------- Startup --
 
     async def startup(self):
@@ -1992,6 +2062,10 @@ class VMSManager:
         """
         await self._start_queue_worker()
         await asyncio.sleep(0.5)
+
+        # Remove any bot-sent VMs that slipped through (e.g. from a prior
+        # backfill run that lacked the bot-author filter).
+        self._purge_bot_vms()
 
         resume_checkpoint = self._load_backfill_checkpoint()
 

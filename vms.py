@@ -1769,6 +1769,178 @@ class VMSManager:
             f"Backfill complete: {downloaded} downloaded, {skipped} already known, {errors} errors")
         self._clear_backfill_checkpoint()
 
+    # --------------------------------------------------------- Date Backfill --
+
+    async def _backfill_from_date(self, since_dt):
+        """
+        Variant of _backfill_from_discord that starts scanning from an
+        explicit timezone-aware datetime rather than a snowflake checkpoint.
+        Used by the ``vms-resume`` console command so operators can resume
+        (or extend) a bulk download from a human-readable date without
+        needing to know a Discord message snowflake.
+
+        Behaviour is otherwise identical to _backfill_from_discord:
+          • Skips message IDs already in the DB
+          • Feeds downloaded files directly to BulkProcessor for parallel
+            transcription
+          • Saves a rolling backfill checkpoint so a crash mid-run can be
+            resumed automatically on the next startup
+        """
+        self._backfill_running = True
+
+        # Find #general in any guild
+        general_channel = None
+        for guild in self.bot.guilds:
+            ch = discord.utils.get(guild.text_channels, name=GENERAL_CHANNEL_NAME)
+            if ch is not None:
+                general_channel = ch
+                break
+
+        if general_channel is None:
+            self.bot.logger.log(MODULE_NAME,
+                "vms-resume: could not find #general in any guild — aborting", "WARNING")
+            self._backfill_running = False
+            return
+
+        self.bot.logger.log(MODULE_NAME,
+            f"vms-resume: scanning #{general_channel.name} in '{general_channel.guild.name}' "
+            f"from {since_dt.strftime('%Y-%m-%d %H:%M:%S UTC')} onwards — "
+            "BulkProcessor will transcribe concurrently…")
+
+        # Pre-load Whisper so the worker is ready immediately
+        self.bot.logger.log(MODULE_NAME, "vms-resume: pre-loading Whisper model…")
+        loop = asyncio.get_running_loop()
+        model = await loop.run_in_executor(self._executor, _load_whisper)
+        if model is None:
+            self.bot.logger.log(MODULE_NAME,
+                "vms-resume: Whisper failed to load — transcription will be skipped, "
+                "files will still be downloaded", "WARNING")
+        else:
+            self.bot.logger.log(MODULE_NAME, "vms-resume: Whisper ready")
+
+        # Start BulkProcessor (or reuse an already-running one)
+        if self._bulk_proc is None or not self._bulk_proc.is_running():
+            self._bulk_stop.clear()
+            self._bulk_proc = BulkProcessor(
+                db_path=self.db_path,
+                vms_dir=self.vms_dir,
+                logger=self.bot.logger,
+                stop_event=self._bulk_stop,
+            )
+            self._bulk_proc.start()
+
+        # Build set of already-known message IDs for fast dedup
+        known_ids = {
+            r[0]
+            for r in self._db_all(
+                "SELECT discord_message_id FROM vms WHERE discord_message_id IS NOT NULL"
+            )
+        }
+
+        downloaded = 0
+        skipped    = 0
+        errors     = 0
+        msgs_seen  = 0
+
+        BACKFILL_SLEEP_EVERY = 200
+        BACKFILL_SLEEP_SECS  = 2.0
+        BACKFILL_DL_SLEEP    = 0.5
+
+        try:
+            async for message in general_channel.history(
+                limit=None, after=since_dt, oldest_first=True
+            ):
+                msgs_seen += 1
+
+                if msgs_seen % BACKFILL_SLEEP_EVERY == 0:
+                    self.bot.logger.log(MODULE_NAME,
+                        f"vms-resume: scanned {msgs_seen} messages "
+                        f"({downloaded} downloaded) — pausing {BACKFILL_SLEEP_SECS}s…")
+                    await asyncio.sleep(BACKFILL_SLEEP_SECS)
+
+                for att in message.attachments:
+                    raw_flags = getattr(message.flags, 'value', 0)
+                    is_vm = (
+                        bool(raw_flags & 8192) or
+                        att.filename.lower() == "voice-message.ogg" or
+                        (att.content_type and "ogg" in att.content_type.lower())
+                    )
+                    if not is_vm:
+                        continue
+
+                    msg_id_str = str(message.id)
+                    if msg_id_str in known_ids:
+                        skipped += 1
+                        continue
+
+                    try:
+                        ts       = int(message.created_at.timestamp())
+                        guild_id = str(message.guild.id) if message.guild else None
+
+                        conn = self._conn()
+                        try:
+                            cur = conn.execute(
+                                """INSERT INTO vms
+                                   (filename, filepath, discord_message_id, discord_channel_id,
+                                    guild_id, duration_secs, processed, created_at)
+                                   VALUES ('__pending__', '', ?, ?, ?, 0.0, 0, ?)""",
+                                (msg_id_str, str(message.channel.id), guild_id, ts)
+                            )
+                            vm_id = cur.lastrowid
+                            conn.commit()
+                        finally:
+                            conn.close()
+
+                        username   = getattr(message.author, 'name', None)
+                        canon_name = _vm_canonical_name(vm_id, username, msg_id_str, ts)
+                        canon_path = self.vms_dir / canon_name
+                        raw        = await att.read()
+                        canon_path.write_bytes(raw)
+
+                        duration = await asyncio.get_running_loop().run_in_executor(
+                            None, _get_ogg_duration, str(canon_path)
+                        )
+                        self._db_exec(
+                            "UPDATE vms SET filename=?, filepath=?, duration_secs=? WHERE id=?",
+                            (canon_name, str(canon_path), duration, vm_id)
+                        )
+
+                        self._bulk_proc.feed(vm_id, str(canon_path))
+                        known_ids.add(msg_id_str)
+                        downloaded += 1
+
+                        if downloaded % 100 == 0:
+                            self.bot.logger.log(MODULE_NAME,
+                                f"vms-resume: {downloaded} downloaded so far…")
+
+                        await asyncio.sleep(BACKFILL_DL_SLEEP)
+
+                    except Exception as exc:
+                        self.bot.logger.log(MODULE_NAME,
+                            f"vms-resume: failed to download message {message.id}: {exc}",
+                            "WARNING")
+                        errors += 1
+
+                # Advance checkpoint after every message (voice or not)
+                self._save_backfill_checkpoint(message.id)
+
+        except discord.Forbidden:
+            self.bot.logger.log(MODULE_NAME,
+                f"vms-resume: no permission to read #{general_channel.name} — aborting",
+                "WARNING")
+        except Exception as exc:
+            self.bot.logger.log(MODULE_NAME,
+                f"vms-resume: history scrape error — {exc}", "ERROR")
+        finally:
+            self._backfill_running = False
+            if self._bulk_proc and self._bulk_proc.is_running():
+                self._bulk_proc.done_feeding()
+
+        self.bot.logger.log(MODULE_NAME,
+            f"vms-resume complete: {downloaded} downloaded, "
+            f"{skipped} already known, {errors} errors")
+        self._clear_backfill_checkpoint()
+
     # ---------------------------------------------------------------- Startup --
 
     async def startup(self):
@@ -1859,6 +2031,70 @@ def setup(bot):
         await asyncio.sleep(3)   # let other modules finish their on_ready
 
     _startup_task.start()
+
+    # ================================================================
+    # CONSOLE COMMANDS
+    # ================================================================
+
+    if hasattr(bot, 'console_commands'):
+        async def handle_vms_resume(args_str: str):
+            """
+            Console handler for:  vms-resume <date>
+
+            <date> formats accepted:
+              YYYY-MM-DD            — midnight UTC on that date
+              YYYY-MM-DD HH:MM      — specific UTC time
+              YYYY-MM-DD HH:MM:SS   — specific UTC time with seconds
+
+            Downloads and transcribes every voice message in #general
+            sent *after* the given date that is not already in the DB.
+            Runs in the background — the console prompt returns immediately.
+            """
+            from datetime import timezone as _tz
+
+            date_str = args_str.strip()
+            if not date_str:
+                print("Usage: vms-resume <date>")
+                print("  Examples:")
+                print("    vms-resume 2024-11-15")
+                print("    vms-resume 2024-11-15 14:30")
+                print("    vms-resume 2024-11-15 14:30:00")
+                return
+
+            # Try parsing from most-specific to least-specific
+            since_dt = None
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                try:
+                    since_dt = datetime.strptime(date_str, fmt).replace(tzinfo=_tz.utc)
+                    break
+                except ValueError:
+                    continue
+
+            if since_dt is None:
+                print(f"Could not parse date '{date_str}'.")
+                print("  Expected: YYYY-MM-DD  or  YYYY-MM-DD HH:MM  or  YYYY-MM-DD HH:MM:SS")
+                return
+
+            # Guard: refuse to start if a backfill is already running
+            if getattr(manager, '_backfill_running', False):
+                print("A backfill is already in progress — wait for it to finish before resuming.")
+                return
+
+            print(f"Starting vms-resume from {since_dt.strftime('%Y-%m-%d %H:%M:%S UTC')} "
+                  f"(downloading everything after this date that is not already stored)...")
+            print("Progress will be logged to console — this runs in the background.")
+
+            # Fire-and-forget in the bot's event loop
+            asyncio.run_coroutine_threadsafe(
+                manager._backfill_from_date(since_dt),
+                bot.loop,
+            )
+
+        bot.console_commands['vms-resume'] = {
+            'description': 'Re-download/process VMs from a date  (vms-resume YYYY-MM-DD)',
+            'handler': handle_vms_resume,
+        }
+        bot.logger.log(MODULE_NAME, "Registered console command: vms-resume")
 
     # ================================================================
     # MESSAGE HANDLER

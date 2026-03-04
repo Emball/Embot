@@ -131,25 +131,82 @@ def _whisper_model_dir() -> Path:
 
 # ==================== NAMING CONVENTION ====================
 
-def _vm_canonical_name(vm_id: int) -> str:
-    """Return the canonical filename for a VM given its DB id: vm-{id}.ogg"""
-    return f"vm-{vm_id}.ogg"
+def _vm_canonical_name(
+    vm_id: int,
+    username: Optional[str] = None,
+    message_id: Optional[str] = None,
+    created_at: Optional[int] = None,
+) -> str:
+    """
+    Return the canonical filename for a VM.
+
+    Format:  vm_{username}_{message_id}_{MM-DD-YY}.ogg
+    Example: vm_Embis_1234567890123456789_03-04-25.ogg
+
+    Falls back to vm_{vm_id}.ogg when metadata is unavailable (files
+    registered from disk without Discord metadata).
+
+    The filename encodes enough information to reconstruct the DB from disk:
+      - username   -> who sent it
+      - message_id -> unique Discord snowflake, links back to the original message
+      - date       -> when it was sent (for created_at reconstruction)
+    """
+    if username and message_id and created_at:
+        safe_user = re.sub(r'[\\/:*?"<>|]', '', username)[:32].strip() or "unknown"
+        date_str  = datetime.fromtimestamp(created_at).strftime("%m-%d-%y")
+        return f"vm_{safe_user}_{message_id}_{date_str}.ogg"
+    return f"vm_{vm_id}.ogg"
 
 
-def _rename_to_canonical(current_path: Path, vm_id: int) -> Path:
+def _parse_vm_filename(filename: str) -> dict:
+    """
+    Parse metadata out of a canonical VM filename for DB reconstruction.
+
+    Returns a dict with keys: username, message_id, created_at, vm_id.
+    Any field that cannot be parsed is None.
+    """
+    # Rich format: vm_{username}_{message_id}_{MM-DD-YY}.ogg
+    rich = re.match(
+        r'^vm_(.+)_(\d{15,20})_(\d{2}-\d{2}-\d{2})\.ogg$',
+        filename
+    )
+    if rich:
+        username, message_id, date_str = rich.groups()
+        try:
+            dt = datetime.strptime(date_str, "%m-%d-%y")
+            created_at = int(dt.timestamp())
+        except ValueError:
+            created_at = None
+        return {"username": username, "message_id": message_id,
+                "created_at": created_at, "vm_id": None}
+
+    # Fallback format: vm_{id}.ogg
+    fallback = re.match(r'^vm_(\d+)\.ogg$', filename)
+    if fallback:
+        return {"username": None, "message_id": None,
+                "created_at": None, "vm_id": int(fallback.group(1))}
+
+    return {"username": None, "message_id": None, "created_at": None, "vm_id": None}
+
+
+def _rename_to_canonical(
+    current_path: Path,
+    vm_id: int,
+    username: Optional[str] = None,
+    message_id: Optional[str] = None,
+    created_at: Optional[int] = None,
+) -> Path:
     """
     Rename *current_path* to the canonical name inside the same directory.
     Returns the new Path.  No-ops safely if the file is already canonical,
-    or if the source doesn't exist.
+    or if the source does not exist.
     """
-    canonical = current_path.parent / _vm_canonical_name(vm_id)
+    canonical = current_path.parent / _vm_canonical_name(vm_id, username, message_id, created_at)
     if current_path == canonical:
         return canonical
     if not current_path.exists():
-        return canonical          # already moved or missing — return target path
+        return canonical
     if canonical.exists():
-        # Destination already exists (e.g. partial rename from a previous run)
-        # Remove the stale source so we don't accumulate duplicates.
         try:
             current_path.unlink()
         except Exception:
@@ -649,8 +706,15 @@ class BulkProcessor:
                 alive = True         # False once sentinel received
 
                 def _try_submit():
-                    """Pull one item and submit it; return False on sentinel/stop."""
-                    item = self._work_q.get()
+                    """
+                    Pull one item (blocking with timeout so the harvest loop
+                    stays responsive), submit it, return False on sentinel/stop.
+                    Returns None on timeout (queue temporarily empty — keep waiting).
+                    """
+                    try:
+                        item = self._work_q.get(timeout=0.1)
+                    except queue.Empty:
+                        return None   # nothing yet — caller should keep looping
                     if item is _BULK_SENTINEL or self.stop_event.is_set():
                         return False
                     vm_id, fp = item
@@ -662,9 +726,13 @@ class BulkProcessor:
                             f"BulkProcessor: file missing, skipping VM #{vm_id}", "WARNING")
                     return True
 
-                # Prime the executor with up to n_workers tasks immediately
+                # Prime the executor — wait until we actually get the first item
+                # (queue may be empty briefly at startup before backfill downloads anything)
                 for _ in range(n_workers):
-                    if not _try_submit():
+                    result = _try_submit()
+                    while result is None:
+                        result = _try_submit()
+                    if result is False:
                         alive = False
                         break
 
@@ -702,13 +770,16 @@ class BulkProcessor:
                             self.logger.log(MODULE_NAME,
                                 f"BulkProcessor: {done} processed ({errors} errors) — batch committed")
 
-                        # Refill the freed executor slot
+                        # Refill freed executor slot.
+                        # None = queue temporarily empty (backfill still downloading) —
+                        # leave alive=True, slot stays open, will fill next iteration.
                         if alive:
-                            alive = _try_submit()
+                            result = _try_submit()
+                            if result is False:
+                                alive = False
 
-                    # Nothing finished yet — yield briefly to avoid spinning
-                    if not completed:
-                        time.sleep(0.05)
+                    # The 0.1s timeout in _try_submit already provides yielding
+                    # when the queue is empty; no extra sleep needed
 
             # Final commit for any remainder
             if batch_buf:
@@ -725,12 +796,14 @@ class BulkProcessor:
 
     def _commit_batch(self, batch: list):
         """
-        Write a batch of results to SQLite and rename each file to vm-{id}.ogg.
+        Write a batch of transcription results to SQLite.
         Opens its own connection — safe to call from a worker thread.
         batch items: (vm_id, transcript, duration, waveform, filepath)
 
-        Files already in the archive dir are kept at processed=2 after
-        transcription; all others are set to processed=1.
+        Files are already canonically named before entering the queue —
+        no rename is needed here.
+        Files already in the archive dir are kept at processed=2;
+        all others are set to processed=1.
         """
         try:
             conn = sqlite3.connect(self.db_path)
@@ -738,16 +811,8 @@ class BulkProcessor:
             archive_path = str(_archive_dir())
             try:
                 for vm_id, transcript, duration, waveform, filepath in batch:
-                    # Rename in-place (stays in whichever dir it lives in)
-                    try:
-                        new_path   = _rename_to_canonical(Path(filepath), vm_id)
-                        canon_name = new_path.name
-                        canon_fp   = str(new_path)
-                    except Exception as exc:
-                        self.logger.log(MODULE_NAME,
-                            f"BulkProcessor: rename failed for VM #{vm_id}: {exc}", "WARNING")
-                        canon_name = Path(filepath).name
-                        canon_fp   = filepath
+                    canon_name = Path(filepath).name
+                    canon_fp   = filepath
 
                     # Archived files stay processed=2; all others → 1
                     in_archive = str(Path(filepath).parent) == archive_path
@@ -925,18 +990,10 @@ class VMSManager:
                                 pass
                         continue
 
-                    # Rename to canonical vm-{id}.ogg now that processing is done
-                    try:
-                        new_path = await asyncio.get_event_loop().run_in_executor(
-                            self._executor, _rename_to_canonical, Path(filepath), vm_id
-                        )
-                        canon_fp   = str(new_path)
-                        canon_name = new_path.name
-                    except Exception as exc:
-                        self.bot.logger.log(MODULE_NAME,
-                            f"Rename failed for VM #{vm_id}: {exc}", "WARNING")
-                        canon_fp   = filepath
-                        canon_name = Path(filepath).name
+                    # File is already canonically named (save_voice_message names
+                    # it correctly upfront). Just use the current path as-is.
+                    canon_fp   = filepath
+                    canon_name = Path(filepath).name
 
                     in_archive = str(Path(canon_fp).parent) == str(self.archive_dir)
                     new_state  = 2 if in_archive else 1
@@ -1020,7 +1077,8 @@ class VMSManager:
                 conn.close()
 
             # ── Step 2: Canonical path is now known ───────────────────────
-            canon_name = _vm_canonical_name(vm_id)
+            username   = getattr(message.author, 'name', None)
+            canon_name = _vm_canonical_name(vm_id, username, str(message.id), ts)
             canon_path = self.vms_dir / canon_name
 
             # ── Step 3: Download and write directly to canonical path ──────
@@ -1076,24 +1134,35 @@ class VMSManager:
             for r in self._db_all("SELECT filename, id FROM vms")
         }
 
+        # Non-canonical = old vm-{id}.ogg format (dash, not underscore).
+        # New format is vm_{username}_{msgid}_{date}.ogg or vm_{id}.ogg fallback —
+        # both start with "vm_". Only files still in the old dash format need conforming.
         non_canonical = self._db_all(
             """SELECT id, filepath, filename FROM vms
                WHERE processed IN (1, 2, 4)
-                 AND filename != ('vm-' || id || '.ogg')"""
+                 AND filename LIKE 'vm-%'"""
         )
         conformed = 0
         dupes_removed = 0
         conn = self._conn()
         try:
             for vm_id, fp, old_name in non_canonical:
-                canon_name = _vm_canonical_name(vm_id)
-                # Another row already owns this canonical name → stale duplicate
+                # Try to pull metadata from the DB row to build a rich name;
+                # fall back to vm_{id}.ogg if metadata is missing.
+                row = conn.execute(
+                    "SELECT discord_message_id, created_at FROM vms WHERE id=?", (vm_id,)
+                ).fetchone()
+                msg_id   = row[0] if row else None
+                ts       = row[1] if row else None
+                # Username not stored separately — leave as fallback for old rows
+                canon_name = _vm_canonical_name(vm_id, None, msg_id, ts)
+
                 if canon_name in existing_canonical and existing_canonical[canon_name] != vm_id:
                     conn.execute("DELETE FROM vms WHERE id=?", (vm_id,))
                     dupes_removed += 1
                     continue
                 try:
-                    new_path = _rename_to_canonical(Path(fp), vm_id)
+                    new_path = _rename_to_canonical(Path(fp), vm_id, None, msg_id, ts)
                     conn.execute(
                         "UPDATE vms SET filename=?, filepath=? WHERE id=?",
                         (new_path.name, str(new_path), vm_id)
@@ -1241,10 +1310,9 @@ class VMSManager:
 
         if not valid:
             self.bot.logger.log(MODULE_NAME, "No pending VMs to process")
-            # Still signal done so BulkProcessor (if already running from
-            # backfill) knows the scan producer is finished.
-            if self._bulk_proc and self._bulk_proc.is_running():
-                self._bulk_proc.done_feeding()
+            # If backfill is running it will call done_feeding() when it's done.
+            # If there's no backfill and BulkProcessor is somehow already running
+            # (shouldn't happen) leave it alone — it'll drain whatever it has.
             return
 
         self.bot.logger.log(MODULE_NAME,
@@ -1264,9 +1332,8 @@ class VMSManager:
         for vm_id, fp in valid:
             self._bulk_proc.feed(vm_id, fp)
 
-        # Signal that the scan producer is done.
-        # If backfill is also running it will call done_feeding() itself when
-        # it finishes, so we only call it here when there's no backfill.
+        # Only signal done if backfill isn't also producing — if it is,
+        # backfill's finally block will call done_feeding() when it finishes.
         if not self._backfill_running:
             self._bulk_proc.done_feeding()
 
@@ -1613,7 +1680,8 @@ class VMSManager:
                             conn.close()
 
                         # Write directly to canonical path
-                        canon_name = _vm_canonical_name(vm_id)
+                        username   = getattr(message.author, 'name', None)
+                        canon_name = _vm_canonical_name(vm_id, username, msg_id_str, ts)
                         canon_path = self.vms_dir / canon_name
                         raw        = await att.read()
                         canon_path.write_bytes(raw)

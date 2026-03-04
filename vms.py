@@ -1,28 +1,6 @@
 # [file name]: vms.py
 """
-VMS — Voice Message System for Embot
-=====================================
-• Detects & saves Discord voice messages to /data/vms/
-• DB lives at                              /data/vms/vms.db
-• Archives live at                         /data/vms/archive/
-• Transcribes using OpenAI Whisper (auto-downloads model to /data/)
-• Posts transcripts as plain blockquote replies (no embeds)
-• Saves transcripts to SQLite DB for keyword playback
-• Archives after 150 days, deletes after 365 days
-• Archive job schedule stored in DB — catches missed runs after crashes
-• Periodic random playback in #general (every 40–80 messages, 50% chance)
-• Contextual playback using keyword matching against transcripts
-• Smart selection: 7-day cooldowns, long-VM penalties, recency weighting
-• Responds to @mentions / replies with a random VM (10s cooldown)
-• Uniform filename convention: vm-{db_id}.ogg for every file
-  - New VMs are renamed immediately after DB insert to get their ID
-  - Retroactive/bulk VMs are renamed after processing
-  - Existing non-conforming files are conformed on startup
-  - Metadata unavailable for retroactive files (user/message IDs) is NULL
-• Bulk-processes pre-populated folders at startup using a dedicated
-  background thread pool (GPU-parallel or CPU-multi-threaded) that
-  never blocks normal bot operation
-• Generates real waveform data from OGG audio samples for every VM
+VMS
 """
 
 import asyncio
@@ -355,10 +333,43 @@ def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str]:
     transcript: Optional[str] = None
     if model is not None:
         try:
-            result     = model.transcribe(filepath, fp16=(_whisper_device == "cuda"))
-            transcript = (result.get("text") or "").strip() or None
-        except Exception as exc:
+            import whisper as _whisper
+
+            # Load and validate audio before handing to Whisper.
+            # whisper.load_audio returns a float32 mono array at 16 kHz.
+            audio = _whisper.load_audio(filepath)
+
+            # Guard: empty or near-silent file → skip transcription cleanly
+            if audio is None or len(audio) < 1600:   # < 0.1 s at 16 kHz
+                print(f"[{MODULE_NAME}] Skipping transcription for {filepath} "
+                      f"(audio too short: {len(audio) if audio is not None else 0} samples)")
+                return transcript, duration, waveform
+
+            # Pad/trim to Whisper's expected 30-second chunk
+            audio = _whisper.pad_or_trim(audio)
+
+            # Compute log-mel spectrogram on CPU (fp16 only valid on CUDA)
+            mel = _whisper.log_mel_spectrogram(audio).to(model.device)
+
+            # Detect language and decode
+            _, probs = model.detect_language(mel)
+            options  = _whisper.DecodingOptions(fp16=False)
+            result   = _whisper.decode(model, mel, options)
+            text     = (result.text or "").strip() or None
+            transcript = text
+
+        except RuntimeError as exc:
+            # Catches "cannot reshape tensor of 0 elements" and similar
             print(f"[{MODULE_NAME}] Transcription error ({filepath}): {exc}")
+        except Exception as exc:
+            # str(exc) for a bare nn.Module prints the layer repr —
+            # detect that and emit a cleaner message
+            exc_str = str(exc)
+            if "Linear(" in exc_str or "in_features" in exc_str:
+                print(f"[{MODULE_NAME}] Transcription error ({filepath}): "
+                      f"Whisper internal model error (likely corrupt/empty audio)")
+            else:
+                print(f"[{MODULE_NAME}] Transcription error ({filepath}): {exc_str}")
 
     return transcript, duration, waveform
 
@@ -458,18 +469,6 @@ async def _send_voice_message(
 class BulkProcessor:
     """
     Dedicated background processor for large backlogs of pre-placed OGG files.
-
-    Architecture
-    ─────────────
-    • Runs entirely in a separate daemon thread — zero asyncio entanglement.
-    • Uses a ThreadPoolExecutor sized for GPU (1 worker) or CPU (N/2 workers).
-    • Each worker calls _process_file_sync() which loads Whisper once and
-      reuses it across all files (no redundant model loads).
-    • Results are committed to SQLite in batches (BULK_BATCH_SIZE) so a crash
-      mid-run doesn't lose all progress — already-committed rows are skipped on
-      the next startup.
-    • A threading.Event allows the main bot to signal a graceful shutdown.
-    • Progress is logged every BULK_BATCH_SIZE files so you can track a 4k+ queue.
     """
 
     def __init__(self, db_path: str, vms_dir: Path, logger, stop_event: threading.Event):
@@ -773,14 +772,6 @@ class VMSManager:
     ) -> Optional[int]:
         """
         Download and persist a Discord voice message attachment.
-
-        Naming flow:
-          1. Pre-insert a placeholder row to claim the auto-assigned DB id
-          2. Derive the canonical filename: vm-{id}.ogg
-          3. Write bytes directly to that path — no temp file, no rename
-          4. UPDATE the row with the real filepath, duration, and metadata
-
-        Returns the DB row id, or None on failure.
         """
         ts       = int(time.time())
         guild_id = str(message.guild.id) if message.guild else None
@@ -830,15 +821,7 @@ class VMSManager:
 
     async def process_unprocessed(self):
         """
-        Startup scan — four phases:
-
-        1. CONFORM already-processed VMs whose filenames don't match vm-{id}.ogg
-           (catches files processed in a previous version of the bot).
-        2. REGISTER .ogg files in /data/vms/ not yet in the DB (retroactive
-           files — user/message/guild IDs are left NULL, that's expected).
-        3. RENAME newly-registered retroactive files to vm-{id}.ogg.
-        4. DISPATCH all pending (processed=0) rows to BulkProcessor or the
-           live queue depending on backlog size.
+        Startup scan
         """
         self.bot.logger.log(MODULE_NAME,
             "Startup scan: conforming names and registering new files…")

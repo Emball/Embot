@@ -1006,11 +1006,12 @@ class VMSManager:
 
         Phase 1: Conform already-processed files to vm-{id}.ogg, batching
                  DB updates (SCAN_BATCH_SIZE rows per commit).
-        Phase 2: Register untracked .ogg files from vms/, archive/, broken/
-                 using batched INSERTs; reads duration inline (no per-file
-                 async calls needed — we're already off the event loop).
+        Phase 2: Register untracked .ogg files from vms/, archive/, broken/.
+                 Each file is inserted one at a time to obtain its auto-assigned
+                 DB id, immediately renamed to vm-{id}.ogg on disk, and the row
+                 updated — so every registered file is canonical from birth and
+                 Phase 3 collision problems can never occur.
         Phase 2b: Reset archived-but-untranscribed rows back to pending.
-        Phase 3: Rename all pending non-canonical files, batching DB updates.
 
         Returns list of (vm_id, filepath) pairs ready for dispatch.
         """
@@ -1064,32 +1065,69 @@ class VMSManager:
         if dupes_removed:
             print(f"[{MODULE_NAME}] Removed {dupes_removed} duplicate DB row(s)")
 
-
         # ── Phase 2: Register untracked files ────────────────────────────────
-        # Build lookup sets so we don't hit the DB per-file
-        existing_names = {r[0] for r in self._db_all("SELECT filename FROM vms")}
+        # Insert one row at a time so we get the auto-assigned id immediately,
+        # rename the file to vm-{id}.ogg on disk, then update the row.
+        # This means every registered file is canonical from the moment it's
+        # written — no Phase 3 rename pass needed, no collision logic required.
         existing_paths = {r[0] for r in self._db_all("SELECT filepath FROM vms")}
+        # Also track canonical names already in use (from Phase 1 survivors)
+        existing_canonical_names = {r[0] for r in self._db_all("SELECT filename FROM vms")}
 
-        inserts = []   # (filename, filepath, processed, created_at, duration)
         new_counts = {}
-        for scan_dir, label, proc_state in scan_dirs:
-            new = 0
-            for ogg in sorted(scan_dir.glob("*.ogg")):
-                if ogg.name in existing_names or str(ogg) in existing_paths:
-                    continue
-                mtime = int(ogg.stat().st_mtime)
-                dur   = _get_ogg_duration(str(ogg))
-                inserts.append((ogg.name, str(ogg), proc_state, mtime, dur))
-                existing_names.add(ogg.name)
-                existing_paths.add(str(ogg))
-                new += 1
-                if len(inserts) >= SCAN_BATCH_SIZE:
-                    self._db_batch_insert(inserts)
-                    inserts = []
-            if new:
-                new_counts[label] = new
-        if inserts:
-            self._db_batch_insert(inserts)
+        batch_update = []   # (canon_name, canon_fp, vm_id) — flushed per SCAN_BATCH_SIZE
+        conn = self._conn()
+        try:
+            for scan_dir, label, proc_state in scan_dirs:
+                new = 0
+                for ogg in sorted(scan_dir.glob("*.ogg")):
+                    # Skip already-registered files (by path or canonical name)
+                    if str(ogg) in existing_paths or ogg.name in existing_canonical_names:
+                        continue
+
+                    mtime = int(ogg.stat().st_mtime)
+                    dur   = _get_ogg_duration(str(ogg))
+
+                    # Insert placeholder to claim an id
+                    cur = conn.execute(
+                        """INSERT INTO vms (filename, filepath, processed, created_at, duration_secs)
+                           VALUES ('__pending__', ?, ?, ?, ?)""",
+                        (str(ogg), proc_state, mtime, dur)
+                    )
+                    vm_id = cur.lastrowid
+
+                    # Rename on disk to canonical immediately
+                    try:
+                        new_path = _rename_to_canonical(ogg, vm_id)
+                    except Exception as exc:
+                        print(f"[{MODULE_NAME}] Rename failed during registration "
+                              f"({ogg.name} → vm-{vm_id}.ogg): {exc} — keeping original name")
+                        new_path = ogg
+
+                    canon_name = new_path.name
+                    canon_fp   = str(new_path)
+
+                    # Update the row with the real name/path
+                    conn.execute(
+                        "UPDATE vms SET filename=?, filepath=? WHERE id=?",
+                        (canon_name, canon_fp, vm_id)
+                    )
+
+                    existing_paths.add(canon_fp)
+                    existing_canonical_names.add(canon_name)
+                    new += 1
+
+                    # Commit in batches to avoid holding a huge transaction
+                    if new % SCAN_BATCH_SIZE == 0:
+                        conn.commit()
+
+                if new:
+                    new_counts[label] = new
+
+            conn.commit()
+        finally:
+            conn.close()
+
         if new_counts:
             parts = ", ".join(f"{n} in /{l}" for l, n in new_counts.items())
             print(f"[{MODULE_NAME}] Registered untracked files: {parts} "
@@ -1101,7 +1139,7 @@ class VMSManager:
                WHERE processed = 2
                  AND (transcript IS NULL OR transcript = '')"""
         )
-        reset_ids = [r[0] for r in untranscribed]  # no path check — files not renamed yet
+        reset_ids = [r[0] for r in untranscribed]
         if reset_ids:
             for i in range(0, len(reset_ids), SCAN_BATCH_SIZE):
                 chunk = reset_ids[i:i + SCAN_BATCH_SIZE]
@@ -1115,43 +1153,6 @@ class VMSManager:
                 finally:
                     conn.close()
             print(f"[{MODULE_NAME}] Reset {len(reset_ids)} archived-but-untranscribed VM(s) to pending")
-
-        # ── Phase 3: Rename pending files to canonical ───────────────────────
-        # Re-fetch canonical map (Phase 1 may have changed it)
-        existing_canonical = {
-            r[0]: r[1]
-            for r in self._db_all("SELECT filename, id FROM vms")
-        }
-
-        needs_rename = self._db_all(
-            """SELECT id, filepath FROM vms
-               WHERE processed = 0
-                 AND filename != ('vm-' || id || '.ogg')"""
-        )
-        dupes = 0
-        conn = self._conn()
-        try:
-            for vm_id, fp in needs_rename:
-                canon_name = _vm_canonical_name(vm_id)
-                # Collision: another row already has this canonical name
-                if canon_name in existing_canonical and existing_canonical[canon_name] != vm_id:
-                    conn.execute("DELETE FROM vms WHERE id=?", (vm_id,))
-                    dupes += 1
-                    continue
-                try:
-                    new_path = _rename_to_canonical(Path(fp), vm_id)
-                    conn.execute(
-                        "UPDATE vms SET filename=?, filepath=? WHERE id=?",
-                        (new_path.name, str(new_path), vm_id)
-                    )
-                    existing_canonical[canon_name] = vm_id
-                except Exception as exc:
-                    print(f"[{MODULE_NAME}] Rename failed for VM #{vm_id}: {exc}")
-            conn.commit()
-        finally:
-            conn.close()
-        if dupes:
-            print(f"[{MODULE_NAME}] Removed {dupes} duplicate pending row(s)")
 
 
         # ── Collect valid pending rows for Phase 4 ───────────────────────────
@@ -1171,22 +1172,6 @@ class VMSManager:
         conn = self._conn()
         try:
             conn.executemany(query, params)
-            conn.commit()
-        finally:
-            conn.close()
-
-    def _db_batch_insert(self, rows: list):
-        """Batch-insert untracked file rows."""
-        if not rows:
-            return
-        conn = self._conn()
-        try:
-            conn.executemany(
-                """INSERT OR IGNORE INTO vms
-                   (filename, filepath, processed, created_at, duration_secs)
-                   VALUES (?, ?, ?, ?, ?)""",
-                rows,
-            )
             conn.commit()
         finally:
             conn.close()

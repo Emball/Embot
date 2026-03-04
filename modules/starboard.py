@@ -15,10 +15,18 @@ import asyncio
 
 MODULE_NAME = "STARBOARD"
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  Path helpers (must be defined before CONFIG is loaded)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _script_dir() -> Path:
+    return Path(__file__).parent.parent.absolute()  # modules/ → Embot/
+
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║                         CONFIGURATION                                   ║
 # ╠══════════════════════════════════════════════════════════════════════════╣
-# ║  Fill in your settings here. Restart or `reload starboard` to apply.   ║
+# ║  Edit config/starboard_config.json (created automatically on first run) ║
+# ║  then restart or `reload starboard` to apply changes.                   ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
 def _load_starboard_config() -> dict:
@@ -40,13 +48,6 @@ def _load_starboard_config() -> dict:
     return defaults
 
 CONFIG = _load_starboard_config()
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  Nothing below this line needs to be changed
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _script_dir() -> Path:
-    return Path(__file__).parent.parent.absolute()  # modules/ → Embot/
 
 def _db_path() -> Path:
     return _script_dir() / "db" / "starboard.db"

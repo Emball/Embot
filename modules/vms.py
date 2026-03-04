@@ -19,6 +19,9 @@ VMS — Voice Message System for Embot
   - Retroactive/bulk VMs are renamed after processing
   - Existing non-conforming files are conformed on startup
   - Metadata unavailable for retroactive files (user/message IDs) is NULL
+• filepath column is not used — files are resolved at runtime from filename
+  against the known cache dirs (vms/, archive/, broken/).  Old DBs with a
+  filepath column are migrated automatically on first startup.
 • Bulk-processes pre-populated folders at startup using a dedicated
   background thread pool (GPU-parallel or CPU-multi-threaded) that
   never blocks normal bot operation
@@ -220,7 +223,6 @@ PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS vms (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     filename            TEXT    NOT NULL UNIQUE,
-    filepath            TEXT    NOT NULL,
     discord_message_id  TEXT,
     discord_channel_id  TEXT,
     guild_id            TEXT,
@@ -419,8 +421,8 @@ def _load_whisper() -> Optional[object]:
 
 def _quarantine_file(filepath: str) -> str:
     """
-    Move a corrupt/unprocessable OGG to /data/vms/broken/.
-    Returns the new path as a string.
+    Move a corrupt/unprocessable OGG to the broken dir.
+    Returns the filename (not full path) — callers use _resolve_path().
     """
     src = Path(filepath)
     dst = _broken_dir() / src.name
@@ -431,10 +433,10 @@ def _quarantine_file(filepath: str) -> str:
             except (FileExistsError, OSError):
                 src.unlink(missing_ok=True)  # dst already exists, drop src
             print(f"[{MODULE_NAME}] Quarantined corrupt file → {dst}")
-        return str(dst)
+        return src.name
     except Exception as exc:
         print(f"[{MODULE_NAME}] Failed to quarantine {src}: {exc}")
-        return filepath
+        return src.name
 
 
 def _is_audio_valid(audio) -> bool:
@@ -449,11 +451,10 @@ def _is_audio_valid(audio) -> bool:
 def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool, str]:
     """
     Full synchronous processing for one OGG file.
-    Returns (transcript, duration_secs, waveform_b64, is_broken, actual_filepath).
-    actual_filepath is the file's current path on disk — equals filepath normally,
-    or the quarantine destination when is_broken=True.
-    NEVER raises — all exceptions are caught and result in is_broken=True
-    so a worker thread dying can never crash the BulkProcessor or startup task.
+    Returns (transcript, duration_secs, waveform_b64, is_broken, actual_filename).
+    actual_filename is the bare filename — equals Path(filepath).name normally,
+    or the quarantine filename when is_broken=True.
+    NEVER raises — all exceptions are caught and result in is_broken=True.
     """
     try:
         duration = _get_ogg_duration(filepath)
@@ -461,7 +462,7 @@ def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool, 
         model    = _load_whisper()
 
         if model is None:
-            return None, duration, waveform, False, filepath
+            return None, duration, waveform, False, Path(filepath).name
 
         import whisper as _whisper
 
@@ -470,13 +471,13 @@ def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool, 
             audio = _whisper.load_audio(filepath)
         except Exception as exc:
             print(f"[{MODULE_NAME}] Cannot read audio ({filepath}): {exc} — quarantining")
-            broken_path = _quarantine_file(filepath)
-            return None, 0.0, waveform, True, broken_path
+            broken_name = _quarantine_file(filepath)
+            return None, 0.0, waveform, True, broken_name
 
         if not _is_audio_valid(audio):
             print(f"[{MODULE_NAME}] Audio too short/empty ({filepath}) — quarantining")
-            broken_path = _quarantine_file(filepath)
-            return None, 0.0, waveform, True, broken_path
+            broken_name = _quarantine_file(filepath)
+            return None, 0.0, waveform, True, broken_name
 
         # ── Mel spectrogram ─────────────────────────────────────────────────
         try:
@@ -484,25 +485,22 @@ def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool, 
             mel   = _whisper.log_mel_spectrogram(audio).to(model.device)
         except Exception as exc:
             print(f"[{MODULE_NAME}] Mel failed ({filepath}): {exc} — quarantining")
-            broken_path = _quarantine_file(filepath)
-            return None, 0.0, waveform, True, broken_path
+            broken_name = _quarantine_file(filepath)
+            return None, 0.0, waveform, True, broken_name
 
 
         # ── Language detection + decode ──────────────────────────────────────
-        # Both calls run the model on the mel tensor — wrap them together so
-        # any RuntimeError (reshape, tensor shape mismatch, etc.) is caught
-        # regardless of which internal step triggers it.
         try:
             _, probs = model.detect_language(mel)
             options  = _whisper.DecodingOptions(fp16=False)
             result   = _whisper.decode(model, mel, options)
             transcript = (result.text or "").strip() or None
-            return transcript, duration, waveform, False, filepath
+            return transcript, duration, waveform, False, Path(filepath).name
 
         except (RuntimeError, ValueError) as exc:
             print(f"[{MODULE_NAME}] Decode failed ({filepath}): {exc} — quarantining")
-            broken_path = _quarantine_file(filepath)
-            return None, duration, waveform, True, broken_path
+            broken_name = _quarantine_file(filepath)
+            return None, duration, waveform, True, broken_name
 
         except Exception as exc:
             exc_str = str(exc)
@@ -510,19 +508,19 @@ def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool, 
                 print(f"[{MODULE_NAME}] Whisper internal error ({filepath}) — quarantining")
             else:
                 print(f"[{MODULE_NAME}] Transcription error ({filepath}): {exc_str} — quarantining")
-            broken_path = _quarantine_file(filepath)
-            return None, duration, waveform, True, broken_path
+            broken_name = _quarantine_file(filepath)
+            return None, duration, waveform, True, broken_name
 
     except Exception as exc:
         # Absolute last resort — should never reach here, but guarantees the
         # worker thread never raises and crashes the executor.
         print(f"[{MODULE_NAME}] Fatal processing error ({filepath}): {exc} — quarantining")
-        broken_path = filepath
+        broken_name = Path(filepath).name
         try:
-            broken_path = _quarantine_file(filepath)
+            broken_name = _quarantine_file(filepath)
         except Exception:
             pass
-        return None, 0.0, "", True, broken_path
+        return None, 0.0, "", True, broken_name
 
 
 # ==================== DISCORD VOICE MESSAGE API ====================
@@ -744,7 +742,7 @@ class BulkProcessor:
 
                 # ── Process (blocking — Whisper runs here) ──────────────────
                 try:
-                    transcript, duration, waveform, is_broken, actual_fp = \
+                    transcript, duration, waveform, is_broken, actual_filename = \
                         _process_file_sync(fp)
                 except Exception as exc:
                     self.logger.log(MODULE_NAME,
@@ -755,9 +753,9 @@ class BulkProcessor:
 
                 # ── Commit immediately — one row per transcription ───────────
                 if is_broken:
-                    self._commit_broken([(actual_fp, vm_id)])
+                    self._commit_broken([(actual_filename, vm_id)])
                 else:
-                    self._commit_batch([(vm_id, transcript or "", duration, waveform, actual_fp)])
+                    self._commit_batch([(vm_id, transcript or "", duration, waveform, actual_filename)])
 
                 done += 1
                 if done % BULK_BATCH_SIZE == 0:
@@ -775,33 +773,27 @@ class BulkProcessor:
         """
         Write a batch of transcription results to SQLite.
         Opens its own connection — safe to call from a worker thread.
-        batch items: (vm_id, transcript, duration, waveform, filepath)
+        batch items: (vm_id, transcript, duration, waveform, filename)
 
-        Files are already canonically named before entering the queue —
-        no rename is needed here.
         Files already in the archive dir are kept at processed=2;
         all others are set to processed=1.
         """
         try:
             conn = sqlite3.connect(self.db_path)
             conn.execute("PRAGMA journal_mode=WAL")
-            archive_path = str(_archive_dir())
+            archive_name_set = {p.name for p in _archive_dir().glob("*.ogg")}
             try:
-                for vm_id, transcript, duration, waveform, filepath in batch:
-                    canon_name = Path(filepath).name
-                    canon_fp   = filepath
-
+                for vm_id, transcript, duration, waveform, filename in batch:
                     # Archived files stay processed=2; all others → 1
-                    in_archive = str(Path(filepath).parent) == archive_path
+                    in_archive = filename in archive_name_set
                     new_state  = 2 if in_archive else 1
 
                     conn.execute(
                         """UPDATE vms
                            SET transcript=?, duration_secs=?, waveform_b64=?,
-                               filename=?, filepath=?, processed=?
+                               filename=?, processed=?
                            WHERE id=? AND processed=0""",
-                        (transcript, duration, waveform,
-                         canon_name, canon_fp, new_state, vm_id)
+                        (transcript, duration, waveform, filename, new_state, vm_id)
                     )
 
                 # Ensure playback rows exist for all committed VMs
@@ -818,8 +810,8 @@ class BulkProcessor:
 
     def _commit_broken(self, batch: list):
         """
-        Mark broken VM rows as processed=4 and update their filepath to /broken/.
-        batch items: (broken_path, vm_id)
+        Mark broken VM rows as processed=4.
+        batch items: (filename, vm_id)
         """
         if not batch:
             return
@@ -828,7 +820,7 @@ class BulkProcessor:
             conn.execute("PRAGMA journal_mode=WAL")
             try:
                 conn.executemany(
-                    "UPDATE vms SET processed=4, filepath=? WHERE id=?",
+                    "UPDATE vms SET processed=4, filename=? WHERE id=?",
                     batch,
                 )
                 conn.commit()
@@ -883,6 +875,7 @@ class VMSManager:
         self._backfill_running = False
 
         _init_db(self.db_path)
+        self._migrate_filepath_column()
 
         self._db_exec(
             "INSERT INTO vms_startup_log (startup_time) VALUES (?)",
@@ -892,6 +885,72 @@ class VMSManager:
         self.bot.logger.log(MODULE_NAME,
             f"Paths — vms: {self.vms_dir} | archive: {self.archive_dir} "
             f"| broken: {_broken_dir()} | db: {self.db_path}")
+
+    # -------------------------------------------------------- Migration ------
+
+    def _migrate_filepath_column(self):
+        """
+        One-time migration for old DBs that have a `filepath` column.
+        Drops the column — filenames are resolved at runtime via _resolve_path().
+        Safe to call on every startup; no-ops if already migrated.
+        """
+        conn = self._conn()
+        try:
+            cols = [row[1] for row in conn.execute("PRAGMA table_info(vms)").fetchall()]
+            if "filepath" not in cols:
+                return  # already clean
+
+            self.bot.logger.log(MODULE_NAME,
+                "Old DB detected: dropping filepath column (paths resolved from filename now)…")
+
+            # SQLite doesn't support DROP COLUMN before 3.35; use table rebuild
+            # to stay compatible with older SQLite versions on e.g. Raspberry Pi.
+            conn.executescript("""
+                BEGIN;
+                CREATE TABLE IF NOT EXISTS vms_new (
+                    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                    filename            TEXT    NOT NULL UNIQUE,
+                    discord_message_id  TEXT,
+                    discord_channel_id  TEXT,
+                    guild_id            TEXT,
+                    duration_secs       REAL    DEFAULT 0.0,
+                    waveform_b64        TEXT,
+                    transcript          TEXT,
+                    processed           INTEGER DEFAULT 0,
+                    created_at          INTEGER NOT NULL,
+                    archived_at         INTEGER,
+                    deleted_at          INTEGER
+                );
+                INSERT INTO vms_new
+                    SELECT id, filename, discord_message_id, discord_channel_id,
+                           guild_id, duration_secs, waveform_b64, transcript,
+                           processed, created_at, archived_at, deleted_at
+                    FROM vms;
+                DROP TABLE vms;
+                ALTER TABLE vms_new RENAME TO vms;
+                COMMIT;
+            """)
+            self.bot.logger.log(MODULE_NAME, "filepath column migration complete")
+        except Exception as exc:
+            self.bot.logger.log(MODULE_NAME,
+                f"filepath migration error (non-fatal): {exc}", "WARNING")
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------- Path resolver ---
+
+    def _resolve_path(self, filename: str) -> Optional[Path]:
+        """
+        Locate a VM file by checking known dirs in priority order.
+        Returns the Path if found, None otherwise.
+        """
+        if not filename or filename == "__pending__":
+            return None
+        for d in (self.vms_dir, self.archive_dir, _broken_dir()):
+            p = d / filename
+            if p.exists():
+                return p
+        return None
 
     # ------------------------------------------------------------------ DB --
 
@@ -964,15 +1023,14 @@ class VMSManager:
                 self.bot.logger.log(MODULE_NAME,
                     f"Transcribing VM #{vm_id}: {Path(filepath).name}")
                 try:
-                    transcript, duration, waveform, is_broken, actual_fp = await asyncio.get_running_loop().run_in_executor(
+                    transcript, duration, waveform, is_broken, actual_filename = await asyncio.get_running_loop().run_in_executor(
                         self._executor, _process_file_sync, filepath
                     )
 
                     if is_broken:
-                        # actual_fp is the quarantine destination returned by _process_file_sync
                         self._db_exec(
-                            "UPDATE vms SET processed=4, filepath=? WHERE id=?",
-                            (actual_fp, vm_id)
+                            "UPDATE vms SET processed=4, filename=? WHERE id=?",
+                            (actual_filename, vm_id)
                         )
                         self.bot.logger.log(MODULE_NAME,
                             f"VM #{vm_id} marked broken and quarantined")
@@ -985,20 +1043,15 @@ class VMSManager:
                                 pass
                         continue
 
-                    # File is already canonically named (save_voice_message names
-                    # it correctly upfront). Just use the current path as-is.
-                    canon_fp   = actual_fp
-                    canon_name = Path(actual_fp).name
-
-                    in_archive = str(Path(canon_fp).parent) == str(self.archive_dir)
+                    in_archive = (self._resolve_path(actual_filename) or Path("")).parent == self.archive_dir
                     new_state  = 2 if in_archive else 1
                     self._db_exec(
                         """UPDATE vms
                            SET transcript=?, duration_secs=?, waveform_b64=?,
-                               filename=?, filepath=?, processed=?
+                               filename=?, processed=?
                            WHERE id=?""",
                         (transcript or "", duration, waveform,
-                         canon_name, canon_fp, new_state, vm_id)
+                         actual_filename, new_state, vm_id)
                     )
                     self._db_exec(
                         "INSERT OR IGNORE INTO vms_playback (vm_id) VALUES (?)",
@@ -1048,7 +1101,7 @@ class VMSManager:
           1. Pre-insert a placeholder row to claim the auto-assigned DB id
           2. Derive the canonical filename (vm_{id}.ogg or rich format)
           3. Write bytes directly to that path — no temp file, no rename
-          4. UPDATE the row with the real filepath, duration, and metadata
+          4. UPDATE the row with the real filename and duration
 
         Returns the DB row id, or None on failure.
         """
@@ -1061,9 +1114,9 @@ class VMSManager:
             try:
                 cur = conn.execute(
                     """INSERT INTO vms
-                       (filename, filepath, discord_message_id, discord_channel_id,
+                       (filename, discord_message_id, discord_channel_id,
                         guild_id, duration_secs, processed, created_at)
-                       VALUES ('__pending__', '', ?, ?, ?, 0.0, 0, ?)""",
+                       VALUES ('__pending__', ?, ?, ?, 0.0, 0, ?)""",
                     (str(message.id), str(message.channel.id), guild_id, ts)
                 )
                 vm_id = cur.lastrowid
@@ -1085,8 +1138,8 @@ class VMSManager:
                 self._executor, _get_ogg_duration, str(canon_path)
             )
             self._db_exec(
-                "UPDATE vms SET filename=?, filepath=?, duration_secs=? WHERE id=?",
-                (canon_name, str(canon_path), duration, vm_id)
+                "UPDATE vms SET filename=?, duration_secs=? WHERE id=?",
+                (canon_name, duration, vm_id)
             )
 
             self.bot.logger.log(MODULE_NAME,
@@ -1103,13 +1156,12 @@ class VMSManager:
         """
         Synchronous worker — safe to run in a thread executor.
 
-        Phase 1: Conform already-processed files to canonical vm_{id}.ogg (or rich) format, batching
+        Phase 1: Conform already-processed files to canonical format, batching
                  DB updates (SCAN_BATCH_SIZE rows per commit).
         Phase 2: Register untracked .ogg files from vms/, archive/, broken/.
                  Each file is inserted one at a time to obtain its auto-assigned
-                 DB id, immediately renamed to canonical format on disk, and the row
-                 updated — so every registered file is canonical from birth and
-                 Phase 3 collision problems can never occur.
+                 DB id, immediately renamed to canonical format on disk, and the
+                 row updated — so every registered file is canonical from birth.
         Phase 2b: Reset archived-but-untranscribed rows back to pending.
 
         Returns list of (vm_id, filepath) pairs ready for dispatch.
@@ -1121,19 +1173,13 @@ class VMSManager:
         ]
 
         # ── Phase 1: Conform processed/archived/broken filenames ─────────────
-        # Build a canonical-name → id map first so we can detect collisions
-        # (two rows claiming the same canonical filename) before touching the DB.
-        # Collisions happen when duplicate registrations exist from old runs.
         existing_canonical = {
             r[0]: r[1]   # filename → id
             for r in self._db_all("SELECT filename, id FROM vms")
         }
 
-        # Non-canonical = old vm-{id}.ogg format (dash separator, not underscore).
-        # New format is vm_{username}_{msgid}_{date}.ogg or vm_{id}.ogg fallback —
-        # both start with "vm_". Only files still in the old dash format need conforming.
         non_canonical = self._db_all(
-            """SELECT id, filepath, filename FROM vms
+            """SELECT id, filename FROM vms
                WHERE processed IN (1, 2, 4)
                  AND filename LIKE 'vm-%'"""
         )
@@ -1141,16 +1187,12 @@ class VMSManager:
         dupes_removed = 0
         conn = self._conn()
         try:
-            for vm_id, fp, old_name in non_canonical:
-                # Fetch metadata from the DB row to build a rich canonical name.
+            for vm_id, old_name in non_canonical:
                 row = conn.execute(
                     "SELECT discord_message_id, created_at FROM vms WHERE id=?", (vm_id,)
                 ).fetchone()
                 msg_id   = row[0] if row else None
                 ts       = row[1] if row else None
-                # Recover username from the existing filename if it's already in
-                # rich format (vm_{username}_{msgid}_{date}.ogg); None for old
-                # dash-format files, which fall back to vm_{id}.ogg.
                 parsed   = _parse_vm_filename(old_name)
                 username = parsed.get("username")
                 canon_name = _vm_canonical_name(vm_id, username, msg_id, ts)
@@ -1159,16 +1201,26 @@ class VMSManager:
                     conn.execute("DELETE FROM vms WHERE id=?", (vm_id,))
                     dupes_removed += 1
                     continue
-                try:
-                    new_path = _rename_to_canonical(Path(fp), vm_id, username, msg_id, ts)
-                    conn.execute(
-                        "UPDATE vms SET filename=?, filepath=? WHERE id=?",
-                        (new_path.name, str(new_path), vm_id)
-                    )
-                    existing_canonical[canon_name] = vm_id
-                    conformed += 1
-                except Exception as exc:
-                    print(f"[{MODULE_NAME}] Conform warning VM #{vm_id} ({old_name}): {exc}")
+
+                # Rename on disk — search all dirs for the old file
+                old_path = None
+                for d in (self.vms_dir, self.archive_dir, _broken_dir()):
+                    candidate = d / old_name
+                    if candidate.exists():
+                        old_path = candidate
+                        break
+
+                if old_path:
+                    try:
+                        new_path = _rename_to_canonical(old_path, vm_id, username, msg_id, ts)
+                        conn.execute(
+                            "UPDATE vms SET filename=? WHERE id=?",
+                            (new_path.name, vm_id)
+                        )
+                        existing_canonical[canon_name] = vm_id
+                        conformed += 1
+                    except Exception as exc:
+                        print(f"[{MODULE_NAME}] Conform warning VM #{vm_id} ({old_name}): {exc}")
             conn.commit()
         finally:
             conn.close()
@@ -1179,23 +1231,15 @@ class VMSManager:
             print(f"[{MODULE_NAME}] Removed {dupes_removed} duplicate DB row(s)")
 
         # ── Phase 2: Register untracked files ────────────────────────────────
-        # Insert one row at a time so we get the auto-assigned id immediately,
-        # rename the file to canonical format on disk, then update the row.
-        # This means every registered file is canonical from the moment it's
-        # written — no Phase 3 rename pass needed, no collision logic required.
-        existing_paths = {r[0] for r in self._db_all("SELECT filepath FROM vms")}
-        # Also track canonical names already in use (from Phase 1 survivors)
         existing_canonical_names = {r[0] for r in self._db_all("SELECT filename FROM vms")}
 
         new_counts = {}
-        batch_update = []   # (canon_name, canon_fp, vm_id) — flushed per SCAN_BATCH_SIZE
         conn = self._conn()
         try:
             for scan_dir, label, proc_state in scan_dirs:
                 new = 0
                 for ogg in sorted(scan_dir.glob("*.ogg")):
-                    # Skip already-registered files (by path or canonical name)
-                    if str(ogg) in existing_paths or ogg.name in existing_canonical_names:
+                    if ogg.name in existing_canonical_names:
                         continue
 
                     mtime = int(ogg.stat().st_mtime)
@@ -1203,14 +1247,13 @@ class VMSManager:
 
                     # Insert placeholder to claim an id
                     cur = conn.execute(
-                        """INSERT INTO vms (filename, filepath, processed, created_at, duration_secs)
-                           VALUES ('__pending__', ?, ?, ?, ?)""",
-                        (str(ogg), proc_state, mtime, dur)
+                        """INSERT INTO vms (filename, processed, created_at, duration_secs)
+                           VALUES ('__pending__', ?, ?, ?)""",
+                        (proc_state, mtime, dur)
                     )
                     vm_id = cur.lastrowid
 
-                    # Rename on disk to canonical immediately (vm_{id}.ogg fallback
-                    # or vm_{username}_{msgid}_{date}.ogg if metadata is available)
+                    # Rename on disk to canonical immediately
                     try:
                         new_path = _rename_to_canonical(ogg, vm_id)
                     except Exception as exc:
@@ -1218,20 +1261,14 @@ class VMSManager:
                               f"({ogg.name} → canonical): {exc} — keeping original name")
                         new_path = ogg
 
-                    canon_name = new_path.name
-                    canon_fp   = str(new_path)
-
-                    # Update the row with the real name/path
                     conn.execute(
-                        "UPDATE vms SET filename=?, filepath=? WHERE id=?",
-                        (canon_name, canon_fp, vm_id)
+                        "UPDATE vms SET filename=? WHERE id=?",
+                        (new_path.name, vm_id)
                     )
 
-                    existing_paths.add(canon_fp)
-                    existing_canonical_names.add(canon_name)
+                    existing_canonical_names.add(new_path.name)
                     new += 1
 
-                    # Commit in batches to avoid holding a huge transaction
                     if new % SCAN_BATCH_SIZE == 0:
                         conn.commit()
 
@@ -1268,12 +1305,12 @@ class VMSManager:
                     conn.close()
             print(f"[{MODULE_NAME}] Reset {len(reset_ids)} archived-but-untranscribed VM(s) to pending")
 
-
-        # ── Collect valid pending rows for Phase 4 ───────────────────────────
+        # ── Collect valid pending rows for bulk processing ────────────────────
         pending = self._db_all(
-            "SELECT id, filepath FROM vms WHERE processed=0 AND filepath IS NOT NULL"
+            "SELECT id, filename FROM vms WHERE processed=0 AND filename != '__pending__'"
         )
-        valid   = [(vid, fp) for vid, fp in pending if Path(fp).exists()]
+        valid   = [(vid, str(self._resolve_path(fn))) for vid, fn in pending
+                   if self._resolve_path(fn) is not None]
         missing = len(pending) - len(valid)
         if missing:
             print(f"[{MODULE_NAME}] {missing} pending VM(s) have missing files — skipping")
@@ -1365,14 +1402,14 @@ class VMSManager:
         archived = deleted = 0
 
         # Delete (≥365 days)
-        for vm_id, fp, fn in self._db_all(
-            "SELECT id, filepath, filename FROM vms WHERE created_at < ? AND processed != 3",
+        for vm_id, fn in self._db_all(
+            "SELECT id, filename FROM vms WHERE created_at < ? AND processed != 3",
             (delete_cutoff,)
         ):
             try:
-                for path in [Path(fp), self.archive_dir / fn]:
-                    if path.exists():
-                        path.unlink()
+                p = self._resolve_path(fn)
+                if p and p.exists():
+                    p.unlink()
                 self._db_exec(
                     "UPDATE vms SET processed=3, deleted_at=? WHERE id=?",
                     (now, vm_id)
@@ -1382,19 +1419,19 @@ class VMSManager:
                 self.bot.logger.error(MODULE_NAME, f"Failed to delete VM #{vm_id}", exc)
 
         # Archive (150–365 days)
-        for vm_id, fp, fn in self._db_all(
-            """SELECT id, filepath, filename FROM vms
+        for vm_id, fn in self._db_all(
+            """SELECT id, filename FROM vms
                WHERE created_at < ? AND created_at >= ? AND processed=1""",
             (archive_cutoff, delete_cutoff)
         ):
             try:
-                src = Path(fp)
+                src = self._resolve_path(fn)
                 dst = self.archive_dir / fn
-                if src.exists() and not dst.exists():
+                if src and src.exists() and not dst.exists():
                     src.rename(dst)
                 self._db_exec(
-                    "UPDATE vms SET processed=2, filepath=?, archived_at=? WHERE id=?",
-                    (str(dst), now, vm_id)
+                    "UPDATE vms SET processed=2, archived_at=? WHERE id=?",
+                    (now, vm_id)
                 )
                 archived += 1
             except Exception as exc:
@@ -1422,18 +1459,22 @@ class VMSManager:
         """
         cutoff = int(time.time()) - (VM_COOLDOWN_DAYS * 86400)
         rows = self._db_all(
-            """SELECT v.id, v.filepath, v.transcript, v.duration_secs, v.created_at,
+            """SELECT v.id, v.filename, v.transcript, v.duration_secs, v.created_at,
                       COALESCE(p.last_played, 0)
                FROM vms v
                LEFT JOIN vms_playback p ON v.id = p.vm_id
-               WHERE v.processed = 1
+               WHERE v.processed IN (1, 2)
                  AND v.transcript IS NOT NULL
                  AND v.transcript != ''
                  AND COALESCE(p.last_played, 0) < ?""",
             (cutoff,)
         )
-        return [(r[0], r[1], r[2], r[3], r[4], r[5])
-                for r in rows if Path(r[1]).exists()]
+        result = []
+        for r in rows:
+            p = self._resolve_path(r[1])
+            if p is not None:
+                result.append((r[0], str(p), r[2], r[3], r[4], r[5]))
+        return result
 
     def select_contextual(self, recent_messages: List[str]) -> Optional[Tuple[int, str, float]]:
         chat_kw = self._keywords(" ".join(recent_messages))
@@ -1492,9 +1533,9 @@ class VMSManager:
         """
         Send a VM to a Discord channel as a proper voice message with real waveform.
         Fetches stored waveform from DB; falls back to generating one on the fly.
+        filepath is the resolved absolute path (from _eligible_vms).
         """
         try:
-            # Pull stored waveform from DB
             row      = self._db_one("SELECT waveform_b64 FROM vms WHERE id=?", (vm_id,))
             waveform = (row[0] if row and row[0] else None) or _generate_waveform(filepath)
 
@@ -1697,9 +1738,9 @@ class VMSManager:
                         try:
                             cur = conn.execute(
                                 """INSERT INTO vms
-                                   (filename, filepath, discord_message_id, discord_channel_id,
+                                   (filename, discord_message_id, discord_channel_id,
                                     guild_id, duration_secs, processed, created_at)
-                                   VALUES ('__pending__', '', ?, ?, ?, 0.0, 0, ?)""",
+                                   VALUES ('__pending__', ?, ?, ?, 0.0, 0, ?)""",
                                 (msg_id_str, str(message.channel.id), guild_id, ts)
                             )
                             vm_id = cur.lastrowid
@@ -1714,14 +1755,13 @@ class VMSManager:
                         raw        = await att.read()
                         canon_path.write_bytes(raw)
 
-                        # Get duration (offloaded — mutagen is blocking file I/O)
-                        # and finalise the DB row before feeding to BulkProcessor.
+                        # Get duration and finalise the DB row
                         duration = await asyncio.get_running_loop().run_in_executor(
                             None, _get_ogg_duration, str(canon_path)
                         )
                         self._db_exec(
-                            "UPDATE vms SET filename=?, filepath=?, duration_secs=? WHERE id=?",
-                            (canon_name, str(canon_path), duration, vm_id)
+                            "UPDATE vms SET filename=?, duration_secs=? WHERE id=?",
+                            (canon_name, duration, vm_id)
                         )
 
                         # Feed immediately to BulkProcessor — transcription starts now
@@ -1877,9 +1917,9 @@ class VMSManager:
                         try:
                             cur = conn.execute(
                                 """INSERT INTO vms
-                                   (filename, filepath, discord_message_id, discord_channel_id,
+                                   (filename, discord_message_id, discord_channel_id,
                                     guild_id, duration_secs, processed, created_at)
-                                   VALUES ('__pending__', '', ?, ?, ?, 0.0, 0, ?)""",
+                                   VALUES ('__pending__', ?, ?, ?, 0.0, 0, ?)""",
                                 (msg_id_str, str(message.channel.id), guild_id, ts)
                             )
                             vm_id = cur.lastrowid
@@ -1897,8 +1937,8 @@ class VMSManager:
                             None, _get_ogg_duration, str(canon_path)
                         )
                         self._db_exec(
-                            "UPDATE vms SET filename=?, filepath=?, duration_secs=? WHERE id=?",
-                            (canon_name, str(canon_path), duration, vm_id)
+                            "UPDATE vms SET filename=?, duration_secs=? WHERE id=?",
+                            (canon_name, duration, vm_id)
                         )
 
                         self._bulk_proc.feed(vm_id, str(canon_path))
@@ -2123,9 +2163,11 @@ def setup(bot):
 
             vm_id = await manager.save_voice_message(message, att)
             if vm_id:
-                row = manager._db_one("SELECT filepath FROM vms WHERE id=?", (vm_id,))
+                row = manager._db_one("SELECT filename FROM vms WHERE id=?", (vm_id,))
                 if row:
-                    await manager.enqueue(vm_id, row[0], reply_to=message)
+                    resolved = manager._resolve_path(row[0])
+                    if resolved:
+                        await manager.enqueue(vm_id, str(resolved), reply_to=message)
             return  # one VM per message is enough
 
         # ── 2. Ping / reply-to-bot → respond with a VM ──────────────────────

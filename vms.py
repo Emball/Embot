@@ -1817,11 +1817,22 @@ class VMSManager:
                     self.bot.logger.log(MODULE_NAME,
                         f"Backfill was interrupted at message ID {cursor} — resuming…")
                 else:
-                    # Old interrupted DB: no cursor saved yet — derive resume point
-                    # from the highest discord_message_id already in the DB.
+                    # Old interrupted DB: no cursor saved yet — derive resume point.
+                    # We must exclude live VMs (received in real-time during/after
+                    # the backfill session) because their snowflake IDs are much
+                    # newer than where the scan actually stopped in history.
+                    # The backfill scans oldest_first, so we want the MAX message ID
+                    # among rows whose created_at predates the cutoff window — i.e.
+                    # actual historical messages, not live ones from recent days.
+                    from datetime import timezone, timedelta
+                    cutoff_ts = int(
+                        (discord.utils.utcnow().replace(tzinfo=timezone.utc)
+                         - timedelta(days=1)).timestamp()  # exclude anything from last 24h
+                    )
                     row = self._db_one(
                         "SELECT MAX(CAST(discord_message_id AS INTEGER)) FROM vms "
-                        "WHERE discord_message_id IS NOT NULL"
+                        "WHERE discord_message_id IS NOT NULL AND created_at < ?",
+                        (cutoff_ts,)
                     )
                     if row and row[0]:
                         self._save_backfill_cursor(int(row[0]))

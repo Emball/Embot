@@ -60,10 +60,13 @@ PLAYBACK_CHANCE           = 0.50      # 50 % chance to trigger playback at thres
 WHISPER_MODEL_SIZE        = "base"    # tiny / base / small / medium / large
 
 # Bulk-processing concurrency
-# GPU path: Whisper itself parallelises across CUDA cores — keep 1 worker
-# CPU path: use (cpu_count / 2) workers so bot stays responsive
+# Whisper is NOT thread-safe and is compute-bound — running multiple instances
+# simultaneously on CPU causes memory exhaustion and process crashes.
+# Always use 1 worker regardless of CPU count; the single worker processes
+# files sequentially but the event loop remains fully unblocked throughout.
+# GPU path: same — Whisper handles its own internal CUDA parallelism.
 BULK_GPU_WORKERS  = 1
-BULK_CPU_WORKERS  = max(2, (os.cpu_count() or 4) // 2)
+BULK_CPU_WORKERS  = 1
 BULK_BATCH_SIZE   = 16               # files committed to DB per batch
 WAVEFORM_SAMPLES  = 256              # Discord expects 256-byte waveform
 

@@ -1,1465 +1,914 @@
-import discord
-from discord.ext import tasks
-from discord.ui import View, Button
-import os
-import random
-import shutil
-from pathlib import Path
-from datetime import datetime, timedelta, timezone
+# [file name]: vms.py
+"""
+VMS — Voice Message System for Embot
+=====================================
+• Detects & saves Discord voice messages to data/vms/
+• Transcribes using OpenAI Whisper (CUDA if available, else CPU)
+• Posts transcripts as blockquote replies
+• Saves transcripts to SQLite DB (data/vms.db) for keyword playback
+• Archives to data/cache/archive/ after 150 days, deletes after 365 days
+• Archive job schedule is stored in DB — catches missed runs after crashes
+• Periodic random playback in #general (every 40–80 messages, 50% chance)
+• Contextual playback using keyword matching against transcripts
+• Smart selection: 7-day cooldowns, long-VM penalties, recency weighting
+• Responds to @mentions / replies with a random VM (10s cooldown)
+• Retroactively transcribes manually placed .ogg files on startup
+• Processing queue prevents memory issues
+• Works as user app (transcribes VMs in DMs)
+"""
+
 import asyncio
 import aiohttp
-import base64
-import subprocess
-import json
-from collections import Counter
+import discord
+import os
+import random
 import re
-import math
+import sqlite3
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, List, Tuple
+from discord.ext import tasks
 
 MODULE_NAME = "VMS"
 
-# Configuration
-VMS_ROOT = Path("data/voice_messages")
-CACHE_DIR = VMS_ROOT / "cache"
-ARCHIVE_DIR = VMS_ROOT / "archived"
-TRANSCRIPTS_FILE = VMS_ROOT / "transcripts.json"
-VM_TRACKING_FILE = VMS_ROOT / "vm_tracking.json"  # NEW: Track VM usage
+# ==================== CONFIGURATION ====================
+
 GENERAL_CHANNEL_NAME = "general"
+PING_COOLDOWN_SECONDS = 10
+VM_COOLDOWN_DAYS = 7
+LONG_VM_THRESHOLD_SECS = 60          # VMs longer than this receive a score penalty
+ARCHIVE_AFTER_DAYS = 150
+DELETE_AFTER_DAYS = 365
+ARCHIVE_JOB_INTERVAL_HOURS = 24
+RANDOM_PLAYBACK_MIN = 40
+RANDOM_PLAYBACK_MAX = 80
+PLAYBACK_CHANCE = 0.50               # 50% chance to trigger playback when threshold reached
+WHISPER_MODEL_SIZE = "base"          # tiny / base / small / medium / large
 
-# Message-based thresholds
-MIN_MESSAGES_BETWEEN = 40
-MAX_MESSAGES_BETWEEN = 80
-INACTIVITY_TIMEOUT_HOURS = 2
+# Waveform preview (from Discord spec example)
+SAMPLE_WAVEFORM = (
+    "acU6Va9UcSVZzsVw7IU/80s0Kh/pbrTcwmpR9da4mvQejIMykkgo9F2FfeCd235K/"
+    "atHZtSAmxKeTUgKxAdNVO8PAoZq1cHNQXT/PHthL2sfPZGSdxNgLH0AuJwVeI7QZJ02"
+    "ke40+HkUcBoDdqGDZeUvPqoIRbE23Kr+sexYYe4dVq+zyCe3ci/6zkMWbVBpCjq8D8Z"
+    "ZEFo/lmPJTkgjwqnqHuf6XT4mJyLNphQjvFH9aRqIZpPoQz1sGwAY2vssQ5mTy5J5mu"
+    "Go+n82b0xFROZwsJpumDsFi4Da/85uWS/YzjY5BdxGac8rgUqm9IKh7E6GHzOGOy0LQ"
+    "Iz3O4ntTg=="
+)
 
-# Time thresholds
-CACHE_DAYS = 150
-ARCHIVE_DAYS = 365
-ARCHIVE_CHANCE = 0.15
+# Common words to filter out before keyword matching
+STOP_WORDS = {
+    'the', 'a', 'an', 'and', 'or', 'but', 'is', 'are', 'was', 'were', 'be',
+    'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
+    'could', 'should', 'may', 'might', 'shall', 'can', 'to', 'of', 'in', 'on',
+    'at', 'by', 'for', 'with', 'about', 'into', 'through', 'during', 'before',
+    'after', 'above', 'below', 'from', 'up', 'down', 'out', 'off', 'over',
+    'under', 'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how',
+    'all', 'each', 'every', 'both', 'few', 'more', 'most', 'other', 'some',
+    'such', 'no', 'not', 'only', 'own', 'same', 'than', 'too', 'very', 's',
+    'just', 'because', 'as', 'until', 'while', 'i', 'me', 'my', 'myself', 'we',
+    'our', 'ours', 'you', 'your', 'yours', 'he', 'him', 'his', 'she', 'her',
+    'hers', 'it', 'its', 'they', 'them', 'their', 'theirs', 'what', 'which',
+    'who', 'whom', 'this', 'that', 'these', 'those', 'so', 'if', 'like', 'get',
+    'got', 'im', 'yeah', 'okay', 'ok', 'also', 'lol', 'um', 'uh', 'oh', 'yes',
+}
 
-# Cooldown configuration (prevents spam)
-PING_COOLDOWN_SECONDS = 30
-RANDOM_VM_COOLDOWN_SECONDS = 60  # 1 minute between random VMs
+# ==================== PATH HELPERS ====================
 
-# Sentience configuration
-RELEVANT_VM_CHANCE = 0.5  # 50% chance to use relevant VM
-MESSAGE_CONTEXT_COUNT = 20  # Look at last 20 messages for context
-MIN_KEYWORD_MATCHES = 2  # Minimum keyword matches to consider relevant
+def _script_dir() -> Path:
+    return Path(__file__).parent.absolute()
 
-# NEW: VM Selection Configuration
-VM_COOLDOWN_DAYS = 7  # Don't repeat same VM within 7 days
-LONG_VM_THRESHOLD_SECONDS = 60  # VMs longer than 1 minute are "long"
-LONG_VM_REDUCTION_FACTOR = 0.3  # Reduce selection chance by 70% for long VMs
-MAX_SCORE_WEIGHT = 0.6  # Maximum weight for keyword score vs recency/cooldown
-KEYWORD_SCORE_NORMALIZATION = True  # Normalize keyword scores by transcript length
-MIN_TRANSCRIPT_LENGTH_CHARS = 10  # Minimum transcript length to consider
+def _db_path() -> str:
+    p = _script_dir() / "data"
+    p.mkdir(exist_ok=True)
+    return str(p / "vms.db")
 
+def _vms_dir() -> Path:
+    p = _script_dir() / "data" / "vms"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+def _archive_dir() -> Path:
+    p = _script_dir() / "data" / "cache" / "archive"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+# ==================== DATABASE SETUP ====================
+
+DB_SCHEMA = """
+PRAGMA journal_mode=WAL;
+
+CREATE TABLE IF NOT EXISTS vms (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename            TEXT    NOT NULL UNIQUE,
+    filepath            TEXT    NOT NULL,
+    discord_message_id  TEXT,
+    discord_channel_id  TEXT,
+    guild_id            TEXT,
+    duration_secs       REAL    DEFAULT 0.0,
+    transcript          TEXT,
+    processed           INTEGER DEFAULT 0,  -- 0=pending, 1=done, 2=archived, 3=deleted
+    created_at          INTEGER NOT NULL,
+    archived_at         INTEGER,
+    deleted_at          INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS vms_playback (
+    vm_id       INTEGER PRIMARY KEY,
+    last_played INTEGER DEFAULT 0,
+    play_count  INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS vms_scheduled_jobs (
+    job_name    TEXT    PRIMARY KEY,
+    last_run    INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS vms_startup_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    startup_time INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS vms_message_counter (
+    guild_id    TEXT NOT NULL,
+    channel_id  TEXT NOT NULL,
+    count       INTEGER DEFAULT 0,
+    threshold   INTEGER DEFAULT 60,
+    PRIMARY KEY (guild_id, channel_id)
+);
+
+CREATE TABLE IF NOT EXISTS vms_ping_cooldown (
+    user_id     TEXT    PRIMARY KEY,
+    last_ping   INTEGER DEFAULT 0
+);
+"""
+
+
+def _init_db(db_path: str):
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(DB_SCHEMA)
+        conn.commit()
+    finally:
+        conn.close()
+
+# ==================== WHISPER (lazy-loaded, thread-safe) ====================
+
+_whisper_model = None
+_whisper_lock = threading.Lock()
+_whisper_device = "cpu"
+
+
+def _load_whisper() -> Optional[object]:
+    """Load OpenAI Whisper once. Prefer CUDA GPU, fall back to CPU."""
+    global _whisper_model, _whisper_device
+    if _whisper_model is not None:
+        return _whisper_model
+    with _whisper_lock:
+        if _whisper_model is not None:
+            return _whisper_model
+        try:
+            import whisper
+            try:
+                import torch
+                _whisper_device = "cuda" if torch.cuda.is_available() else "cpu"
+            except ImportError:
+                _whisper_device = "cpu"
+            print(f"[{MODULE_NAME}] Loading Whisper '{WHISPER_MODEL_SIZE}' on {_whisper_device}...")
+            _whisper_model = whisper.load_model(WHISPER_MODEL_SIZE, device=_whisper_device)
+            print(f"[{MODULE_NAME}] Whisper loaded on {_whisper_device}")
+        except ImportError:
+            print(f"[{MODULE_NAME}] openai-whisper not installed — transcription disabled")
+        except Exception as exc:
+            print(f"[{MODULE_NAME}] Whisper load error: {exc}")
+    return _whisper_model
+
+
+def _transcribe_sync(filepath: str) -> Tuple[Optional[str], float]:
+    """
+    Blocking transcription call (intended to run in an executor).
+    Returns (transcript_text, duration_seconds).
+    """
+    model = _load_whisper()
+    if model is None:
+        return None, _get_ogg_duration(filepath)
+
+    try:
+        result = model.transcribe(filepath, fp16=(_whisper_device == "cuda"))
+        text = (result.get("text") or "").strip()
+    except Exception as exc:
+        print(f"[{MODULE_NAME}] Transcription error for {filepath}: {exc}")
+        text = None
+
+    duration = _get_ogg_duration(filepath)
+    return text, duration
+
+
+def _get_ogg_duration(filepath: str) -> float:
+    """Best-effort OGG duration extraction via mutagen."""
+    try:
+        from mutagen.oggopus import OggOpus
+        return OggOpus(filepath).info.length
+    except Exception:
+        pass
+    try:
+        from mutagen import File
+        audio = File(filepath)
+        if audio and hasattr(audio.info, 'length'):
+            return audio.info.length
+    except Exception:
+        pass
+    return 0.0
+
+# ==================== DISCORD VOICE MESSAGE API ====================
+
+async def _send_voice_message(
+    bot_token: str,
+    channel_id: int,
+    ogg_path: str,
+    duration_secs: float,
+    session: aiohttp.ClientSession,
+) -> Optional[dict]:
+    """
+    Upload an OGG file and post it as a Discord voice message (flags: 8192).
+    Returns the raw message dict on success, None on failure.
+
+    Protocol:
+      1. POST /channels/{id}/attachments  → get upload_url + upload_filename
+      2. PUT  upload_url                  → upload raw OGG bytes to CDN
+      3. POST /channels/{id}/messages     → send voice message referencing upload_filename
+    """
+    ogg_bytes = Path(ogg_path).read_bytes()
+    file_size = len(ogg_bytes)
+
+    headers_json = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bot {bot_token}",
+    }
+
+    # ── Step 1: Request upload URL ──
+    try:
+        async with session.post(
+            f"https://discord.com/api/v10/channels/{channel_id}/attachments",
+            headers=headers_json,
+            json={"files": [{"filename": "voice-message.ogg", "file_size": file_size, "id": "2"}]},
+        ) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                print(f"[{MODULE_NAME}] Upload-URL request failed ({resp.status}): {body[:200]}")
+                return None
+            data = await resp.json()
+    except Exception as exc:
+        print(f"[{MODULE_NAME}] Upload-URL request error: {exc}")
+        return None
+
+    attachment = data["attachments"][0]
+    upload_url: str = attachment["upload_url"]
+    upload_filename: str = attachment["upload_filename"]
+
+    # ── Step 2: Upload file bytes to CDN ──
+    try:
+        async with session.put(
+            upload_url,
+            headers={"Content-Type": "audio/ogg", "Authorization": f"Bot {bot_token}"},
+            data=ogg_bytes,
+        ) as resp:
+            if resp.status not in (200, 204):
+                body = await resp.text()
+                print(f"[{MODULE_NAME}] CDN upload failed ({resp.status}): {body[:200]}")
+                return None
+    except Exception as exc:
+        print(f"[{MODULE_NAME}] CDN upload error: {exc}")
+        return None
+
+    # ── Step 3: Post voice message ──
+    payload = {
+        "flags": 8192,
+        "attachments": [{
+            "id": "0",
+            "filename": "voice-message.ogg",
+            "uploaded_filename": upload_filename,
+            "duration_secs": max(duration_secs, 1.0),
+            "waveform": SAMPLE_WAVEFORM,
+        }],
+    }
+    try:
+        async with session.post(
+            f"https://discord.com/api/v10/channels/{channel_id}/messages",
+            headers=headers_json,
+            json=payload,
+        ) as resp:
+            if resp.status == 200:
+                return await resp.json()
+            body = await resp.text()
+            print(f"[{MODULE_NAME}] Message send failed ({resp.status}): {body[:200]}")
+            return None
+    except Exception as exc:
+        print(f"[{MODULE_NAME}] Message send error: {exc}")
+        return None
+
+
+# ==================== VMS MANAGER ====================
 
 class VMSManager:
-    """Manages voice message caching, archiving, and intelligent playback"""
-    
+    """
+    Central manager for the VMS (Voice Message System) module.
+    Handles storage, transcription queuing, archiving, and playback.
+    """
+
     def __init__(self, bot):
         self.bot = bot
-        self.last_post_time = None
-        self.last_ping_response_time = None
-        self.message_count = 0
-        self.target_message_count = 0
-        self.last_message_time = None
-        self.posting_lock = asyncio.Lock()
-        
-        # Transcript management
-        self.transcripts = {}  # {file_path: {text, language, keywords}}
-        self.transcription_queue = asyncio.Queue()
-        self.background_transcription_active = False
-        
-        # NEW: VM usage tracking
-        self.vm_tracking = {}  # {file_path: [last_used_timestamp1, last_used_timestamp2, ...]}
-        
-        self._setup_directories()
-        self._load_transcripts()
-        self._load_vm_tracking()  # NEW: Load tracking data
-        self._schedule_next_post()
-    
-    def _setup_directories(self):
-        """Create directory structure if it doesn't exist"""
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-        self.bot.logger.log(MODULE_NAME, f"Directory structure ready: {VMS_ROOT}")
-    
-    def _load_transcripts(self):
-        """Load existing transcripts from JSON file"""
-        try:
-            if TRANSCRIPTS_FILE.exists():
-                with open(TRANSCRIPTS_FILE, 'r', encoding='utf-8') as f:
-                    self.transcripts = json.load(f)
-                self.bot.logger.log(MODULE_NAME, f"Loaded {len(self.transcripts)} existing transcripts")
-            else:
-                self.transcripts = {}
-                self.bot.logger.log(MODULE_NAME, "No existing transcripts found, starting fresh")
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Error loading transcripts", e)
-            self.transcripts = {}
-    
-    # NEW: Load VM tracking data
-    def _load_vm_tracking(self):
-        """Load VM usage tracking data from JSON file"""
-        try:
-            if VM_TRACKING_FILE.exists():
-                with open(VM_TRACKING_FILE, 'r', encoding='utf-8') as f:
-                    self.vm_tracking = json.load(f)
-                self.bot.logger.log(MODULE_NAME, f"Loaded tracking data for {len(self.vm_tracking)} VMs")
-            else:
-                self.vm_tracking = {}
-                self.bot.logger.log(MODULE_NAME, "No existing VM tracking data found")
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Error loading VM tracking data", e)
-            self.vm_tracking = {}
-    
-    # NEW: Save VM tracking data
-    def _save_vm_tracking(self):
-        """Save VM usage tracking to JSON file"""
-        try:
-            with open(VM_TRACKING_FILE, 'w', encoding='utf-8') as f:
-                json.dump(self.vm_tracking, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Error saving VM tracking data", e)
-    
-    # NEW: Record VM usage
-    def record_vm_usage(self, vm_path):
-        """Record when a VM was played"""
-        try:
-            vm_key = str(vm_path)
-            now = datetime.now(timezone.utc).isoformat()
-            
-            if vm_key not in self.vm_tracking:
-                self.vm_tracking[vm_key] = []
-            
-            self.vm_tracking[vm_key].append(now)
-            
-            # Keep only last 10 usages to avoid file bloat
-            if len(self.vm_tracking[vm_key]) > 10:
-                self.vm_tracking[vm_key] = self.vm_tracking[vm_key][-10:]
-            
-            self._save_vm_tracking()
-            
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, f"Error recording VM usage for {vm_path}", e)
-    
-    # NEW: Check if VM is in cooldown
-    def is_vm_in_cooldown(self, vm_path):
-        """Check if a VM was used recently (within cooldown period)"""
-        try:
-            vm_key = str(vm_path)
-            
-            if vm_key not in self.vm_tracking or not self.vm_tracking[vm_key]:
-                return False
-            
-            # Get most recent usage
-            last_used_str = self.vm_tracking[vm_key][-1]
-            last_used = datetime.fromisoformat(last_used_str.replace('Z', '+00:00'))
-            
-            time_since = datetime.now(timezone.utc) - last_used
-            return time_since.days < VM_COOLDOWN_DAYS
-            
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, f"Error checking VM cooldown for {vm_path}", e)
-            return False
-    
-    # NEW: Async version to check if VM is too long
-    async def _async_is_vm_too_long(self, vm_path):
-        """Async check if a VM exceeds the length threshold"""
-        try:
-            duration = await self._get_audio_duration(vm_path)
-            return duration > LONG_VM_THRESHOLD_SECONDS
-        except Exception as e:
-            self.bot.logger.log(MODULE_NAME, f"Could not check duration for {vm_path.name}, assuming normal length", "WARNING")
-            return False
-    
-    # NEW: Sync version for use in sync contexts
-    def is_vm_too_long_sync(self, vm_path):
-        """Sync version - returns False for now, actual check will be done in async context"""
-        return False
-    
-    def _save_transcripts(self):
-        """Save transcripts to JSON file"""
-        try:
-            with open(TRANSCRIPTS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(self.transcripts, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Error saving transcripts", e)
-    
-    def _extract_keywords(self, text):
-        """Extract meaningful keywords from transcript text"""
-        # Remove common words and punctuation
-        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 
-                     'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were', 'been',
-                     'be', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
-                     'could', 'should', 'may', 'might', 'can', 'this', 'that', 'these',
-                     'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'what', 'which',
-                     'who', 'when', 'where', 'why', 'how', 'all', 'each', 'every', 'both',
-                     'few', 'more', 'most', 'some', 'such', 'no', 'nor', 'not', 'only',
-                     'own', 'same', 'so', 'than', 'too', 'very', 's', 't', 'just', 'don',
-                     'now', 'oh', 'yeah', 'um', 'uh', 'like', 'know', 'get', 'got', 'going'}
-        
-        # Convert to lowercase and split into words
-        words = re.findall(r'\b[a-z]{3,}\b', text.lower())
-        
-        # Filter out stop words and get unique keywords
-        keywords = [w for w in words if w not in stop_words]
-        
-        return keywords
-    
-    def save_transcript(self, vm_path, transcript_result):
-        """Save transcript for a VM file"""
-        try:
-            # Convert Path to string for JSON serialization
-            vm_key = str(vm_path)
-            
-            keywords = self._extract_keywords(transcript_result['text'])
-            
-            self.transcripts[vm_key] = {
-                'text': transcript_result['text'],
-                'language': transcript_result.get('language', 'unknown'),
-                'keywords': keywords,
-                'transcribed_at': datetime.now(timezone.utc).isoformat()
-            }
-            
-            self._save_transcripts()
-            
-            self.bot.logger.log(MODULE_NAME, 
-                f"Saved transcript for {vm_path.name} ({len(keywords)} keywords)")
-            
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, f"Error saving transcript for {vm_path}", e)
-    
-    def get_transcript(self, vm_path):
-        """Get transcript for a VM file"""
-        vm_key = str(vm_path)
-        return self.transcripts.get(vm_key)
-    
-    def _schedule_next_post(self):
-        """Schedule the next VM post with random message count"""
-        self.target_message_count = random.randint(MIN_MESSAGES_BETWEEN, MAX_MESSAGES_BETWEEN)
-        self.message_count = 0
-        self.bot.logger.log(MODULE_NAME, 
-            f"Next VM scheduled after {self.target_message_count} messages")
-    
-    def _get_file_creation_time(self, file_path):
-        """Get the original creation time of a file"""
-        try:
-            stat = file_path.stat()
-            if hasattr(stat, 'st_birthtime'):
-                return datetime.fromtimestamp(stat.st_birthtime, timezone.utc)
-            else:
-                return datetime.fromtimestamp(stat.st_mtime, timezone.utc)
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, f"Error getting file time for {file_path}", e)
-            return datetime.now(timezone.utc)
-    
-    def _preserve_file_times(self, source, destination):
-        """Copy file while preserving timestamps"""
-        try:
-            shutil.copy2(source, destination)
-            stat = source.stat()
-            os.utime(destination, (stat.st_atime, stat.st_mtime))
-            self.bot.logger.log(MODULE_NAME, f"Preserved timestamps for {destination.name}")
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, f"Error preserving file times", e)
-    
-    def get_vm_files(self, directory):
-        """Get all voice message files from a directory with their creation times"""
-        files = []
-        for file in directory.iterdir():
-            if file.is_file() and file.suffix.lower() in ['.ogg', '.mp3', '.m4a', '.wav']:
-                creation_time = self._get_file_creation_time(file)
-                files.append((file, creation_time))
-        return files
-    
-    async def _get_audio_duration(self, file_path):
-        """Get audio duration using ffprobe asynchronously"""
-        try:
-            # Create subprocess asynchronously
-            process = await asyncio.create_subprocess_exec(
-                'ffprobe', '-v', 'error', '-show_entries', 'format=duration', 
-                '-of', 'default=noprint_wrappers=1:nokey=1', str(file_path),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            # Wait for process to complete with timeout
-            try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
-            except asyncio.TimeoutError:
-                # Kill the process if it times out
-                try:
-                    process.kill()
-                    await process.wait()
-                except:
-                    pass
-                self.bot.logger.log(MODULE_NAME, f"Duration check timed out for {file_path.name}, using default", "WARNING")
-                return 1.0
-            
-            if process.returncode == 0:
-                duration = float(stdout.decode().strip())
-                return duration
-            else:
-                self.bot.logger.log(MODULE_NAME, f"Could not get duration for {file_path.name}, using default", "WARNING")
-                return 1.0
-                
-        except Exception as e:
-            self.bot.logger.log(MODULE_NAME, f"Could not get duration for {file_path.name}, using default: {e}", "WARNING")
-            return 1.0
-    
-    def _generate_waveform(self):
-        """Generate a dummy waveform for voice messages"""
-        waveform_bytes = bytes([random.randint(0, 255) for _ in range(256)])
-        return base64.b64encode(waveform_bytes).decode('utf-8')
-    
-    async def _send_as_voice_message(self, channel, file_path):
-        """Send a file as a Discord voice message using the API"""
-        try:
-            file_size = file_path.stat().st_size
-            duration = await self._get_audio_duration(file_path)
-            
-            async with aiohttp.ClientSession() as session:
-                upload_request_url = f"https://discord.com/api/v10/channels/{channel.id}/attachments"
-                
-                upload_request_data = {
-                    "files": [
-                        {
-                            "filename": "voice-message.ogg",
-                            "file_size": file_size,
-                            "id": "2"
-                        }
-                    ]
-                }
-                
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bot {self.bot.http.token}"
-                }
-                
-                async with session.post(upload_request_url, json=upload_request_data, headers=headers) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        self.bot.logger.error(MODULE_NAME, f"Failed to get upload URL: {resp.status} - {error_text}")
-                        return None
-                    
-                    upload_data = await resp.json()
-                    upload_url = upload_data['attachments'][0]['upload_url']
-                    upload_filename = upload_data['attachments'][0]['upload_filename']
-                
-                with open(file_path, 'rb') as f:
-                    file_data = f.read()
-                
-                upload_headers = {
-                    "Content-Type": "audio/ogg",
-                }
-                
-                async with session.put(upload_url, data=file_data, headers=upload_headers) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        self.bot.logger.error(MODULE_NAME, f"Failed to upload file: {resp.status} - {error_text}")
-                        return None
-                
-                message_url = f"https://discord.com/api/v10/channels/{channel.id}/messages"
-                waveform = self._generate_waveform()
-                
-                message_data = {
-                    "flags": 8192,
-                    "attachments": [
-                        {
-                            "id": "0",
-                            "filename": "voice-message.ogg",
-                            "uploaded_filename": upload_filename,
-                            "duration_secs": duration,
-                            "waveform": waveform
-                        }
-                    ]
-                }
-                
-                async with session.post(message_url, json=message_data, headers=headers) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        self.bot.logger.error(MODULE_NAME, f"Failed to send voice message: {resp.status} - {error_text}")
-                        return None
-                    
-                    message_data = await resp.json()
-                
-                # NEW: Record VM usage after successful send
-                self.record_vm_usage(file_path)
-                
-                self.bot.logger.log(MODULE_NAME, f"Successfully sent voice message: {file_path.name}")
-                return message_data
-                
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Error sending voice message", e)
-            return None
-    
-    async def _send_as_voice_message_reply(self, message, file_path):
-        """Send a file as a Discord voice message reply using the API"""
-        try:
-            file_size = file_path.stat().st_size
-            duration = await self._get_audio_duration(file_path)
-            
-            async with aiohttp.ClientSession() as session:
-                upload_request_url = f"https://discord.com/api/v10/channels/{message.channel.id}/attachments"
-                
-                upload_request_data = {
-                    "files": [
-                        {
-                            "filename": "voice-message.ogg",
-                            "file_size": file_size,
-                            "id": "2"
-                        }
-                    ]
-                }
-                
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bot {self.bot.http.token}"
-                }
-                
-                async with session.post(upload_request_url, json=upload_request_data, headers=headers) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        self.bot.logger.error(MODULE_NAME, f"Failed to get upload URL: {resp.status} - {error_text}")
-                        return None
-                    
-                    upload_data = await resp.json()
-                    upload_url = upload_data['attachments'][0]['upload_url']
-                    upload_filename = upload_data['attachments'][0]['upload_filename']
-                
-                with open(file_path, 'rb') as f:
-                    file_data = f.read()
-                
-                upload_headers = {
-                    "Content-Type": "audio/ogg",
-                }
-                
-                async with session.put(upload_url, data=file_data, headers=upload_headers) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        self.bot.logger.error(MODULE_NAME, f"Failed to upload file: {resp.status} - {error_text}")
-                        return None
-                
-                message_url = f"https://discord.com/api/v10/channels/{message.channel.id}/messages"
-                waveform = self._generate_waveform()
-                
-                message_data = {
-                    "flags": 8192,
-                    "message_reference": {
-                        "message_id": message.id
-                    },
-                    "attachments": [
-                        {
-                            "id": "0",
-                            "filename": "voice-message.ogg",
-                            "uploaded_filename": upload_filename,
-                            "duration_secs": duration,
-                            "waveform": waveform
-                        }
-                    ]
-                }
-                
-                async with session.post(message_url, json=message_data, headers=headers) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        self.bot.logger.error(MODULE_NAME, f"Failed to send voice message reply: {resp.status} - {error_text}")
-                        return None
-                    
-                    reply_data = await resp.json()
-                
-                # NEW: Record VM usage after successful send
-                self.record_vm_usage(file_path)
-                
-                self.bot.logger.log(MODULE_NAME, f"Successfully sent voice message reply: {file_path.name}")
-                return reply_data
-                
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Error sending voice message reply", e)
-            return None
-    
-    async def cleanup_and_archive(self):
-        """Move old cache files to archive and delete old archive files"""
-        now = datetime.now(timezone.utc)
-        moved_count = 0
-        deleted_count = 0
-        
-        try:
-            cache_files = self.get_vm_files(CACHE_DIR)
-            for file_path, creation_time in cache_files:
-                age_days = (now - creation_time).days
-                
-                if age_days >= CACHE_DAYS:
-                    archive_path = ARCHIVE_DIR / file_path.name
-                    
-                    if archive_path.exists():
-                        stem = archive_path.stem
-                        suffix = archive_path.suffix
-                        timestamp = creation_time.strftime("%Y%m%d_%H%M%S")
-                        archive_path = ARCHIVE_DIR / f"{stem}_{timestamp}{suffix}"
-                    
-                    self._preserve_file_times(file_path, archive_path)
-                    
-                    # Move transcript reference
-                    old_key = str(file_path)
-                    new_key = str(archive_path)
-                    if old_key in self.transcripts:
-                        self.transcripts[new_key] = self.transcripts.pop(old_key)
-                    
-                    # Move tracking data
-                    if old_key in self.vm_tracking:
-                        self.vm_tracking[new_key] = self.vm_tracking.pop(old_key)
-                    
-                    file_path.unlink()
-                    
-                    moved_count += 1
-                    self.bot.logger.log(MODULE_NAME, 
-                        f"Archived {file_path.name} (age: {age_days} days)")
-            
-            archive_files = self.get_vm_files(ARCHIVE_DIR)
-            for file_path, creation_time in archive_files:
-                age_days = (now - creation_time).days
-                
-                if age_days >= ARCHIVE_DAYS:
-                    # Remove transcript
-                    vm_key = str(file_path)
-                    if vm_key in self.transcripts:
-                        del self.transcripts[vm_key]
-                    
-                    # Remove tracking data
-                    if vm_key in self.vm_tracking:
-                        del self.vm_tracking[vm_key]
-                    
-                    file_path.unlink()
-                    
-                    deleted_count += 1
-                    self.bot.logger.log(MODULE_NAME, 
-                        f"Deleted {file_path.name} from archive (age: {age_days} days)")
-            
-            if moved_count > 0 or deleted_count > 0:
-                self._save_transcripts()
-                self._save_vm_tracking()
-                self.bot.logger.log(MODULE_NAME, 
-                    f"Cleanup complete: {moved_count} archived, {deleted_count} deleted")
-            
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Error during cleanup", e)
-    
-    def is_voice_message(self, message):
-        """Check if a message is a voice message"""
-        if not message.attachments:
-            return False
-        
-        for attachment in message.attachments:
-            if hasattr(attachment, 'is_voice_message') and attachment.is_voice_message():
-                return True
-            if attachment.content_type and 'audio' in attachment.content_type:
-                if attachment.waveform is not None:
-                    return True
-        
-        return False
-    
-    async def save_voice_message(self, message):
-        """Save a voice message from Discord to cache and return the file path"""
-        if not self.is_voice_message(message):
-            return None
-        
-        try:
-            attachment = message.attachments[0]
-            
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            author_name = message.author.name.replace(' ', '_')[:20]
-            
-            ext = Path(attachment.filename).suffix or '.ogg'
-            filename = f"vm_{author_name}_{timestamp}{ext}"
-            file_path = CACHE_DIR / filename
-            
-            await attachment.save(file_path)
-            
-            msg_time = message.created_at.timestamp()
-            os.utime(file_path, (msg_time, msg_time))
-            
-            self.bot.logger.log(MODULE_NAME, 
-                f"Saved voice message from {message.author}: {filename}")
-            return file_path
-            
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Error saving voice message", e)
-            return None
-    
-    async def get_recent_messages_context(self, channel, limit=MESSAGE_CONTEXT_COUNT):
-        """Get recent messages from channel for context matching"""
-        try:
-            messages = []
-            async for msg in channel.history(limit=limit):
-                if msg.content and not msg.author.bot:
-                    messages.append(msg.content)
-            return messages
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Error getting message context", e)
-            return []
-    
-    # UPDATED: Improved relevant VM selection with normalization and cooldowns
-    async def select_relevant_vm(self, context_messages):
-        """Select a VM that's relevant to recent conversation context with fairness improvements"""
-        try:
-            # Extract keywords from context
-            context_text = " ".join(context_messages)
-            context_keywords = self._extract_keywords(context_text)
-            
-            if not context_keywords:
-                self.bot.logger.log(MODULE_NAME, "No context keywords, falling back to random")
-                return None
-            
-            # Count keyword frequency in context
-            context_word_freq = Counter(context_keywords)
-            total_context_words = len(context_keywords)
-            
-            if total_context_words == 0:
-                self.bot.logger.log(MODULE_NAME, "No valid context keywords, falling back to random")
-                return None
-            
-            # NEW: Collect all eligible VMs with their scores
-            eligible_vms = []
-            
-            # Check cache files
-            cache_files = self.get_vm_files(CACHE_DIR)
-            for file_path, creation_time in cache_files:
-                # Skip VMs in cooldown
-                if self.is_vm_in_cooldown(file_path):
-                    continue
-                
-                # Use async version for duration check
-                is_long = await self._async_is_vm_too_long(file_path)
-                
-                transcript = self.get_transcript(file_path)
-                if transcript and 'keywords' in transcript:
-                    # NEW: Calculate normalized match score
-                    vm_keywords = transcript['keywords']
-                    
-                    if not vm_keywords or len(vm_keywords) < MIN_TRANSCRIPT_LENGTH_CHARS:
-                        continue
-                    
-                    # Calculate raw match count
-                    raw_matches = sum(
-                        context_word_freq.get(keyword, 0) 
-                        for keyword in vm_keywords
-                    )
-                    
-                    if raw_matches < MIN_KEYWORD_MATCHES:
-                        continue
-                    
-                    # NEW: Normalize by transcript length to prevent long VMs from dominating
-                    if KEYWORD_SCORE_NORMALIZATION:
-                        # Use log normalization to reduce bias from long transcripts
-                        keyword_count = len(vm_keywords)
-                        normalized_matches = raw_matches / math.log(keyword_count + 1)
-                        
-                        # Also normalize by context length
-                        normalized_score = normalized_matches / math.log(total_context_words + 1)
-                    else:
-                        normalized_score = raw_matches / total_context_words
-                    
-                    # Apply penalty for long VMs
-                    final_score = normalized_score
-                    if is_long:
-                        final_score *= LONG_VM_REDUCTION_FACTOR
-                    
-                    # NEW: Apply recency bonus (newer VMs get slight preference)
-                    age_days = (datetime.now(timezone.utc) - creation_time).days
-                    recency_factor = max(0.5, 1.0 - (age_days / 365))  # VMs up to 1 year old
-                    
-                    # Combine scores with weights
-                    combined_score = (
-                        final_score * MAX_SCORE_WEIGHT + 
-                        recency_factor * (1 - MAX_SCORE_WEIGHT)
-                    )
-                    
-                    eligible_vms.append((file_path, combined_score, is_long, raw_matches))
-            
-            # Check archive files (with archive chance)
-            if random.random() < ARCHIVE_CHANCE:
-                archive_files = self.get_vm_files(ARCHIVE_DIR)
-                for file_path, creation_time in archive_files:
-                    if self.is_vm_in_cooldown(file_path):
-                        continue
-                    
-                    is_long = await self._async_is_vm_too_long(file_path)
-                    
-                    transcript = self.get_transcript(file_path)
-                    if transcript and 'keywords' in transcript:
-                        vm_keywords = transcript['keywords']
-                        
-                        if not vm_keywords or len(vm_keywords) < MIN_TRANSCRIPT_LENGTH_CHARS:
-                            continue
-                        
-                        raw_matches = sum(
-                            context_word_freq.get(keyword, 0) 
-                            for keyword in vm_keywords
-                        )
-                        
-                        if raw_matches < MIN_KEYWORD_MATCHES:
-                            continue
-                        
-                        if KEYWORD_SCORE_NORMALIZATION:
-                            keyword_count = len(vm_keywords)
-                            normalized_matches = raw_matches / math.log(keyword_count + 1)
-                            normalized_score = normalized_matches / math.log(total_context_words + 1)
-                        else:
-                            normalized_score = raw_matches / total_context_words
-                        
-                        final_score = normalized_score
-                        if is_long:
-                            final_score *= LONG_VM_REDUCTION_FACTOR
-                        
-                        # Archive penalty (slight reduction)
-                        final_score *= 0.8
-                        
-                        age_days = (datetime.now(timezone.utc) - creation_time).days
-                        recency_factor = max(0.3, 1.0 - (age_days / 730))  # VMs up to 2 years old
-                        
-                        combined_score = (
-                            final_score * MAX_SCORE_WEIGHT + 
-                            recency_factor * (1 - MAX_SCORE_WEIGHT)
-                        )
-                        
-                        eligible_vms.append((file_path, combined_score, is_long, raw_matches))
-            
-            if not eligible_vms:
-                self.bot.logger.log(MODULE_NAME, "No relevant VMs found, falling back to random")
-                return None
-            
-            # NEW: Sort by score and use weighted random selection from top candidates
-            eligible_vms.sort(key=lambda x: x[1], reverse=True)
-            
-            # Take top candidates (more for better randomness, but not too many)
-            top_candidates = eligible_vms[:10] if len(eligible_vms) > 10 else eligible_vms
-            
-            # Apply weights for random selection (higher score = higher chance)
-            weights = [score ** 2 for _, score, _, _ in top_candidates]  # Square to emphasize differences
-            
-            # Select weighted random
-            selected_index = random.choices(range(len(top_candidates)), weights=weights, k=1)[0]
-            selected, score, is_long, raw_matches = top_candidates[selected_index]
-            
-            # Log selection details
-            duration = await self._get_audio_duration(selected)
-            self.bot.logger.log(MODULE_NAME, 
-                f"Selected relevant VM: {selected.name} "
-                f"(score: {score:.3f}, matches: {raw_matches}, "
-                f"duration: {duration:.1f}s, long: {is_long})")
-            
-            return selected
-            
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Error selecting relevant VM", e)
-            return None
-    
-    # UPDATED: Improved random VM selection with cooldowns and length consideration
-    async def select_random_vm(self):
-        """Select a random voice message, with consideration for cooldowns and length"""
-        try:
-            use_archive = random.random() < ARCHIVE_CHANCE
-            
-            # Collect eligible VMs
-            eligible_vms = []
-            
-            if use_archive:
-                archive_files = self.get_vm_files(ARCHIVE_DIR)
-                for file_path, creation_time in archive_files:
-                    # Skip VMs in cooldown
-                    if self.is_vm_in_cooldown(file_path):
-                        continue
-                    
-                    # Apply length penalty
-                    is_long = await self._async_is_vm_too_long(file_path)
-                    age_days = (datetime.now(timezone.utc) - creation_time).days
-                    
-                    # Calculate weight: newer VMs have higher chance
-                    weight = max(0.3, 1.0 - (age_days / 730))  # Up to 2 years
-                    if is_long:
-                        weight *= LONG_VM_REDUCTION_FACTOR
-                    
-                    eligible_vms.append((file_path, weight, is_long))
-            
-            # Always include cache files (if no eligible archive files or as fallback)
-            cache_files = self.get_vm_files(CACHE_DIR)
-            for file_path, creation_time in cache_files:
-                if self.is_vm_in_cooldown(file_path):
-                    continue
-                
-                is_long = await self._async_is_vm_too_long(file_path)
-                age_days = (datetime.now(timezone.utc) - creation_time).days
-                
-                weight = max(0.5, 1.0 - (age_days / 365))  # Up to 1 year
-                if is_long:
-                    weight *= LONG_VM_REDUCTION_FACTOR
-                
-                eligible_vms.append((file_path, weight, is_long))
-            
-            if not eligible_vms:
-                self.bot.logger.log(MODULE_NAME, "No eligible VMs available (all in cooldown?)", "WARNING")
-                
-                # Emergency fallback: allow VMs in cooldown
-                all_files = self.get_vm_files(CACHE_DIR)
-                if use_archive:
-                    all_files.extend(self.get_vm_files(ARCHIVE_DIR))
-                
-                if all_files:
-                    selected, creation_time = random.choice(all_files)
-                    age_days = (datetime.now(timezone.utc) - creation_time).days
-                    duration = await self._get_audio_duration(selected)
-                    self.bot.logger.log(MODULE_NAME, 
-                        f"Emergency fallback: {selected.name} (age: {age_days} days, duration: {duration:.1f}s)")
-                    return selected
-                else:
-                    self.bot.logger.log(MODULE_NAME, "No voice messages available at all", "WARNING")
-                    return None
-            
-            # Weighted random selection
-            weights = [weight for _, weight, _ in eligible_vms]
-            selected_index = random.choices(range(len(eligible_vms)), weights=weights, k=1)[0]
-            selected, weight, is_long = eligible_vms[selected_index]
-            
-            creation_time = self._get_file_creation_time(selected)
-            age_days = (datetime.now(timezone.utc) - creation_time).days
-            duration = await self._get_audio_duration(selected)
-            
-            source = "archive" if use_archive and selected.parent == ARCHIVE_DIR else "cache"
-            self.bot.logger.log(MODULE_NAME, 
-                f"Selected from {source}: {selected.name} "
-                f"(age: {age_days} days, duration: {duration:.1f}s, "
-                f"long: {is_long}, weight: {weight:.3f})")
-            
-            return selected
-            
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Error selecting VM", e)
-            return None
-    
-    def can_respond_to_ping(self):
-        """Check if enough time has passed since last ping response"""
-        if self.last_ping_response_time is None:
-            return True
-        
-        time_since = (datetime.now(timezone.utc) - self.last_ping_response_time).total_seconds()
-        return time_since >= PING_COOLDOWN_SECONDS
-    
-    def can_post_random_vm(self):
-        """Check if enough time has passed since last random VM post"""
-        if self.last_post_time is None:
-            return True
-        
-        time_since = (datetime.now(timezone.utc) - self.last_post_time).total_seconds()
-        return time_since >= RANDOM_VM_COOLDOWN_SECONDS
-    
-    async def on_general_message(self, message):
-        """Track messages in general channel and post VMs when threshold is reached"""
-        try:
-            if message.channel.name != GENERAL_CHANNEL_NAME:
-                return
-        
-            self.last_message_time = datetime.now(timezone.utc)
-            self.message_count += 1
-        
-            if self.message_count >= self.target_message_count:
-                if not self.can_post_random_vm():
-                    self.bot.logger.log(MODULE_NAME, 
-                        f"Cooldown active, skipping scheduled VM")
-                    self._schedule_next_post()
-                    return
-                
-                self.bot.logger.log(MODULE_NAME, 
-                    f"Message threshold reached ({self.message_count}/{self.target_message_count})")
-                await self.post_random_vm()
-    
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Error in on_general_message", e)
-    
-    def is_channel_inactive(self):
-        """Check if the channel has been inactive for too long"""
-        if self.last_message_time is None:
-            return False
-        
-        time_since_last = datetime.now(timezone.utc) - self.last_message_time
-        return time_since_last > timedelta(hours=INACTIVITY_TIMEOUT_HOURS)
-    
-    async def post_random_vm(self, reply_to=None, is_ping_response=False):
-        """Post a VM - either random or contextually relevant"""
-        if self.posting_lock.locked():
-            self.bot.logger.log(MODULE_NAME, "Post already in progress, skipping duplicate")
-            return False
-        
-        async with self.posting_lock:
-            try:
-                # Check cooldowns
-                if is_ping_response:
-                    if not self.can_respond_to_ping():
-                        cooldown_remaining = PING_COOLDOWN_SECONDS - (datetime.now(timezone.utc) - self.last_ping_response_time).total_seconds()
-                        self.bot.logger.log(MODULE_NAME, 
-                            f"Ping cooldown active ({cooldown_remaining:.0f}s remaining)")
-                        return False
-                else:
-                    if not self.can_post_random_vm():
-                        cooldown_remaining = RANDOM_VM_COOLDOWN_SECONDS - (datetime.now(timezone.utc) - self.last_post_time).total_seconds()
-                        self.bot.logger.log(MODULE_NAME, 
-                            f"Random VM cooldown active ({cooldown_remaining:.0f}s remaining)")
-                        return False
-                
-                # Find target channel
-                if reply_to:
-                    target_channel = reply_to.channel
-                else:
-                    general_channel = None
-                    for guild in self.bot.guilds:
-                        channel = discord.utils.get(guild.text_channels, name=GENERAL_CHANNEL_NAME)
-                        if channel:
-                            general_channel = channel
-                            break
-                    
-                    if not general_channel:
-                        self.bot.logger.log(MODULE_NAME, 
-                            f"Channel '{GENERAL_CHANNEL_NAME}' not found", "WARNING")
-                        return False
-                    
-                    target_channel = general_channel
-                
-                # Decide between relevant and random VM
-                use_relevant = random.random() < RELEVANT_VM_CHANCE
-                vm_file = None
-                
-                if use_relevant:
-                    self.bot.logger.log(MODULE_NAME, "Attempting to select relevant VM")
-                    context_messages = await self.get_recent_messages_context(target_channel)
-                    if context_messages:
-                        vm_file = await self.select_relevant_vm(context_messages)
-                
-                # Fall back to random if relevant selection failed
-                if not vm_file:
-                    self.bot.logger.log(MODULE_NAME, "Selecting random VM")
-                    vm_file = await self.select_random_vm()
-                
-                if not vm_file:
-                    self.bot.logger.log(MODULE_NAME, "No VM to post", "WARNING")
-                    return False
-                
-                # Send VM
-                if reply_to:
-                    await self._send_as_voice_message_reply(reply_to, vm_file)
-                    self.bot.logger.log(MODULE_NAME, "Posted VM reply")
-                else:
-                    await self._send_as_voice_message(target_channel, vm_file)
-                    self.bot.logger.log(MODULE_NAME, "Posted VM")
-                
-                # Update timestamps
-                if is_ping_response:
-                    self.last_ping_response_time = datetime.now(timezone.utc)
-                else:
-                    self.last_post_time = datetime.now(timezone.utc)
-                    self._schedule_next_post()
-                
-                return True
-                
-            except Exception as e:
-                self.bot.logger.error(MODULE_NAME, "Error posting VM", e)
-                return False
-    
-    async def background_transcribe_all(self):
-        """Background task to transcribe all untranscribed VMs - ADMIN ONLY"""
-        self.bot.logger.log(MODULE_NAME, "Starting background transcription of all VMs")
-        self.background_transcription_active = True
-        
-        try:
-            # Get all VM files
-            all_files = []
-            all_files.extend(self.get_vm_files(CACHE_DIR))
-            all_files.extend(self.get_vm_files(ARCHIVE_DIR))
-            
-            untranscribed = []
-            for file_path, _ in all_files:
-                if not self.get_transcript(file_path):
-                    untranscribed.append(file_path)
-            
-            total = len(untranscribed)
-            if total == 0:
-                self.bot.logger.log(MODULE_NAME, "All VMs already transcribed")
-                self.background_transcription_active = False
-                return
-            
-            self.bot.logger.log(MODULE_NAME, 
-                f"Found {total} untranscribed VMs, starting background processing")
-            
-            processed = 0
-            failed = 0
-            
-            # Get transcribe manager
-            if not hasattr(self.bot, 'transcribe_manager'):
-                self.bot.logger.log(MODULE_NAME, 
-                    "Transcribe manager not available, cannot process", "ERROR")
-                self.background_transcription_active = False
-                return
-            
-            transcribe_mgr = self.bot.transcribe_manager
-            
-            # Process newest first
-            untranscribed.sort(key=lambda x: self._get_file_creation_time(x), reverse=True)
-            
-            for vm_path in untranscribed:
-                try:
-                    # Convert to WAV for transcription
-                    temp_wav = Path("data/transcribe_temp") / f"bg_{vm_path.stem}.wav"
-                    temp_wav.parent.mkdir(parents=True, exist_ok=True)
-                    
-                    conversion_success = await transcribe_mgr.convert_to_wav(vm_path, temp_wav)
-                    if not conversion_success:
-                        self.bot.logger.log(MODULE_NAME, 
-                            f"Failed to convert {vm_path.name}", "WARNING")
-                        failed += 1
-                        continue
-                    
-                    # Transcribe
-                    result = await transcribe_mgr.transcribe_audio(temp_wav)
-                    
-                    # Clean up temp file
-                    if temp_wav.exists():
-                        temp_wav.unlink()
-                    
-                    if result:
-                        self.save_transcript(vm_path, result)
-                        processed += 1
-                        
-                        if processed % 10 == 0:
-                            self.bot.logger.log(MODULE_NAME, 
-                                f"Background transcription progress: {processed}/{total}")
-                    else:
-                        failed += 1
-                    
-                    # Small delay to not overwhelm system
-                    await asyncio.sleep(0.5)
-                    
-                except Exception as e:
-                    self.bot.logger.error(MODULE_NAME, 
-                        f"Error transcribing {vm_path.name}", e)
-                    failed += 1
-            
-            self.bot.logger.log(MODULE_NAME, 
-                f"Background transcription complete: {processed} succeeded, {failed} failed")
-            
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Error in background transcription", e)
-        finally:
-            self.background_transcription_active = False
-    
-    async def get_stats(self):
-        """Get statistics about cached and archived VMs"""
-        cache_files = self.get_vm_files(CACHE_DIR)
-        archive_files = self.get_vm_files(ARCHIVE_DIR)
-        
-        now = datetime.now(timezone.utc)
-        
-        cache_ages = [(now - ct).days for _, ct in cache_files]
-        archive_ages = [(now - ct).days for _, ct in archive_files]
-        
-        # Count transcribed VMs
-        transcribed_count = 0
-        # Count long VMs (using sync version for stats)
-        long_vm_count = 0
-        # Count VMs in cooldown
-        vms_in_cooldown = 0
-        
-        for file_path, _ in cache_files + archive_files:
-            if self.get_transcript(file_path):
-                transcribed_count += 1
-            
-            # Note: We can't do async checks in sync stats method
-            # We'll just count based on file size as a rough estimate
-            file_size = file_path.stat().st_size
-            if file_size > 1024 * 1024 * 2:  # Rough guess: >2MB might be long
-                long_vm_count += 1
-            
-            if self.is_vm_in_cooldown(file_path):
-                vms_in_cooldown += 1
-        
-        total_vms = len(cache_files) + len(archive_files)
-        available_vms = total_vms - vms_in_cooldown
-        
-        stats = {
-            'cache_count': len(cache_files),
-            'archive_count': len(archive_files),
-            'cache_avg_age': sum(cache_ages) / len(cache_ages) if cache_ages else 0,
-            'archive_avg_age': sum(archive_ages) / len(archive_ages) if archive_ages else 0,
-            'total_size_mb': sum(f.stat().st_size for f, _ in cache_files + archive_files) / (1024 * 1024),
-            'message_count': self.message_count,
-            'target_message_count': self.target_message_count,
-            'last_post': self.last_post_time,
-            'last_message': self.last_message_time,
-            'transcribed_count': transcribed_count,
-            'total_vms': total_vms,
-            # NEW: Additional stats
-            'long_vm_count': long_vm_count,
-            'long_vm_percentage': (long_vm_count / total_vms * 100) if total_vms > 0 else 0,
-            'vms_in_cooldown': vms_in_cooldown,
-            'available_vms': available_vms,
-            'transcription_percentage': (transcribed_count / total_vms * 100) if total_vms > 0 else 0
-        }
-        
-        return stats
-    
-    @tasks.loop(hours=6)
-    async def cleanup_loop(self):
-        """Periodic task to clean up old files"""
-        self.bot.logger.log(MODULE_NAME, "Running cleanup task")
-        await self.cleanup_and_archive()
-    
-    @cleanup_loop.before_loop
-    async def before_cleanup_loop(self):
-        """Wait until bot is ready before starting cleanup loop"""
-        await self.bot.wait_until_ready()
-        self.bot.logger.log(MODULE_NAME, "VM manager initialized")
-        await self.cleanup_and_archive()
+        self.db_path = _db_path()
+        self.vms_dir = _vms_dir()
+        self.archive_dir = _archive_dir()
+        self._token: str = os.getenv("DISCORD_BOT_TOKEN", "")
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="vms_worker")
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self._queue_task: Optional[asyncio.Task] = None
 
+        _init_db(self.db_path)
+
+        # Log this startup so we can detect missed scheduled jobs
+        self._db_exec(
+            "INSERT INTO vms_startup_log (startup_time) VALUES (?)",
+            (int(time.time()),)
+        )
+        self.bot.logger.log(MODULE_NAME, "VMSManager initialised")
+
+    # ------------------------------------------------------------------ DB --
+
+    def _conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
+    def _db_exec(self, query: str, params: tuple = ()):
+        conn = self._conn()
+        try:
+            conn.execute(query, params)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _db_one(self, query: str, params: tuple = ()) -> Optional[tuple]:
+        conn = self._conn()
+        try:
+            return conn.execute(query, params).fetchone()
+        finally:
+            conn.close()
+
+    def _db_all(self, query: str, params: tuple = ()) -> List[tuple]:
+        conn = self._conn()
+        try:
+            return conn.execute(query, params).fetchall()
+        finally:
+            conn.close()
+
+    # -------------------------------------------------------------- Session --
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+
+    # -------------------------------------------------- Transcription Queue --
+
+    async def _start_queue_worker(self):
+        self._queue_task = asyncio.create_task(self._queue_worker())
+        self.bot.logger.log(MODULE_NAME, "Transcription queue worker started")
+
+    async def _queue_worker(self):
+        """
+        Processes transcription jobs one at a time from the asyncio queue,
+        preventing simultaneous Whisper runs that could OOM.
+        """
+        while True:
+            try:
+                vm_id, filepath, message, reply_to = await self.queue.get()
+
+                self.bot.logger.log(MODULE_NAME,
+                    f"Transcribing VM #{vm_id}: {Path(filepath).name}")
+                try:
+                    transcript, duration = await asyncio.get_event_loop().run_in_executor(
+                        self._executor, _transcribe_sync, filepath
+                    )
+
+                    self._db_exec(
+                        "UPDATE vms SET transcript=?, duration_secs=?, processed=1 WHERE id=?",
+                        (transcript or "", duration, vm_id)
+                    )
+                    # Ensure playback row exists
+                    self._db_exec(
+                        "INSERT OR IGNORE INTO vms_playback (vm_id) VALUES (?)",
+                        (vm_id,)
+                    )
+
+                    preview = (transcript or "")[:80]
+                    self.bot.logger.log(MODULE_NAME,
+                        f"VM #{vm_id} transcribed ({duration:.1f}s): {preview!r}")
+
+                    # Post blockquote reply if we have context
+                    if reply_to is not None and transcript:
+                        try:
+                            await reply_to.reply(f"> {transcript}")
+                        except Exception as exc:
+                            self.bot.logger.log(MODULE_NAME,
+                                f"Failed to post transcript for VM #{vm_id}: {exc}", "WARNING")
+
+                except Exception as exc:
+                    self.bot.logger.error(MODULE_NAME,
+                        f"Queue worker error on VM #{vm_id}", exc)
+                finally:
+                    self.queue.task_done()
+
+            except asyncio.CancelledError:
+                self.bot.logger.log(MODULE_NAME, "Queue worker cancelled")
+                break
+            except Exception as exc:
+                self.bot.logger.error(MODULE_NAME, "Unexpected queue worker error", exc)
+                await asyncio.sleep(1)
+
+    async def enqueue(self, vm_id: int, filepath: str,
+                      reply_to: Optional[discord.Message] = None):
+        """Add a VM to the transcription queue."""
+        await self.queue.put((vm_id, filepath, None, reply_to))
+        self.bot.logger.log(MODULE_NAME, f"VM #{vm_id} queued for transcription")
+
+    # ------------------------------------------------------- Save Voice Msg --
+
+    async def save_voice_message(
+        self, message: discord.Message, attachment: discord.Attachment
+    ) -> Optional[int]:
+        """
+        Download and persist a Discord voice message attachment.
+        Stores discord_message_id and discord_channel_id in the DB.
+        Returns the DB row id, or None on failure.
+        """
+        try:
+            raw = await attachment.read()
+            ts = int(time.time())
+            filename = f"vm_{ts}_{message.id}.ogg"
+            filepath = self.vms_dir / filename
+            filepath.write_bytes(raw)
+
+            duration = await asyncio.get_event_loop().run_in_executor(
+                self._executor, _get_ogg_duration, str(filepath)
+            )
+
+            guild_id = str(message.guild.id) if message.guild else None
+
+            self._db_exec(
+                """INSERT OR IGNORE INTO vms
+                   (filename, filepath, discord_message_id, discord_channel_id,
+                    guild_id, duration_secs, processed, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, 0, ?)""",
+                (filename, str(filepath), str(message.id),
+                 str(message.channel.id), guild_id, duration, ts)
+            )
+
+            row = self._db_one("SELECT id FROM vms WHERE filename=?", (filename,))
+            if row:
+                self.bot.logger.log(MODULE_NAME,
+                    f"Saved VM #{row[0]}: {filename} (guild={guild_id})")
+                return row[0]
+
+        except Exception as exc:
+            self.bot.logger.error(MODULE_NAME, "Failed to save voice message", exc)
+        return None
+
+    # ----------------------------------------------- Retroactive Processing --
+
+    async def process_unprocessed(self):
+        """
+        Scan data/vms/ for .ogg files not yet in the DB (manually placed files),
+        register them using their filesystem mtime, then queue all pending VMs.
+        """
+        self.bot.logger.log(MODULE_NAME, "Scanning data/vms/ for unregistered files…")
+        new = 0
+        for ogg in self.vms_dir.glob("*.ogg"):
+            if not self._db_one("SELECT id FROM vms WHERE filename=?", (ogg.name,)):
+                mtime = int(ogg.stat().st_mtime)
+                dur = await asyncio.get_event_loop().run_in_executor(
+                    self._executor, _get_ogg_duration, str(ogg)
+                )
+                self._db_exec(
+                    """INSERT OR IGNORE INTO vms (filename, filepath, processed, created_at, duration_secs)
+                       VALUES (?, ?, 0, ?, ?)""",
+                    (ogg.name, str(ogg), mtime, dur)
+                )
+                new += 1
+                self.bot.logger.log(MODULE_NAME, f"Registered manual VM: {ogg.name}")
+
+        if new:
+            self.bot.logger.log(MODULE_NAME, f"Registered {new} manually-placed VM(s)")
+
+        # Queue all unprocessed rows
+        pending = self._db_all(
+            "SELECT id, filepath FROM vms WHERE processed=0 AND filepath IS NOT NULL"
+        )
+        queued = 0
+        for vm_id, fp in pending:
+            if Path(fp).exists():
+                await self.enqueue(vm_id, fp)
+                queued += 1
+            else:
+                self.bot.logger.log(MODULE_NAME,
+                    f"VM #{vm_id} file missing: {fp}", "WARNING")
+
+        if queued:
+            self.bot.logger.log(MODULE_NAME,
+                f"Queued {queued} unprocessed VM(s) for transcription")
+
+    # ---------------------------------------------------------- Archive Job --
+
+    async def run_archive_if_due(self):
+        """
+        Check DB timestamp for when the archive job last ran.
+        If overdue (e.g. bot crashed), run it immediately then reschedule normally.
+        """
+        row = self._db_one(
+            "SELECT last_run FROM vms_scheduled_jobs WHERE job_name='archive'"
+        )
+        last_run = row[0] if row else 0
+        now = int(time.time())
+        due_after = last_run + (ARCHIVE_JOB_INTERVAL_HOURS * 3600)
+
+        if now >= due_after:
+            missed = (now - due_after) // 3600
+            if missed > 0:
+                self.bot.logger.log(MODULE_NAME,
+                    f"Archive job missed by ~{missed}h — running now (crash recovery)")
+            await self._do_archive()
+        else:
+            next_dt = datetime.fromtimestamp(due_after).strftime("%Y-%m-%d %H:%M")
+            self.bot.logger.log(MODULE_NAME, f"Archive job not due yet (next: {next_dt})")
+
+    async def _do_archive(self):
+        """Move VMs ≥150 days old → archive dir; delete VMs ≥365 days old."""
+        now = int(time.time())
+        archive_cutoff = now - (ARCHIVE_AFTER_DAYS * 86400)
+        delete_cutoff  = now - (DELETE_AFTER_DAYS  * 86400)
+        archived = deleted = 0
+
+        # ── Delete (≥365 days) ──
+        for vm_id, fp, fn in self._db_all(
+            "SELECT id, filepath, filename FROM vms WHERE created_at < ? AND processed != 3",
+            (delete_cutoff,)
+        ):
+            try:
+                for path in [Path(fp), self.archive_dir / fn]:
+                    if path.exists():
+                        path.unlink()
+                self._db_exec(
+                    "UPDATE vms SET processed=3, deleted_at=? WHERE id=?",
+                    (now, vm_id)
+                )
+                deleted += 1
+            except Exception as exc:
+                self.bot.logger.error(MODULE_NAME, f"Failed to delete VM #{vm_id}", exc)
+
+        # ── Archive (150–365 days) ──
+        for vm_id, fp, fn in self._db_all(
+            """SELECT id, filepath, filename FROM vms
+               WHERE created_at < ? AND created_at >= ? AND processed=1""",
+            (archive_cutoff, delete_cutoff)
+        ):
+            try:
+                src = Path(fp)
+                dst = self.archive_dir / fn
+                if src.exists() and not dst.exists():
+                    src.rename(dst)
+                self._db_exec(
+                    "UPDATE vms SET processed=2, filepath=?, archived_at=? WHERE id=?",
+                    (str(dst), now, vm_id)
+                )
+                archived += 1
+            except Exception as exc:
+                self.bot.logger.error(MODULE_NAME, f"Failed to archive VM #{vm_id}", exc)
+
+        self._db_exec(
+            "INSERT OR REPLACE INTO vms_scheduled_jobs (job_name, last_run) VALUES ('archive', ?)",
+            (now,)
+        )
+        self.bot.logger.log(MODULE_NAME,
+            f"Archive job complete — archived: {archived}, deleted: {deleted}")
+
+    # ------------------------------------------------------------ Playback --
+
+    @staticmethod
+    def _keywords(text: str) -> set:
+        """Extract meaningful keywords, stripping stop words."""
+        words = re.findall(r"\b[a-z]{3,}\b", text.lower())
+        return {w for w in words if w not in STOP_WORDS}
+
+    def _eligible_vms(self):
+        """
+        Return rows for VMs that are transcribed, have an accessible file,
+        and are outside their 7-day cooldown.
+        Columns: id, filepath, transcript, duration_secs, created_at, last_played
+        """
+        cutoff = int(time.time()) - (VM_COOLDOWN_DAYS * 86400)
+        rows = self._db_all(
+            """SELECT v.id, v.filepath, v.transcript, v.duration_secs, v.created_at,
+                      COALESCE(p.last_played, 0)
+               FROM vms v
+               LEFT JOIN vms_playback p ON v.id = p.vm_id
+               WHERE v.processed = 1
+                 AND v.transcript IS NOT NULL
+                 AND v.transcript != ''
+                 AND COALESCE(p.last_played, 0) < ?""",
+            (cutoff,)
+        )
+        return [(r[0], r[1], r[2], r[3], r[4], r[5])
+                for r in rows if Path(r[1]).exists()]
+
+    def select_contextual(self, recent_messages: List[str]) -> Optional[Tuple[int, str, float]]:
+        """
+        Score eligible VMs against recent chat keywords.
+        Returns (vm_id, filepath, duration_secs) for the best match, or None.
+        """
+        chat_kw = self._keywords(" ".join(recent_messages))
+        if not chat_kw:
+            return None
+
+        now = int(time.time())
+        scored = []
+        for vm_id, fp, transcript, duration, created_at, _ in self._eligible_vms():
+            vm_kw = self._keywords(transcript)
+            overlap = len(chat_kw & vm_kw)
+            if overlap == 0:
+                continue
+
+            score = overlap * 10.0
+            # Recency bonus (up to +3 for VMs <30 days old)
+            age_days = (now - created_at) / 86400
+            score += max(0.0, 30.0 - age_days) * 0.1
+            # Penalty for long VMs
+            if duration > LONG_VM_THRESHOLD_SECS:
+                score -= (duration - LONG_VM_THRESHOLD_SECS) * 0.1
+
+            scored.append((score, vm_id, fp, duration))
+
+        if not scored:
+            return None
+        scored.sort(reverse=True)
+        _, vm_id, fp, dur = scored[0]
+        return vm_id, fp, dur
+
+    def select_random(self) -> Optional[Tuple[int, str, float]]:
+        """
+        Weighted-random selection from eligible VMs.
+        Shorter VMs are preferred; long VMs receive a weight penalty.
+        Returns (vm_id, filepath, duration_secs) or None.
+        """
+        candidates = []
+        for vm_id, fp, _, duration, *_ in self._eligible_vms():
+            w = max(10, int(100 - max(0, duration - LONG_VM_THRESHOLD_SECS) * 0.5))
+            candidates.append((w, vm_id, fp, duration))
+
+        if not candidates:
+            return None
+
+        total = sum(w for w, *_ in candidates)
+        pick  = random.uniform(0, total)
+        cumulative = 0
+        for w, vm_id, fp, dur in candidates:
+            cumulative += w
+            if pick <= cumulative:
+                return vm_id, fp, dur
+        _, vm_id, fp, dur = candidates[-1]
+        return vm_id, fp, dur
+
+    async def mark_played(self, vm_id: int):
+        """Record that a VM was just played."""
+        self._db_exec(
+            """INSERT INTO vms_playback (vm_id, last_played, play_count) VALUES (?, ?, 1)
+               ON CONFLICT(vm_id) DO UPDATE SET
+                 last_played = excluded.last_played,
+                 play_count  = play_count + 1""",
+            (vm_id, int(time.time()))
+        )
+
+    async def send_vm(self, channel, vm_id: int, filepath: str, duration: float) -> bool:
+        """
+        Send a VM to a Discord channel (or DM) as a proper voice message.
+        Uses the manual Discord API upload flow.
+        """
+        try:
+            session = await self._get_session()
+            result = await _send_voice_message(
+                self._token, channel.id, filepath, duration, session
+            )
+            if result:
+                await self.mark_played(vm_id)
+                self.bot.logger.log(MODULE_NAME,
+                    f"Sent VM #{vm_id} to channel {channel.id}")
+                return True
+            self.bot.logger.log(MODULE_NAME,
+                f"Failed to send VM #{vm_id}", "WARNING")
+            return False
+        except Exception as exc:
+            self.bot.logger.error(MODULE_NAME, f"send_vm error for #{vm_id}", exc)
+            return False
+
+    # -------------------------------------------------- Message Counter --
+
+    def _get_counter(self, guild_id: str, channel_id: str) -> Tuple[int, int]:
+        row = self._db_one(
+            "SELECT count, threshold FROM vms_message_counter WHERE guild_id=? AND channel_id=?",
+            (guild_id, channel_id)
+        )
+        return (row[0], row[1]) if row else (0, random.randint(RANDOM_PLAYBACK_MIN, RANDOM_PLAYBACK_MAX))
+
+    def _inc_counter(self, guild_id: str, channel_id: str) -> Tuple[int, int]:
+        count, threshold = self._get_counter(guild_id, channel_id)
+        count += 1
+        self._db_exec(
+            """INSERT INTO vms_message_counter (guild_id, channel_id, count, threshold)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(guild_id, channel_id) DO UPDATE SET count=excluded.count""",
+            (guild_id, channel_id, count, threshold)
+        )
+        return count, threshold
+
+    def _reset_counter(self, guild_id: str, channel_id: str):
+        new_thresh = random.randint(RANDOM_PLAYBACK_MIN, RANDOM_PLAYBACK_MAX)
+        self._db_exec(
+            """INSERT INTO vms_message_counter (guild_id, channel_id, count, threshold)
+               VALUES (?, ?, 0, ?)
+               ON CONFLICT(guild_id, channel_id) DO UPDATE SET count=0, threshold=excluded.threshold""",
+            (guild_id, channel_id, new_thresh)
+        )
+
+    # -------------------------------------------------- Ping Cooldown --
+
+    def ping_allowed(self, user_id: str) -> bool:
+        row = self._db_one(
+            "SELECT last_ping FROM vms_ping_cooldown WHERE user_id=?", (user_id,)
+        )
+        if not row:
+            return True
+        return (int(time.time()) - row[0]) >= PING_COOLDOWN_SECONDS
+
+    def set_ping_cooldown(self, user_id: str):
+        self._db_exec(
+            """INSERT INTO vms_ping_cooldown (user_id, last_ping) VALUES (?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET last_ping=excluded.last_ping""",
+            (user_id, int(time.time()))
+        )
+
+    # -------------------------------------------------- Context Helper --
+
+    def recent_messages(self, guild_id: str, channel_id: str, limit: int = 20) -> List[str]:
+        """Pull recent message text from the moderation module's message cache."""
+        try:
+            mod = getattr(self.bot, '_mod_system', None)
+            if mod and hasattr(mod, 'message_cache'):
+                msgs = mod.message_cache.get(guild_id, {}).get(channel_id, [])
+                return [m.get('content', '') for m in msgs[-limit:] if m.get('content')]
+        except Exception:
+            pass
+        return []
+
+    # ---------------------------------------------------------------- Startup --
+
+    async def startup(self):
+        """Full startup sequence: queue worker → retroactive scan → archive check."""
+        await self._start_queue_worker()
+        await asyncio.sleep(0.5)                 # let event loop breathe
+        await self.process_unprocessed()
+        await self.run_archive_if_due()
+        self.bot.logger.log(MODULE_NAME, "VMS startup complete")
+
+
+# ==================== MODULE SETUP ====================
 
 def setup(bot):
-    """Setup function called by main bot to initialize this module"""
-
-    # Prevent duplicate listener registration
-    listener_name = f"_{MODULE_NAME.lower()}_listener_registered"
-    if hasattr(bot, listener_name):
-        bot.logger.log(MODULE_NAME, "Module already setup, skipping duplicate registration")
-        return
-    setattr(bot, listener_name, True)
-
     bot.logger.log(MODULE_NAME, "Setting up VMS module")
-    
-    vms_manager = VMSManager(bot)
-    bot.vms_manager = vms_manager
-    
-    vms_manager.cleanup_loop.start()
-    
-    @bot.listen('on_message')
-    async def on_voice_message(message):
-        """Listen for messages - handle general tracking and bot mentions/replies"""
+
+    manager = VMSManager(bot)
+    bot.vms_manager = manager
+
+    # ── Scheduled archive loop (DB-backed, catches missed runs) ──
+    @tasks.loop(hours=ARCHIVE_JOB_INTERVAL_HOURS)
+    async def _archive_loop():
+        await manager.run_archive_if_due()
+
+    @_archive_loop.before_loop
+    async def _before_archive():
+        await bot.wait_until_ready()
+
+    _archive_loop.start()
+
+    # ── One-time startup task ──
+    @bot.listen("on_ready")
+    async def _vms_on_ready():
+        if not getattr(bot, '_vms_started', False):
+            bot._vms_started = True
+            # Small delay — let other modules finish their on_ready
+            await asyncio.sleep(3)
+            await manager.startup()
+
+    # ================================================================
+    # MESSAGE HANDLER
+    # ================================================================
+
+    @bot.listen()
+    async def on_message(message: discord.Message):
         if message.author.bot:
             return
-        
-        # Skip DMs
-        if not message.guild:
+
+        # ────────────────────────────────────────────────
+        # 1. Detect & handle incoming voice messages
+        # ────────────────────────────────────────────────
+        for att in message.attachments:
+            # Voice messages carry IS_VOICE_MESSAGE flag (8192) and are .ogg
+            raw_flags = getattr(message.flags, 'value', 0)
+            is_vm = (
+                bool(raw_flags & 8192) or
+                att.filename.lower() == "voice-message.ogg" or
+                (att.content_type and "ogg" in att.content_type.lower())
+            )
+            if not is_vm:
+                continue
+
+            source = (
+                f"DM from {message.author}"
+                if not message.guild
+                else f"#{getattr(message.channel, 'name', message.channel.id)}"
+                     f" in {message.guild.name}"
+            )
+            bot.logger.log(MODULE_NAME, f"Voice message from {message.author} in {source}")
+
+            vm_id = await manager.save_voice_message(message, att)
+            if vm_id:
+                row = manager._db_one("SELECT filepath FROM vms WHERE id=?", (vm_id,))
+                if row:
+                    await manager.enqueue(vm_id, row[0], reply_to=message)
+            return  # one VM per message is enough
+
+        # ────────────────────────────────────────────────
+        # 2. Ping / reply-to-bot  →  respond with a VM
+        # ────────────────────────────────────────────────
+        is_mention = bot.user in message.mentions
+        is_reply_bot = (
+            message.reference is not None and
+            getattr(getattr(message.reference, 'resolved', None), 'author', None) == bot.user
+        )
+
+        if is_mention or is_reply_bot:
+            uid = str(message.author.id)
+            if manager.ping_allowed(uid):
+                manager.set_ping_cooldown(uid)
+                vm = manager.select_random()
+                if vm:
+                    vm_id, fp, dur = vm
+                    bot.logger.log(MODULE_NAME,
+                        f"Ping from {message.author} — replying with VM #{vm_id}")
+                    await manager.send_vm(message.channel, vm_id, fp, dur)
+                else:
+                    bot.logger.log(MODULE_NAME, "Ping received but no eligible VMs available")
+            else:
+                bot.logger.log(MODULE_NAME,
+                    f"Ping cooldown active for {message.author} — ignoring")
             return
 
-        channel_name = getattr(message.channel, 'name', None)
-        if channel_name == GENERAL_CHANNEL_NAME:
-            await vms_manager.on_general_message(message)
-        
-        bot_mentioned = bot.user in message.mentions
-        bot_replied_to = (
-            message.reference and 
-            message.reference.resolved and 
-            message.reference.resolved.author.id == bot.user.id
-        )
-        
-        if bot_mentioned or bot_replied_to:
-            bot.logger.log(MODULE_NAME, 
-                f"Bot {'mentioned' if bot_mentioned else 'replied to'} by {message.author} in #{channel_name}")
-            
-            try:
-                await vms_manager.post_random_vm(reply_to=message, is_ping_response=True)
-            except Exception as e:
-                bot.logger.error(MODULE_NAME, "Error sending VM response", e)
-    
-    @bot.tree.command(name="vmstats", description="View voice message statistics")
-    async def vmstats(interaction: discord.Interaction):
-        """Show VM statistics"""
-        try:
-            stats = await vms_manager.get_stats()
-            
-            embed = discord.Embed(
-                title="🎙️ Voice Message Statistics",
-                color=0x9b59b6,
-                timestamp=datetime.utcnow()
-            )
-            
-            embed.add_field(
-                name="📂 Cache",
-                value=f"**{stats['cache_count']}** files\nAvg age: {stats['cache_avg_age']:.1f} days",
-                inline=True
-            )
-            
-            embed.add_field(
-                name="📦 Archive",
-                value=f"**{stats['archive_count']}** files\nAvg age: {stats['archive_avg_age']:.1f} days",
-                inline=True
-            )
-            
-            embed.add_field(
-                name="💾 Total Size",
-                value=f"{stats['total_size_mb']:.2f} MB",
-                inline=True
-            )
-            
-            # NEW: VM availability stats
-            embed.add_field(
-                name="📊 Availability",
-                value=f"**{stats['available_vms']}/{stats['total_vms']}** available\n"
-                      f"{stats['vms_in_cooldown']} in cooldown",
-                inline=True
-            )
-            
-            # Transcription status
-            embed.add_field(
-                name="📝 Transcriptions",
-                value=f"{stats['transcribed_count']}/{stats['total_vms']} ({stats['transcription_percentage']:.1f}%)",
-                inline=True
-            )
-            
-            # NEW: Long VM stats
-            embed.add_field(
-                name="⏰ Long VMs",
-                value=f"{stats['long_vm_count']} ({stats['long_vm_percentage']:.1f}%)\n"
-                      f">1min reduction: {LONG_VM_REDUCTION_FACTOR*100:.0f}%",
-                inline=True
-            )
-            
-            # Background processing status
-            if vms_manager.background_transcription_active:
-                embed.add_field(
-                    name="⚙️ Status",
-                    value="Background transcribing...",
-                    inline=True
-                )
-            
-            progress_info = [
-                f"Messages: {stats['message_count']}/{stats['target_message_count']}",
-                f"Progress: {(stats['message_count']/stats['target_message_count']*100):.0f}%"
-            ]
-            
-            if stats['last_post']:
-                time_since = datetime.now(timezone.utc) - stats['last_post']
-                minutes = time_since.total_seconds() / 60
-                progress_info.append(f"Last post: {minutes:.0f}m ago")
-            
-            if stats['last_message']:
-                time_since = datetime.now(timezone.utc) - stats['last_message']
-                minutes = time_since.total_seconds() / 60
-                progress_info.append(f"Last message: {minutes:.0f}m ago")
-            
-            embed.add_field(
-                name="📈 Progress",
-                value="\n".join(progress_info),
-                inline=False
-            )
-            
-            # Cooldown status
-            cooldown_info = []
-            if vms_manager.last_post_time:
-                time_since_post = (datetime.now(timezone.utc) - vms_manager.last_post_time).total_seconds()
-                if time_since_post < RANDOM_VM_COOLDOWN_SECONDS:
-                    cooldown_info.append(f"Random VM: {RANDOM_VM_COOLDOWN_SECONDS - time_since_post:.0f}s")
+        # ────────────────────────────────────────────────
+        # 3. #general message counter  →  random / contextual playback
+        # ────────────────────────────────────────────────
+        if message.guild and getattr(message.channel, 'name', '') == GENERAL_CHANNEL_NAME:
+            guild_id   = str(message.guild.id)
+            channel_id = str(message.channel.id)
+
+            count, threshold = manager._inc_counter(guild_id, channel_id)
+
+            if count >= threshold:
+                manager._reset_counter(guild_id, channel_id)
+
+                if random.random() < PLAYBACK_CHANCE:
+                    # Coin-flip: contextual vs random
+                    if random.random() < 0.5:
+                        recent = manager.recent_messages(guild_id, channel_id)
+                        vm = manager.select_contextual(recent)
+                        mode = "contextual"
+                    else:
+                        vm = manager.select_random()
+                        mode = "random"
+
+                    if vm:
+                        vm_id, fp, dur = vm
+                        bot.logger.log(MODULE_NAME,
+                            f"Triggering {mode} VM playback (#{vm_id}) "
+                            f"after {count} msgs in #general")
+                        await manager.send_vm(message.channel, vm_id, fp, dur)
+                    else:
+                        bot.logger.log(MODULE_NAME,
+                            f"Playback triggered ({mode}) but no eligible VMs found")
                 else:
-                    cooldown_info.append("Random VM: Ready")
-            
-            if vms_manager.last_ping_response_time:
-                time_since_ping = (datetime.now(timezone.utc) - vms_manager.last_ping_response_time).total_seconds()
-                if time_since_ping < PING_COOLDOWN_SECONDS:
-                    cooldown_info.append(f"Ping: {PING_COOLDOWN_SECONDS - time_since_ping:.0f}s")
-                else:
-                    cooldown_info.append("Ping: Ready")
-            
-            if cooldown_info:
-                embed.add_field(
-                    name="⏰ Cooldowns",
-                    value="\n".join(cooldown_info),
-                    inline=True
-                )
-            
-            # NEW: Selection configuration
-            selection_config = [
-                f"VM cooldown: {VM_COOLDOWN_DAYS} days",
-                f"Relevant VM chance: {RELEVANT_VM_CHANCE*100:.0f}%",
-                f"Keyword score weight: {MAX_SCORE_WEIGHT*100:.0f}%",
-                f"Keyword normalization: {'ON' if KEYWORD_SCORE_NORMALIZATION else 'OFF'}"
-            ]
-            
-            embed.add_field(
-                name="⚙️ Selection",
-                value="\n".join(selection_config),
-                inline=True
-            )
-            
-            # Existing configuration
-            embed.add_field(
-                name="📋 Configuration",
-                value=f"Message interval: {MIN_MESSAGES_BETWEEN}-{MAX_MESSAGES_BETWEEN}\n"
-                      f"Inactivity timeout: {INACTIVITY_TIMEOUT_HOURS}h\n"
-                      f"Cache threshold: {CACHE_DAYS} days\n"
-                      f"Archive threshold: {ARCHIVE_DAYS} days\n"
-                      f"Archive play chance: {ARCHIVE_CHANCE*100:.0f}%\n"
-                      f"Ping cooldown: {PING_COOLDOWN_SECONDS}s\n"
-                      f"Random VM cooldown: {RANDOM_VM_COOLDOWN_SECONDS}s",
-                inline=False
-            )
-            
-            embed.set_footer(text=f"Requested by {interaction.user}")
-            
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            
-        except Exception as e:
-            bot.logger.error(MODULE_NAME, "vmstats command failed", e)
-            await interaction.response.send_message(
-                "❌ Error retrieving VM statistics",
-                ephemeral=True
-            )
-    
-    @bot.tree.command(name="vmtest", description="[Admin] Post a random VM immediately")
-    async def vmtest(interaction: discord.Interaction):
-        """Manually trigger a VM post (admin only)"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message(
-                "❌ You need administrator permissions to use this command.",
-                ephemeral=True
-            )
-            return
-        
-        bot.logger.log(MODULE_NAME, f"Manual VM test requested by {interaction.user}")
-        
-        await interaction.response.defer(ephemeral=True)
-        
-        success = await vms_manager.post_random_vm()
-        
-        if success:
-            await interaction.followup.send(
-                "✅ Successfully posted a VM!",
-                ephemeral=True
-            )
-        else:
-            await interaction.followup.send(
-                "❌ Failed to post VM (check logs for details)",
-                ephemeral=True
-            )
-    
-    @bot.tree.command(name="vmcleanup", description="[Admin] Run cleanup/archive process now")
-    async def vmcleanup(interaction: discord.Interaction):
-        """Manually trigger cleanup (admin only)"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message(
-                "❌ You need administrator permissions to use this command.",
-                ephemeral=True
-            )
-            return
-        
-        bot.logger.log(MODULE_NAME, f"Manual cleanup requested by {interaction.user}")
-        
-        await interaction.response.defer(ephemeral=True)
-        
-        await vms_manager.cleanup_and_archive()
-        
-        stats = await vms_manager.get_stats()
-        
-        await interaction.followup.send(
-            f"✅ Cleanup complete!\n"
-            f"📂 Cache: {stats['cache_count']} files\n"
-            f"📦 Archive: {stats['archive_count']} files",
-            ephemeral=True
-        )
-    
-    @bot.tree.command(name="vmtranscribe", description="[Admin] Start background transcription of all VMs")
-    async def vmtranscribe(interaction: discord.Interaction):
-        """Manually trigger background transcription (admin only)"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message(
-                "❌ You need administrator permissions to use this command.",
-                ephemeral=True
-            )
-            return
-        
-        if vms_manager.background_transcription_active:
-            await interaction.response.send_message(
-                "⚙️ Background transcription is already running!",
-                ephemeral=True
-            )
-            return
-        
-        bot.logger.log(MODULE_NAME, f"Manual transcription requested by {interaction.user}")
-        
-        await interaction.response.send_message(
-            "✅ Starting background transcription of all VMs...",
-            ephemeral=True
-        )
-        
-        asyncio.create_task(vms_manager.background_transcribe_all())
-    
-    @bot.tree.command(name="vmbulktranscribe", description="[Admin] Instructions for bulk transcription")
-    async def vmbulktranscribe(interaction: discord.Interaction):
-        """Show instructions for using the bulk transcription script"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message(
-                "❌ You need administrator permissions to use this command.",
-                ephemeral=True
-            )
-            return
-        
-        instructions = """
-        **🔊 BULK TRANSCRIPTION INSTRUCTIONS**
-        
-        For large amounts of untranscribed VMs, use the separate bulk transcription script:
-        
-        1. **Stop the bot** (or run on a separate machine)
-        2. **Run**: `python bulk_transcribe.py`
-        3. **The script will**:
-           - Process VMs from newest to oldest
-           - Use parallel processing for maximum speed
-           - Save transcripts incrementally
-           - Monitor for new VMs while running
-           - Show real-time progress
-        
-        **Features:**
-        - ✅ Independent process (won't interrupt bot)
-        - ✅ Newest VMs first
-        - ✅ Parallel processing (4 at a time)
-        - ✅ Real-time progress with ETA
-        - ✅ Automatically detects new VMs
-        - ✅ Uses GPU acceleration if available
-        
-        **Note:** After bulk transcription, the bot will automatically use all transcripts for contextual VM selection.
-        """
-        
-        embed = discord.Embed(
-            title="Bulk Transcription Instructions",
-            description=instructions,
-            color=0x3498db
-        )
-        
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    
-    # NEW: Admin command to reset VM cooldowns
-    @bot.tree.command(name="vmresetcooldowns", description="[Admin] Reset cooldowns for all VMs")
-    async def vmresetcooldowns(interaction: discord.Interaction):
-        """Reset cooldowns for all VMs (admin only)"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message(
-                "❌ You need administrator permissions to use this command.",
-                ephemeral=True
-            )
-            return
-        
-        bot.logger.log(MODULE_NAME, f"VM cooldown reset requested by {interaction.user}")
-        
-        await interaction.response.defer(ephemeral=True)
-        
-        try:
-            old_count = len(vms_manager.vm_tracking)
-            vms_manager.vm_tracking = {}
-            vms_manager._save_vm_tracking()
-            
-            await interaction.followup.send(
-                f"✅ Reset cooldowns for {old_count} VMs!",
-                ephemeral=True
-            )
-            
-        except Exception as e:
-            bot.logger.error(MODULE_NAME, "Error resetting VM cooldowns", e)
-            await interaction.followup.send(
-                "❌ Error resetting VM cooldowns",
-                ephemeral=True
-            )
-    
+                    bot.logger.log(MODULE_NAME,
+                        f"Message threshold hit ({count}) — playback skipped (50% roll missed)")
+
     bot.logger.log(MODULE_NAME, "VMS module setup complete")

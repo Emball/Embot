@@ -5,7 +5,8 @@ from discord.ext import commands, tasks
 import re
 from datetime import datetime, timedelta
 import asyncio
-from typing import Optional, Union, Dict, List
+from typing import Optional, Dict, List
+import sqlite3
 import json
 import os
 from pathlib import Path
@@ -18,68 +19,396 @@ from cryptography.fernet import Fernet
 
 MODULE_NAME = "MODERATION"
 
-# ==================== CONFIGURATION ====================
+# ==================== STANDARD ERROR STRINGS ====================
+# These are UI copy — they stay in code. Everything else lives in the DB.
 
-OWNER_ID = 1328822521084117033  # from mod_oversight
+ERROR_NO_PERMISSION      = "❌ You need a moderation role (Moderator, Admin, or Owner) to use this command."
+ERROR_REASON_REQUIRED    = "❌ You must provide a reason for this action."
+ERROR_CANNOT_ACTION_SELF = "❌ You cannot perform this action on yourself."
+ERROR_CANNOT_ACTION_BOT  = "❌ I cannot perform this action on myself."
+ERROR_HIGHER_ROLE        = "❌ You cannot perform this action on someone with a higher or equal role."
 
-CONFIG = {
-    "owner_id": OWNER_ID,
-    "channels": {
-        "join_logs_channel_id": 1229868495307669608,
-        "bot_logs_channel_id": 1229871835978666115,
-        "rules_channel_name": "rules"   # Name of your #rules channel
-    },
-    "elevated_roles": ["Moderator", "Admin", "Owner"],
-    "moderation": {
-        "min_reason_length": 10,
-        "muted_role_name": "Muted"
-    },
-    "oversight": {
-        "report_time_cst": "00:00",
-        "context_message_count": 30,
-        "invite_cleanup_days": 7
-    }
+# ==================== PATH HELPERS ====================
+
+def _script_dir() -> Path:
+    return Path(__file__).parent.absolute()
+
+def _data_dir() -> Path:
+    p = _script_dir() / "data"
+    p.mkdir(exist_ok=True)
+    return p
+
+def _db_path() -> str:
+    return str(_data_dir() / "moderation.db")
+
+# ==================== DATABASE SCHEMA ====================
+
+DB_SCHEMA = """
+PRAGMA journal_mode=WAL;
+
+-- ── Config (key/value) ────────────────────────────────────────────────────────
+-- Replaces the CONFIG dict and all top-level constants.
+-- All bot-tunable settings live here; change them at runtime without restarting.
+CREATE TABLE IF NOT EXISTS mod_config (
+    key     TEXT PRIMARY KEY,
+    value   TEXT NOT NULL
+);
+
+-- ── Elevated roles ────────────────────────────────────────────────────────────
+-- Replaces ELEVATED_ROLES list.
+CREATE TABLE IF NOT EXISTS mod_elevated_roles (
+    role_name   TEXT PRIMARY KEY
+);
+
+-- ── Word lists ────────────────────────────────────────────────────────────────
+-- Replaces CHILD_SAFETY, RACIAL_SLURS, TOS_VIOLATIONS, BANNED_WORDS lists.
+-- category: 'child_safety' | 'racial_slurs' | 'tos_violations' | 'banned_words'
+CREATE TABLE IF NOT EXISTS mod_word_lists (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    category    TEXT NOT NULL,
+    term        TEXT NOT NULL,
+    UNIQUE(category, term)
+);
+
+-- ── Role persistence ──────────────────────────────────────────────────────────
+-- Replaces member_roles.json
+CREATE TABLE IF NOT EXISTS mod_member_roles (
+    guild_id    TEXT NOT NULL,
+    user_id     TEXT NOT NULL,
+    role_ids    TEXT NOT NULL,   -- JSON array of integer role IDs
+    saved_at    TEXT NOT NULL,
+    username    TEXT,
+    PRIMARY KEY (guild_id, user_id)
+);
+
+-- ── Strikes / warnings ───────────────────────────────────────────────────────
+-- Replaces moderation_strikes.json
+CREATE TABLE IF NOT EXISTS mod_strikes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     TEXT NOT NULL,
+    timestamp   TEXT NOT NULL,
+    reason      TEXT NOT NULL
+);
+
+-- ── Active mutes ──────────────────────────────────────────────────────────────
+-- Replaces muted_users.json
+CREATE TABLE IF NOT EXISTS mod_mutes (
+    guild_id            TEXT NOT NULL,
+    user_id             TEXT NOT NULL,
+    reason              TEXT NOT NULL,
+    moderator           TEXT NOT NULL,
+    timestamp           TEXT NOT NULL,
+    duration_seconds    INTEGER,
+    expiry_time         TEXT,
+    PRIMARY KEY (guild_id, user_id)
+);
+
+-- ── Pending oversight actions ─────────────────────────────────────────────────
+-- Replaces mod_oversight_data.json
+CREATE TABLE IF NOT EXISTS mod_pending_actions (
+    action_id           TEXT PRIMARY KEY,
+    action              TEXT NOT NULL,
+    moderator_id        INTEGER NOT NULL,
+    moderator           TEXT NOT NULL,
+    user_id             INTEGER,
+    user_name           TEXT,
+    reason              TEXT NOT NULL,
+    guild_id            INTEGER NOT NULL,
+    channel_id          INTEGER,
+    message_id          INTEGER,
+    timestamp           TEXT NOT NULL,
+    context_messages    TEXT,           -- JSON array
+    duration            TEXT,
+    additional          TEXT,           -- JSON object
+    flags               TEXT,           -- JSON array
+    embed_id_inchat     INTEGER,
+    embed_id_botlog     INTEGER,
+    status              TEXT NOT NULL DEFAULT 'pending'
+);
+
+-- ── Ban appeals ───────────────────────────────────────────────────────────────
+-- Replaces ban_appeals.json
+CREATE TABLE IF NOT EXISTS mod_appeals (
+    appeal_id           TEXT PRIMARY KEY,
+    user_id             INTEGER NOT NULL,
+    guild_id            INTEGER NOT NULL,
+    appeal_text         TEXT NOT NULL,
+    submitted_at        TEXT NOT NULL,
+    deadline            TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'pending',
+    votes_for           TEXT NOT NULL DEFAULT '[]',     -- JSON array of user_id strings
+    votes_against       TEXT NOT NULL DEFAULT '[]',     -- JSON array of user_id strings
+    channel_message_id  INTEGER
+);
+
+-- ── Ban reversal invites ──────────────────────────────────────────────────────
+-- Replaces ban_reversal_invites.json
+CREATE TABLE IF NOT EXISTS mod_invites (
+    invite_key  TEXT PRIMARY KEY,   -- "{guild_id}_{user_id}"
+    code        TEXT NOT NULL,
+    user_id     INTEGER NOT NULL,
+    guild_id    INTEGER NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
+-- ── Rules state ───────────────────────────────────────────────────────────────
+-- Replaces data/rules_state.json
+CREATE TABLE IF NOT EXISTS mod_rules_state (
+    guild_id    TEXT PRIMARY KEY,
+    message_id  INTEGER,
+    rules_hash  TEXT
+);
+
+-- ── Deletion attempt log (transient — cleared after daily report) ─────────────
+CREATE TABLE IF NOT EXISTS mod_deletion_attempts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    log_id          TEXT NOT NULL,
+    deleter         TEXT NOT NULL,
+    deleter_id      INTEGER NOT NULL,
+    timestamp       TEXT NOT NULL,
+    original_title  TEXT,
+    is_warning      INTEGER NOT NULL DEFAULT 0
+);
+
+-- ── Startup log ───────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS mod_startup_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    startup_time INTEGER NOT NULL
+);
+"""
+
+# ── Default seed data ─────────────────────────────────────────────────────────
+# Applied once on first init; never overwrites existing rows.
+
+_DEFAULT_CONFIG = {
+    "owner_id":              "1328822521084117033",
+    "join_logs_channel_id":  "1229868495307669608",
+    "bot_logs_channel_id":   "1229871835978666115",
+    "rules_channel_name":    "rules",
+    "min_reason_length":     "10",
+    "muted_role_name":       "Muted",
+    "report_time_cst":       "00:00",
+    "context_message_count": "30",
+    "invite_cleanup_days":   "7",
 }
 
-# Severity categories
-CHILD_SAFETY = ["child porn", "Teen leaks"]
-RACIAL_SLURS = ["chink", "beaner", "n i g g e r", "nigger", "nigger'", "Nigger", 
-                "niggers", "niiger", "niigger"]
-TOS_VIOLATIONS = []
-BANNED_WORDS = [
-    "embis", "embis'", "Embis", "embis!", "Embis!", "embis's", "embiss", "embiz",
-    "https://www.youtube.com/watch?v=fXvOrWWB3Vg", "https://youtu.be/fXvOrWWB3Vg",
-    "https://youtu.be/fXvOrWWB3Vg?si=rSS11Yf2si_MVauu", "leaked porn", "nudes leak",
-    "mbis", "m'bis", "Mbis", "mbs", "mebis", "Michael Blake Sinclair", 
-    "Michael Sinclair", "montear", "www.youtube.com/watch?v=fXvOrWWB3Vg", 
-    "youtube.com/watch?v=fXvOrWWB3Vg"
-]
+_DEFAULT_ELEVATED_ROLES = ["Moderator", "Admin", "Owner"]
 
-ELEVATED_ROLES = CONFIG["elevated_roles"]
-MIN_REASON_LENGTH = CONFIG["moderation"]["min_reason_length"]
-MUTED_ROLE_NAME = CONFIG["moderation"]["muted_role_name"]
-CONTEXT_MESSAGE_COUNT = CONFIG["oversight"]["context_message_count"]
+_DEFAULT_WORD_LISTS = {
+    "child_safety": [
+        "child porn", "Teen leaks",
+    ],
+    "racial_slurs": [
+        "chink", "beaner", "n i g g e r", "nigger", "nigger'", "Nigger",
+        "niggers", "niiger", "niigger",
+    ],
+    "tos_violations": [],
+    "banned_words": [
+        "embis", "embis'", "Embis", "embis!", "Embis!", "embis's", "embiss", "embiz",
+        "https://www.youtube.com/watch?v=fXvOrWWB3Vg",
+        "https://youtu.be/fXvOrWWB3Vg",
+        "https://youtu.be/fXvOrWWB3Vg?si=rSS11Yf2si_MVauu",
+        "leaked porn", "nudes leak",
+        "mbis", "m'bis", "Mbis", "mbs", "mebis",
+        "Michael Blake Sinclair", "Michael Sinclair",
+        "montear",
+        "www.youtube.com/watch?v=fXvOrWWB3Vg",
+        "youtube.com/watch?v=fXvOrWWB3Vg",
+    ],
+}
 
-# Standard Errors
-ERROR_NO_PERMISSION = "❌ You need a moderation role (Moderator, Admin, or Owner) to use this command."
-ERROR_REASON_REQUIRED = "❌ You must provide a reason for this action."
-ERROR_REASON_TOO_SHORT = f"❌ Reason must be at least {MIN_REASON_LENGTH} characters long."
-ERROR_CANNOT_ACTION_SELF = "❌ You cannot perform this action on yourself."
-ERROR_CANNOT_ACTION_BOT = "❌ I cannot perform this action on myself."
-ERROR_HIGHER_ROLE = "❌ You cannot perform this action on someone with a higher or equal role."
+
+def _init_db(db_path: str):
+    """Create schema and seed defaults on first run. Safe to call on every startup."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(DB_SCHEMA)
+        conn.commit()
+
+        # Seed config (INSERT OR IGNORE — never overwrites live values)
+        conn.executemany(
+            "INSERT OR IGNORE INTO mod_config (key, value) VALUES (?, ?)",
+            list(_DEFAULT_CONFIG.items()),
+        )
+
+        # Seed elevated roles
+        conn.executemany(
+            "INSERT OR IGNORE INTO mod_elevated_roles (role_name) VALUES (?)",
+            [(r,) for r in _DEFAULT_ELEVATED_ROLES],
+        )
+
+        # Seed word lists
+        for category, terms in _DEFAULT_WORD_LISTS.items():
+            conn.executemany(
+                "INSERT OR IGNORE INTO mod_word_lists (category, term) VALUES (?, ?)",
+                [(category, t) for t in terms],
+            )
+
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ==================== DB CONNECTION HELPERS ====================
+
+def _conn(db_path: str) -> sqlite3.Connection:
+    c = sqlite3.connect(db_path)
+    c.execute("PRAGMA journal_mode=WAL")
+    c.row_factory = sqlite3.Row
+    return c
+
+def _db_exec(db_path: str, query: str, params: tuple = ()):
+    c = _conn(db_path)
+    try:
+        c.execute(query, params)
+        c.commit()
+    finally:
+        c.close()
+
+def _db_one(db_path: str, query: str, params: tuple = ()):
+    c = _conn(db_path)
+    try:
+        return c.execute(query, params).fetchone()
+    finally:
+        c.close()
+
+def _db_all(db_path: str, query: str, params: tuple = ()):
+    c = _conn(db_path)
+    try:
+        return c.execute(query, params).fetchall()
+    finally:
+        c.close()
+
+
+# ==================== CONFIG ACCESSOR ====================
+
+class ModConfig:
+    """
+    Thin wrapper around mod_config — reads live values from DB on every access.
+    All mutations write through to the DB immediately.
+    """
+
+    def __init__(self, db_path: str):
+        self._db = db_path
+
+    def get(self, key: str, default=None):
+        row = _db_one(self._db, "SELECT value FROM mod_config WHERE key=?", (key,))
+        return row["value"] if row else default
+
+    def set(self, key: str, value):
+        _db_exec(self._db,
+                 "INSERT INTO mod_config (key, value) VALUES (?,?) "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                 (key, str(value)))
+
+    def get_int(self, key: str, default: int = 0) -> int:
+        try:
+            return int(self.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    # ── Convenience properties ────────────────────────────────────────────────
+
+    @property
+    def owner_id(self) -> int:
+        return self.get_int("owner_id")
+
+    @property
+    def join_logs_channel_id(self) -> int:
+        return self.get_int("join_logs_channel_id")
+
+    @property
+    def bot_logs_channel_id(self) -> int:
+        return self.get_int("bot_logs_channel_id")
+
+    @property
+    def rules_channel_name(self) -> str:
+        return self.get("rules_channel_name", "rules")
+
+    @property
+    def min_reason_length(self) -> int:
+        return self.get_int("min_reason_length", 10)
+
+    @property
+    def muted_role_name(self) -> str:
+        return self.get("muted_role_name", "Muted")
+
+    @property
+    def report_time_cst(self) -> str:
+        return self.get("report_time_cst", "00:00")
+
+    @property
+    def context_message_count(self) -> int:
+        return self.get_int("context_message_count", 30)
+
+    @property
+    def invite_cleanup_days(self) -> int:
+        return self.get_int("invite_cleanup_days", 7)
+
+    # ── Elevated roles ────────────────────────────────────────────────────────
+
+    def get_elevated_roles(self) -> List[str]:
+        rows = _db_all(self._db, "SELECT role_name FROM mod_elevated_roles")
+        return [r["role_name"] for r in rows]
+
+    def add_elevated_role(self, role_name: str):
+        _db_exec(self._db,
+                 "INSERT OR IGNORE INTO mod_elevated_roles (role_name) VALUES (?)",
+                 (role_name,))
+
+    def remove_elevated_role(self, role_name: str):
+        _db_exec(self._db,
+                 "DELETE FROM mod_elevated_roles WHERE role_name=?",
+                 (role_name,))
+
+    # ── Word lists ────────────────────────────────────────────────────────────
+
+    def get_word_list(self, category: str) -> List[str]:
+        rows = _db_all(self._db,
+                       "SELECT term FROM mod_word_lists WHERE category=?",
+                       (category,))
+        return [r["term"] for r in rows]
+
+    def add_word(self, category: str, term: str):
+        _db_exec(self._db,
+                 "INSERT OR IGNORE INTO mod_word_lists (category, term) VALUES (?, ?)",
+                 (category, term))
+
+    def remove_word(self, category: str, term: str):
+        _db_exec(self._db,
+                 "DELETE FROM mod_word_lists WHERE category=? AND term=?",
+                 (category, term))
+
+    @property
+    def child_safety(self) -> List[str]:
+        return self.get_word_list("child_safety")
+
+    @property
+    def racial_slurs(self) -> List[str]:
+        return self.get_word_list("racial_slurs")
+
+    @property
+    def tos_violations(self) -> List[str]:
+        return self.get_word_list("tos_violations")
+
+    @property
+    def banned_words(self) -> List[str]:
+        return self.get_word_list("banned_words")
+
 
 # ==================== HELPERS ====================
 
-def has_elevated_role(member: discord.Member) -> bool:
+def has_elevated_role(member: discord.Member, cfg: ModConfig) -> bool:
     if member.guild.owner_id == member.id:
         return True
-    return any(role.name in ELEVATED_ROLES for role in member.roles)
+    elevated = cfg.get_elevated_roles()
+    return any(role.name in elevated for role in member.roles)
 
-def validate_reason(reason: Optional[str]) -> tuple:
+def validate_reason(reason: Optional[str], min_len: int) -> tuple:
     if not reason or reason.strip() == "" or reason == "No reason provided":
         return False, ERROR_REASON_REQUIRED
-    if len(reason) < MIN_REASON_LENGTH:
-        return False, ERROR_REASON_TOO_SHORT
+    if len(reason) < min_len:
+        return False, f"❌ Reason must be at least {min_len} characters long."
     return True, None
 
 def parse_duration(duration: str) -> tuple:
@@ -97,44 +426,37 @@ def parse_duration(duration: str) -> tuple:
     return seconds, label
 
 def get_event_logger(bot):
-    """Return the logger's EventLogger if available."""
     return getattr(bot, '_logger_event_logger', None)
 
 def matches_banned_term(term: str, content_lower: str) -> bool:
-    """
-    Match a banned term against lowercased message content.
-    - URLs (contain '://' or 'www.') use a plain substring match since word
-      boundaries don't apply to URLs.
-    - Everything else uses \\b word-boundary matching so that 'embis' won't
-      fire on 'fembis', and 'mbis' won't fire on 'crumbs'.
-    """
     term_lower = term.lower()
     if "://" in term_lower or "www." in term_lower:
         return term_lower in content_lower
     return bool(re.search(r'\b' + re.escape(term_lower) + r'\b', content_lower))
+
 
 # ==================== UNIFIED CONTEXT ====================
 
 class ModContext:
     """
     Wraps either a discord.Interaction (slash) or commands.Context (prefix)
-    into a single interface so command logic never has to branch on which one it got.
+    into a single interface so command logic never has to branch on type.
     """
     def __init__(self, source):
         self._source = source
         self._replied = False
 
         if isinstance(source, discord.Interaction):
-            self.guild = source.guild
+            self.guild   = source.guild
             self.channel = source.channel
-            self.author = source.user
-            self.bot = source.client
+            self.author  = source.user
+            self.bot     = source.client
             self.message = None
         else:
-            self.guild = source.guild
+            self.guild   = source.guild
             self.channel = source.channel
-            self.author = source.author
-            self.bot = source.bot
+            self.author  = source.author
+            self.bot     = source.bot
             self.message = source.message
 
     async def reply(self, content=None, *, embed=None, ephemeral=False, delete_after=None):
@@ -156,7 +478,6 @@ class ModContext:
             msg_obj = await self._source.send(content=content, embed=embed)
             if delete_after and msg_obj:
                 await msg_obj.delete(delay=delete_after)
-        
         return msg_obj.id if msg_obj else None
 
     async def error(self, message: str):
@@ -179,6 +500,7 @@ class ModContext:
             msg = await self._source.send(content=content, embed=embed)
             return msg.id if msg else None
 
+
 # ==================== VIEWS & MODALS ====================
 
 class BanAppealView(ui.View):
@@ -188,31 +510,34 @@ class BanAppealView(ui.View):
 
     @ui.button(label="Submit Appeal", style=discord.ButtonStyle.primary, emoji="📝")
     async def appeal_button(self, interaction: discord.Interaction, button: ui.Button):
-        # The oversight system is now part of the bot's moderation attribute
-        if not hasattr(interaction.client, 'moderation') or not hasattr(interaction.client.moderation, 'submit_appeal'):
-            await interaction.response.send_message("❌ Appeal system not available.", ephemeral=True)
+        if not hasattr(interaction.client, 'moderation') or \
+                not hasattr(interaction.client.moderation, 'submit_appeal'):
+            await interaction.response.send_message(
+                "❌ Appeal system not available.", ephemeral=True)
             return
         modal = BanAppealModal(interaction.client.moderation, self.guild_id)
         await interaction.response.send_modal(modal)
 
+
 class ActionReviewView(ui.View):
-    """View with buttons for reviewing mod actions"""
     def __init__(self, moderation_system, action_id: str, action: Dict):
         super().__init__(timeout=None)
         self.moderation = moderation_system
-        self.action_id = action_id
-        self.action = action
+        self.action_id  = action_id
+        self.action     = action
 
     @ui.button(label="Approve", style=discord.ButtonStyle.green, emoji="✅")
     async def approve_button(self, interaction: discord.Interaction, button: ui.Button):
         success = await self.moderation.approve_action(self.action_id)
         if success:
-            await interaction.response.send_message("✅ Action approved and removed from pending.", ephemeral=True)
+            await interaction.response.send_message(
+                "✅ Action approved and removed from pending.", ephemeral=True)
             for item in self.children:
                 item.disabled = True
             await interaction.message.edit(view=self)
         else:
-            await interaction.response.send_message("❌ Failed to approve action.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ Failed to approve action.", ephemeral=True)
 
     @ui.button(label="Revert", style=discord.ButtonStyle.red, emoji="↩️")
     async def revert_button(self, interaction: discord.Interaction, button: ui.Button):
@@ -222,104 +547,162 @@ class ActionReviewView(ui.View):
             return
         success = await self.moderation.revert_action(self.action_id, guild)
         if success:
-            await interaction.response.send_message("↩️ Action reverted successfully.", ephemeral=True)
+            await interaction.response.send_message(
+                "↩️ Action reverted successfully.", ephemeral=True)
             for item in self.children:
                 item.disabled = True
             await interaction.message.edit(view=self)
         else:
-            await interaction.response.send_message("❌ Failed to revert action.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ Failed to revert action.", ephemeral=True)
 
     @ui.button(label="View Chat", style=discord.ButtonStyle.gray, emoji="💬")
     async def view_chat_button(self, interaction: discord.Interaction, button: ui.Button):
         if not self.action.get('channel_id') or not self.action.get('message_id'):
-            await interaction.response.send_message("❌ No chat link available.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ No chat link available.", ephemeral=True)
             return
-        guild_id = self.action['guild_id']
+        guild_id   = self.action['guild_id']
         channel_id = self.action['channel_id']
         message_id = self.action['message_id']
-        jump_link = f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
-        await interaction.response.send_message(f"📍 [Jump to message]({jump_link})", ephemeral=True)
+        jump_link  = f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+        await interaction.response.send_message(
+            f"📍 [Jump to message]({jump_link})", ephemeral=True)
 
-class AppealReviewView(ui.View):
-    """View with buttons for reviewing ban appeals"""
+
+class AppealVoteView(ui.View):
     def __init__(self, moderation_system, appeal_id: str):
         super().__init__(timeout=None)
         self.moderation = moderation_system
-        self.appeal_id = appeal_id
+        self.appeal_id  = appeal_id
 
-    @ui.button(label="Accept Appeal", style=discord.ButtonStyle.green, emoji="✅")
+    def _update_labels(self):
+        appeal = self.moderation._get_appeal(self.appeal_id)
+        if not appeal:
+            return
+        accept_count = len(json.loads(appeal["votes_for"]))
+        deny_count   = len(json.loads(appeal["votes_against"]))
+        for item in self.children:
+            if hasattr(item, 'custom_id'):
+                if 'accept' in item.custom_id:
+                    item.label = f"Accept ({accept_count})"
+                elif 'deny' in item.custom_id:
+                    item.label = f"Deny ({deny_count})"
+
+    @ui.button(label="Accept (0)", style=discord.ButtonStyle.green,
+               emoji="✅", custom_id="appeal_accept")
     async def accept_button(self, interaction: discord.Interaction, button: ui.Button):
-        success = await self.moderation.approve_appeal(self.appeal_id)
-        if success:
-            await interaction.response.send_message("✅ Appeal accepted and user unbanned.", ephemeral=True)
-            for item in self.children:
-                item.disabled = True
-            await interaction.message.edit(view=self)
-        else:
-            await interaction.response.send_message("❌ Failed to accept appeal.", ephemeral=True)
+        cfg = self.moderation.cfg
+        if not has_elevated_role(interaction.user, cfg):
+            await interaction.response.send_message(
+                "❌ Only moderators can vote on appeals.", ephemeral=True)
+            return
+        appeal = self.moderation._get_appeal(self.appeal_id)
+        if not appeal:
+            await interaction.response.send_message(
+                "❌ Appeal no longer exists.", ephemeral=True)
+            return
 
-    @ui.button(label="Deny Appeal", style=discord.ButtonStyle.red, emoji="❌")
+        uid           = str(interaction.user.id)
+        votes_for     = json.loads(appeal["votes_for"])
+        votes_against = json.loads(appeal["votes_against"])
+
+        if uid in votes_for:
+            await interaction.response.send_message(
+                "You already voted to accept.", ephemeral=True)
+            return
+        if uid in votes_against:
+            votes_against.remove(uid)
+        votes_for.append(uid)
+
+        self.moderation._update_appeal_votes(
+            self.appeal_id, votes_for, votes_against)
+        self._update_labels()
+        await interaction.message.edit(view=self)
+        await interaction.response.send_message(
+            "✅ Vote recorded: Accept.", ephemeral=True)
+
+    @ui.button(label="Deny (0)", style=discord.ButtonStyle.red,
+               emoji="❌", custom_id="appeal_deny")
     async def deny_button(self, interaction: discord.Interaction, button: ui.Button):
-        success = await self.moderation.deny_appeal(self.appeal_id)
-        if success:
-            await interaction.response.send_message("❌ Appeal denied.", ephemeral=True)
-            for item in self.children:
-                item.disabled = True
-            await interaction.message.edit(view=self)
-        else:
-            await interaction.response.send_message("❌ Failed to deny appeal.", ephemeral=True)
+        cfg = self.moderation.cfg
+        if not has_elevated_role(interaction.user, cfg):
+            await interaction.response.send_message(
+                "❌ Only moderators can vote on appeals.", ephemeral=True)
+            return
+        appeal = self.moderation._get_appeal(self.appeal_id)
+        if not appeal:
+            await interaction.response.send_message(
+                "❌ Appeal no longer exists.", ephemeral=True)
+            return
+
+        uid           = str(interaction.user.id)
+        votes_for     = json.loads(appeal["votes_for"])
+        votes_against = json.loads(appeal["votes_against"])
+
+        if uid in votes_against:
+            await interaction.response.send_message(
+                "You already voted to deny.", ephemeral=True)
+            return
+        if uid in votes_for:
+            votes_for.remove(uid)
+        votes_against.append(uid)
+
+        self.moderation._update_appeal_votes(
+            self.appeal_id, votes_for, votes_against)
+        self._update_labels()
+        await interaction.message.edit(view=self)
+        await interaction.response.send_message(
+            "❌ Vote recorded: Deny.", ephemeral=True)
+
 
 class BanAppealModal(ui.Modal, title="Ban Appeal"):
-    """Modal for submitting a ban appeal"""
     appeal_text = ui.TextInput(
         label="Why should you be unbanned?",
         style=discord.TextStyle.paragraph,
         placeholder="Explain why you believe the ban should be lifted...",
         required=True,
-        max_length=1000
+        max_length=1000,
     )
 
     def __init__(self, moderation_system, guild_id: int):
         super().__init__()
         self.moderation = moderation_system
-        self.guild_id = guild_id
+        self.guild_id   = guild_id
 
     async def on_submit(self, interaction: discord.Interaction):
-        appeal_id = await self.moderation.submit_appeal(
-            interaction.user.id,
-            self.guild_id,
-            self.appeal_text.value
-        )
+        await self.moderation.submit_appeal(
+            interaction.user.id, self.guild_id, self.appeal_text.value)
         embed = discord.Embed(
             title="✅ Appeal Submitted",
             description="Your ban appeal has been submitted and will be reviewed.",
             color=0x2ecc71,
-            timestamp=datetime.utcnow()
+            timestamp=datetime.utcnow(),
         )
         embed.add_field(
             name="What happens next?",
-            value="The server owner will review your appeal and you'll be notified of the decision.",
-            inline=False
+            value="Your appeal has been posted to the staff team. They will vote on it "
+                  "over the next 24 hours and you'll be notified of the outcome automatically.",
+            inline=False,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 # ==================== MEDIA SAFETY SCANNER ====================
 
 from dataclasses import dataclass, field as _field
 
-# Labels NudeNet considers explicit
 _EXPLICIT_LABELS = {
     "EXPOSED_ANUS", "EXPOSED_BUTTOCKS", "EXPOSED_BREAST_F",
     "EXPOSED_GENITALIA_F", "EXPOSED_GENITALIA_M", "EXPOSED_BELLY",
 }
 _NUDENET_THRESHOLD = 0.45
-_AGE_THRESHOLD     = 20   # block if any face appears younger than this
+_AGE_THRESHOLD     = 20
 _SCAN_IMAGE_EXTS   = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff', '.tif'}
 _SCAN_VIDEO_EXTS   = {'.mp4', '.mov', '.webm', '.avi', '.mkv'}
 
-# Lazy model handles — loaded once on first scan
-_nudenet_model     = None
-_deepface_ready    = False
+_nudenet_model  = None
+_deepface_ready = False
 
 def _load_nudenet():
     global _nudenet_model
@@ -328,8 +711,9 @@ def _load_nudenet():
             from nudenet import NudeClassifier  # type: ignore
             _nudenet_model = NudeClassifier()
         except ImportError:
-            pass  # NudeNet not installed — scanner will fail-open for nudity stage
+            pass
         except Exception as e:
+            import logging
             logging.getLogger("MediaScanner").error(f"NudeNet load failed: {e}")
     return _nudenet_model
 
@@ -360,15 +744,14 @@ class ScanVerdict:
     safe_files: list = _field(default_factory=list)
     blocked_files: list = _field(default_factory=list)
 
-class MediaScanner:
-    """Pre-upload CSAM safety scanner. Instantiated once inside ModerationSystem."""
 
-    def __init__(self, bot, owner_id: int, get_bot_logs_fn):
-        self.bot          = bot
-        self.owner_id     = owner_id
-        self._get_bot_logs = get_bot_logs_fn
+class MediaScanner:
+    def __init__(self, bot, cfg: ModConfig, get_bot_logs_fn):
+        self.bot            = bot
+        self.cfg            = cfg
+        self._get_bot_logs  = get_bot_logs_fn
         self._models_loaded = False
-        self._load_lock   = asyncio.Lock()
+        self._load_lock     = asyncio.Lock()
 
     async def _ensure_models(self):
         if self._models_loaded:
@@ -382,9 +765,8 @@ class MediaScanner:
             self._models_loaded = True
 
     async def scan_files(self, files_data: list, guild=None, context: str = "") -> ScanVerdict:
-        """Scan a files_data list ({'filename', 'data'}) before re-hosting. Returns ScanVerdict."""
         await self._ensure_models()
-        loop   = asyncio.get_event_loop()
+        loop = asyncio.get_event_loop()
         safe, blocked = [], []
 
         for entry in files_data:
@@ -398,14 +780,17 @@ class MediaScanner:
 
             result = _FileScanResult(filename=filename, scannable=True)
             try:
-                is_explicit = await loop.run_in_executor(None, self._nudenet_scan, data, ext)
+                is_explicit = await loop.run_in_executor(
+                    None, self._nudenet_scan, data, ext)
                 result.explicit = is_explicit
                 if is_explicit:
-                    min_age = await loop.run_in_executor(None, self._deepface_age, data)
+                    min_age = await loop.run_in_executor(
+                        None, self._deepface_age, data)
                     result.min_age = min_age
                     if min_age is not None and min_age < _AGE_THRESHOLD:
                         result.blocked = True
-                        result.reason  = f"Explicit + apparent age {min_age:.1f} < {_AGE_THRESHOLD}"
+                        result.reason  = (f"Explicit + apparent age "
+                                          f"{min_age:.1f} < {_AGE_THRESHOLD}")
             except Exception as e:
                 result.blocked = True
                 result.reason  = f"Scan error (blocked as precaution): {e}"
@@ -413,7 +798,6 @@ class MediaScanner:
 
             if result.blocked:
                 blocked.append(result)
-                _scanner_log.warning(f"BLOCKED [{filename}]: {result.reason}")
             else:
                 safe.append(entry)
 
@@ -422,12 +806,9 @@ class MediaScanner:
             await self._alert(verdict, guild, context)
         return verdict
 
-    # ── Blocking model calls (run in executor) ─────────────────────────────────
-
     def _nudenet_scan(self, data: bytes, ext: str) -> bool:
         if _nudenet_model is None:
             return False
-        import tempfile
         if ext in _SCAN_VIDEO_EXTS:
             data = self._first_frame(data)
             if data is None:
@@ -457,7 +838,8 @@ class MediaScanner:
             import numpy as np
             from PIL import Image as _Image
             arr     = np.array(_Image.open(io.BytesIO(data)).convert("RGB"))
-            results = DeepFace.analyze(arr, actions=["age"], enforce_detection=False, silent=True)
+            results = DeepFace.analyze(arr, actions=["age"],
+                                        enforce_detection=False, silent=True)
             if isinstance(results, dict):
                 results = [results]
             ages = [float(r["age"]) for r in results if r.get("age") is not None]
@@ -468,7 +850,7 @@ class MediaScanner:
 
     def _first_frame(self, video_data: bytes) -> Optional[bytes]:
         try:
-            import cv2, numpy as np, tempfile  # type: ignore
+            import cv2, numpy as np  # type: ignore
             with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp:
                 tmp.write(video_data)
                 path = tmp.name
@@ -491,10 +873,9 @@ class MediaScanner:
             _scanner_log.error(f"First-frame extraction failed: {e}")
             return None
 
-    # ── Alert (no image content ever included) ─────────────────────────────────
-
     async def _alert(self, verdict: ScanVerdict, guild, context: str):
-        summary = "\n".join(f"• `{r.filename}` — {r.reason}" for r in verdict.blocked_files)
+        summary = "\n".join(
+            f"• `{r.filename}` — {r.reason}" for r in verdict.blocked_files)
         embed = discord.Embed(
             title="🚫 Re-host Blocked — Potential Illegal Content",
             description=(
@@ -505,8 +886,10 @@ class MediaScanner:
             color=0xff0000,
             timestamp=datetime.utcnow(),
         )
-        embed.add_field(name="Context",          value=context or "*(none)*",   inline=False)
-        embed.add_field(name=f"Blocked ({len(verdict.blocked_files)})", value=summary[:1024], inline=False)
+        embed.add_field(name="Context", value=context or "*(none)*", inline=False)
+        embed.add_field(
+            name=f"Blocked ({len(verdict.blocked_files)})",
+            value=summary[:1024], inline=False)
         embed.add_field(
             name="Action Required",
             value=(
@@ -517,7 +900,7 @@ class MediaScanner:
         )
         embed.set_footer(text="No flagged content was uploaded to Discord CDN")
         try:
-            owner = await self.bot.fetch_user(self.owner_id)
+            owner = await self.bot.fetch_user(self.cfg.owner_id)
             if owner:
                 await owner.send(embed=embed)
         except Exception:
@@ -536,53 +919,38 @@ class MediaScanner:
 class RulesManager:
     """
     Manages the server rules embed in the #rules channel.
-
-    Design guarantees:
-    - The rules embed is always derived directly from rules.json.
-    - On every bot startup (on_ready) the manager checks whether the previously
-      posted embed is still present and whether its content matches the current
-      rules file. If the message is missing or the rules have changed since it
-      was posted, the old message is deleted and a fresh embed is sent.
-    - A background task polls rules.json every 60 seconds so edits made while the
-      bot is running are pushed to Discord automatically.
-    - The ID of the posted message is persisted to disk (rules_state.json) so
-      restarts never lose track of the live message.
+    Rules content still comes from rules.json (it's not config — it's content).
+    Only the *state* (posted message ID + hash) is persisted in the DB.
     """
 
     RULES_FILE = Path(__file__).parent / "rules.json"
-    STATE_FILE = Path(__file__).parent / "data" / "rules_state.json"
 
-    def __init__(self, bot):
-        self.bot = bot
-        self._state: dict = self._load_state()
-        self._posted_hash: Optional[str] = self._state.get("rules_hash")
-        self._posted_message_id: Optional[int] = self._state.get("message_id")
+    def __init__(self, bot, db_path: str, cfg: ModConfig):
+        self.bot      = bot
+        self._db      = db_path
+        self.cfg      = cfg
 
-    def _load_state(self) -> dict:
-        try:
-            with open(self.STATE_FILE, "r") as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return {}
-        except Exception as e:
-            self.bot.logger.log("RULES", f"Could not load rules state: {e}", "WARNING")
-            return {}
+    # ── DB-backed state ───────────────────────────────────────────────────────
 
-    def _save_state(self):
-        try:
-            self.STATE_FILE.parent.mkdir(exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=str(self.STATE_FILE.parent), suffix=".tmp")
-            with os.fdopen(fd, "w") as f:
-                json.dump({
-                    "message_id": self._posted_message_id,
-                    "rules_hash": self._posted_hash,
-                }, f, indent=2)
-            os.replace(tmp, self.STATE_FILE)
-        except Exception as e:
-            self.bot.logger.log("RULES", f"Could not save rules state: {e}", "WARNING")
+    def _get_state(self, guild_id: int) -> tuple:
+        """Returns (message_id, rules_hash) for the guild, or (None, None)."""
+        row = _db_one(self._db,
+                      "SELECT message_id, rules_hash FROM mod_rules_state WHERE guild_id=?",
+                      (str(guild_id),))
+        if row:
+            return row["message_id"], row["rules_hash"]
+        return None, None
+
+    def _save_state(self, guild_id: int, message_id: int, rules_hash: str):
+        _db_exec(self._db,
+                 "INSERT INTO mod_rules_state (guild_id, message_id, rules_hash) VALUES (?,?,?) "
+                 "ON CONFLICT(guild_id) DO UPDATE SET "
+                 "message_id=excluded.message_id, rules_hash=excluded.rules_hash",
+                 (str(guild_id), message_id, rules_hash))
+
+    # ── Rules file helpers ────────────────────────────────────────────────────
 
     def load_rules(self) -> Optional[dict]:
-        """Return the parsed rules.json, or None if it cannot be read."""
         try:
             with open(self.RULES_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -601,7 +969,6 @@ class RulesManager:
         ).hexdigest()
 
     def get_rule_text(self, rule_number: int) -> Optional[str]:
-        """Return a formatted string for a single rule number, or None."""
         data = self.load_rules()
         if not data:
             return None
@@ -611,7 +978,6 @@ class RulesManager:
         return None
 
     def list_rules_summary(self) -> list:
-        """Return a list of short Rule N — Title strings."""
         data = self.load_rules()
         if not data:
             return []
@@ -635,29 +1001,26 @@ class RulesManager:
         return embed
 
     def _get_rules_channel(self, guild: discord.Guild) -> Optional[discord.TextChannel]:
-        name = CONFIG["channels"].get("rules_channel_name", "rules")
-        return discord.utils.get(guild.text_channels, name=name)
+        return discord.utils.get(guild.text_channels, name=self.cfg.rules_channel_name)
 
     async def sync(self, guild: discord.Guild, *, force: bool = False) -> bool:
-        """
-        Ensure the #rules channel contains an up-to-date embed.
-        Returns True if a new message was posted, False if already current.
-        """
         data = self.load_rules()
         if not data:
             return False
 
         current_hash = self._hash_rules(data)
-        channel = self._get_rules_channel(guild)
+        channel      = self._get_rules_channel(guild)
         if not channel:
             self.bot.logger.log("RULES", f"#rules channel not found in {guild.name}", "WARNING")
             return False
 
+        posted_msg_id, posted_hash = self._get_state(guild.id)
+
         existing_ok = False
-        if self._posted_message_id and not force:
+        if posted_msg_id and not force:
             try:
-                msg = await channel.fetch_message(self._posted_message_id)
-                if current_hash == self._posted_hash:
+                msg = await channel.fetch_message(posted_msg_id)
+                if current_hash == posted_hash:
                     existing_ok = True
                 else:
                     await msg.delete()
@@ -669,7 +1032,6 @@ class RulesManager:
         if existing_ok:
             return False
 
-        # Delete any leftover bot embeds in the channel
         try:
             async for msg in channel.history(limit=50):
                 if msg.author == guild.me and msg.embeds:
@@ -680,9 +1042,7 @@ class RulesManager:
         embed = self.build_embed(data)
         try:
             new_msg = await channel.send(embed=embed)
-            self._posted_message_id = new_msg.id
-            self._posted_hash = current_hash
-            self._save_state()
+            self._save_state(guild.id, new_msg.id, current_hash)
             self.bot.logger.log("RULES", f"Rules embed posted (message {new_msg.id})")
             return True
         except Exception as e:
@@ -690,11 +1050,9 @@ class RulesManager:
             return False
 
     async def on_ready(self, guild: discord.Guild):
-        """Called from on_ready — checks and syncs every guild."""
         await self.sync(guild)
 
     def start_watcher(self, guild: discord.Guild):
-        """Start the background polling task for this guild."""
         self._watch_guild = guild
         if not self._watcher_task_running():
             self._watch_task = self.bot.loop.create_task(self._watch_loop())
@@ -712,40 +1070,42 @@ class RulesManager:
                     data = self.load_rules()
                     if data:
                         current_hash = self._hash_rules(data)
-                        if current_hash != self._posted_hash:
-                            self.bot.logger.log("RULES", "rules.json change detected — syncing embed")
+                        _, posted_hash = self._get_state(guild.id)
+                        if current_hash != posted_hash:
+                            self.bot.logger.log(
+                                "RULES", "rules.json change detected — syncing embed")
                             await self.sync(guild, force=True)
             except Exception as e:
                 self.bot.logger.log("RULES", f"Watcher error: {e}", "WARNING")
 
 
-# ==================== MODERATION SYSTEM (UNIFIED) ====================
+# ==================== MODERATION SYSTEM ====================
 
 class ModerationSystem:
     """
     Unified moderation and oversight system.
-    Handles all moderation actions, strikes, mutes, role persistence,
-    auto-mod, and oversight (logging, appeals, daily reports).
+    All persistent state lives in /data/moderation.db — no JSON files.
     """
 
     def __init__(self, bot):
-        self.bot = bot
-        data_dir = Path(__file__).parent / "data"
-        data_dir.mkdir(exist_ok=True)
+        self.bot     = bot
+        self._db     = _db_path()
+        self.cfg     = ModConfig(self._db)
 
-        # Per-process Fernet key — generated fresh each run.
+        # Initialise schema + seed defaults
+        _init_db(self._db)
+
+        # Per-process Fernet key
         self._fernet = Fernet(Fernet.generate_key())
 
         # Encrypted media staging directory
-        self.media_dir = data_dir / "media_cache"
+        self.media_dir = _data_dir() / "media_cache"
         self.media_dir.mkdir(exist_ok=True)
 
         # Pre-upload safety scanner
-        self.scanner = MediaScanner(bot, OWNER_ID, self._get_bot_logs_channel)
+        self.scanner = MediaScanner(bot, self.cfg, self._get_bot_logs_channel)
 
-        # Purge any orphaned .enc files left over from a previous run.
-        # media_cache is in-memory only; paths stored in it from a prior process
-        # are invalid after restart, so any .enc files still on disk are stale.
+        # Purge orphaned .enc files from previous run
         _purged = 0
         for _enc in self.media_dir.glob("*.enc"):
             try:
@@ -754,96 +1114,73 @@ class ModerationSystem:
             except Exception:
                 pass
         if _purged:
-            bot.logger.log(MODULE_NAME, f"Purged {_purged} orphaned .enc file(s) from previous session")
+            bot.logger.log(MODULE_NAME,
+                f"Purged {_purged} orphaned .enc file(s) from previous session")
 
-        # Data files
-        self.roles_file = data_dir / "member_roles.json"
-        self.strikes_file = data_dir / "moderation_strikes.json"
-        self.mutes_file = data_dir / "muted_users.json"
-        self.oversight_file = data_dir / "mod_oversight_data.json"
-        self.appeals_file = data_dir / "ban_appeals.json"
-        self.invites_file = data_dir / "ban_reversal_invites.json"
-
-        # Load all data
-        self.role_cache = self._load_json(self.roles_file, {})
-        self.strikes = self._load_json(self.strikes_file, {})
-        self.mutes = self._load_json(self.mutes_file, {})
-        self.pending_actions = self._load_json(self.oversight_file, {})
-        self.appeals = self._load_json(self.appeals_file, {})
-        self.invites = self._load_json(self.invites_file, {})
-
-        # Bot-log cache: tracks last 500 messages sent to bot-logs so deletions can be countered.
-        # bot_log_cache maps discord message_id -> log record dict
-        # bot_log_order is a deque of message_ids in insertion order for LRU eviction
-        BOT_LOG_CACHE_SIZE = 500
+        # In-memory caches (not persisted — rebuilt from events each run)
+        BOT_LOG_CACHE_SIZE      = 500
         self._bot_log_cache: Dict[int, Dict] = {}
-        self._bot_log_order: deque = deque()
-        self._bot_log_cache_size = BOT_LOG_CACHE_SIZE
-
-        # Tracks message_ids of deletion-warning messages (perpetual resend on delete)
-        # warning_message_id -> original_log_id
+        self._bot_log_order: deque           = deque()
+        self._bot_log_cache_size             = BOT_LOG_CACHE_SIZE
         self._deletion_warnings: Dict[int, str] = {}
-
-        # Deletion attempt log: list of dicts for daily report
-        # Each: {'log_id', 'deleter', 'deleter_id', 'timestamp', 'original_title'}
-        self.deletion_attempts: list = []
 
         # Message cache for context (guild_id -> channel_id -> list)
         self.message_cache = {}
 
-        # Media cache index: message_id -> {'files': [{'filename': str, 'path': Path, 'content_type': str}], 'author_id': int, 'guild_id': int}
-        # Actual file bytes are stored AES-encrypted on disk under self.media_dir and deleted on eviction/re-host.
+        # Media cache index: message_id -> {'files': [...], 'author_id', 'guild_id'}
         self.media_cache = {}
 
         # Tracked embeds for deletion monitoring
-        self.tracked_embeds = {}  # message_id -> {'action_id': str, 'type': str}
+        self.tracked_embeds = {}
 
-        # Start background tasks
+        # Record this startup
+        _db_exec(self._db,
+                 "INSERT INTO mod_startup_log (startup_time) VALUES (?)",
+                 (int(datetime.utcnow().timestamp()),))
+
+        # Background tasks
         self.check_expired_mutes.start()
         self.cleanup_invites.start()
         self.send_daily_report.start()
+        self.resolve_expired_appeals.start()
 
-        self.bot.logger.log(MODULE_NAME, "Moderation system initialized")
+        bot.logger.log(MODULE_NAME, "Moderation system initialised (SQLite)")
 
-    # ==================== JSON HELPERS ====================
+    # ==================== DB HELPERS ====================
 
-    def _load_json(self, filepath, default):
-        try:
-            with open(filepath, 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return default
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, f"Failed to load {filepath}", e)
-            return default
+    def _conn(self) -> sqlite3.Connection:
+        return _conn(self._db)
 
-    def _save_json(self, filepath, data):
-        try:
-            # Write to temporary file first for atomicity
-            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(filepath), suffix='.tmp')
-            with os.fdopen(fd, 'w') as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp, filepath)
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, f"Failed to save {filepath}", e)
+    def _exec(self, query: str, params: tuple = ()):
+        _db_exec(self._db, query, params)
+
+    def _one(self, query: str, params: tuple = ()):
+        return _db_one(self._db, query, params)
+
+    def _all(self, query: str, params: tuple = ()):
+        return _db_all(self._db, query, params)
 
     # ==================== ROLE PERSISTENCE ====================
 
     def save_member_roles(self, member: discord.Member):
         gk, uk = str(member.guild.id), str(member.id)
-        self.role_cache.setdefault(gk, {})[uk] = {
-            'role_ids': [r.id for r in member.roles if r.id != member.guild.id],
-            'saved_at': datetime.utcnow().isoformat(),
-            'username': str(member)
-        }
-        self._save_json(self.roles_file, self.role_cache)
+        role_ids = json.dumps([r.id for r in member.roles if r.id != member.guild.id])
+        self._exec(
+            "INSERT INTO mod_member_roles (guild_id, user_id, role_ids, saved_at, username) "
+            "VALUES (?,?,?,?,?) ON CONFLICT(guild_id, user_id) DO UPDATE SET "
+            "role_ids=excluded.role_ids, saved_at=excluded.saved_at, username=excluded.username",
+            (gk, uk, role_ids, datetime.utcnow().isoformat(), str(member)),
+        )
 
     async def restore_member_roles(self, member: discord.Member):
         gk, uk = str(member.guild.id), str(member.id)
-        saved = self.role_cache.get(gk, {}).get(uk)
-        if not saved:
+        row = self._one(
+            "SELECT role_ids FROM mod_member_roles WHERE guild_id=? AND user_id=?",
+            (gk, uk))
+        if not row:
             return
-        roles = [member.guild.get_role(rid) for rid in saved.get('role_ids', [])]
+        role_ids = json.loads(row["role_ids"])
+        roles = [member.guild.get_role(rid) for rid in role_ids]
         roles = [r for r in roles if r]
         if not roles:
             return
@@ -855,89 +1192,80 @@ class ModerationSystem:
     # ==================== STRIKE SYSTEM ====================
 
     def add_strike(self, user_id, reason) -> int:
-        key = str(user_id)
-        self.strikes.setdefault(key, []).append({
-            'timestamp': datetime.utcnow().isoformat(),
-            'reason': reason
-        })
-        self._save_json(self.strikes_file, self.strikes)
-        return len(self.strikes[key])
+        self._exec(
+            "INSERT INTO mod_strikes (user_id, timestamp, reason) VALUES (?,?,?)",
+            (str(user_id), datetime.utcnow().isoformat(), reason),
+        )
+        return self.get_strikes(user_id)
 
     def get_strikes(self, user_id) -> int:
-        return len(self.strikes.get(str(user_id), []))
+        row = self._one(
+            "SELECT COUNT(*) AS cnt FROM mod_strikes WHERE user_id=?",
+            (str(user_id),))
+        return row["cnt"] if row else 0
 
     def get_strike_details(self, user_id) -> list:
-        return self.strikes.get(str(user_id), [])
+        rows = self._all(
+            "SELECT timestamp, reason FROM mod_strikes WHERE user_id=? ORDER BY id",
+            (str(user_id),))
+        return [{"timestamp": r["timestamp"], "reason": r["reason"]} for r in rows]
 
     def clear_strikes(self, user_id) -> bool:
-        key = str(user_id)
-        if key in self.strikes:
-            del self.strikes[key]
-            self._save_json(self.strikes_file, self.strikes)
-            return True
-        return False
+        count = self.get_strikes(user_id)
+        if count == 0:
+            return False
+        self._exec("DELETE FROM mod_strikes WHERE user_id=?", (str(user_id),))
+        return True
 
     # ==================== MUTE MANAGER ====================
 
     def add_mute(self, guild_id, user_id, reason, moderator, duration_seconds=None):
-        gk, uk = str(guild_id), str(user_id)
         expiry = None
         if duration_seconds:
             expiry = (datetime.utcnow() + timedelta(seconds=duration_seconds)).isoformat()
-        self.mutes.setdefault(gk, {})[uk] = {
-            'user_id': user_id,
-            'reason': reason,
-            'moderator': str(moderator),
-            'timestamp': datetime.utcnow().isoformat(),
-            'duration_seconds': duration_seconds,
-            'expiry_time': expiry
-        }
-        self._save_json(self.mutes_file, self.mutes)
+        self._exec(
+            "INSERT INTO mod_mutes (guild_id, user_id, reason, moderator, timestamp, "
+            "duration_seconds, expiry_time) VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET "
+            "reason=excluded.reason, moderator=excluded.moderator, "
+            "timestamp=excluded.timestamp, duration_seconds=excluded.duration_seconds, "
+            "expiry_time=excluded.expiry_time",
+            (str(guild_id), str(user_id), reason, str(moderator),
+             datetime.utcnow().isoformat(), duration_seconds, expiry),
+        )
 
     def remove_mute(self, guild_id, user_id):
-        gk, uk = str(guild_id), str(user_id)
-        if gk in self.mutes and uk in self.mutes[gk]:
-            del self.mutes[gk][uk]
-            self._save_json(self.mutes_file, self.mutes)
+        self._exec(
+            "DELETE FROM mod_mutes WHERE guild_id=? AND user_id=?",
+            (str(guild_id), str(user_id)),
+        )
 
     def is_muted(self, guild_id, user_id) -> bool:
-        return str(user_id) in self.mutes.get(str(guild_id), {})
+        row = self._one(
+            "SELECT 1 FROM mod_mutes WHERE guild_id=? AND user_id=?",
+            (str(guild_id), str(user_id)))
+        return row is not None
 
     def get_expired_mutes(self) -> list:
-        expired, now = [], datetime.utcnow()
-        for gk, users in self.mutes.items():
-            for uk, data in users.items():
-                expiry = data.get('expiry_time')
-                if expiry:
-                    try:
-                        if now >= datetime.fromisoformat(expiry):
-                            expired.append({
-                                'guild_id': int(gk),
-                                'user_id': data['user_id'],
-                                'user_key': uk,
-                                'guild_key': gk
-                            })
-                    except (ValueError, AttributeError):
-                        pass
-        return expired
-
-    # ==================== OVERSIGHT: CONTEXT & CACHE ====================
+        now  = datetime.utcnow().isoformat()
+        rows = self._all(
+            "SELECT guild_id, user_id FROM mod_mutes "
+            "WHERE expiry_time IS NOT NULL AND expiry_time <= ?",
+            (now,))
+        return [{"guild_id": int(r["guild_id"]), "user_id": int(r["user_id"])} for r in rows]
 
     # ==================== MEDIA CACHE HELPERS ====================
 
     def _encrypt_to_disk(self, message_id: int, index: int, data: bytes) -> Path:
-        """Encrypt raw attachment bytes and write to a uniquely named file on disk."""
         encrypted = self._fernet.encrypt(data)
-        path = self.media_dir / f"{message_id}_{index}.enc"
+        path      = self.media_dir / f"{message_id}_{index}.enc"
         path.write_bytes(encrypted)
         return path
 
     def _decrypt_from_disk(self, path: Path) -> bytes:
-        """Read an encrypted file from disk and return the original bytes."""
         return self._fernet.decrypt(path.read_bytes())
 
     def _delete_media_files(self, message_id: int):
-        """Delete all encrypted files on disk for a given message and remove from index."""
         entry = self.media_cache.pop(message_id, None)
         if not entry:
             return
@@ -948,95 +1276,89 @@ class ModerationSystem:
                 pass
 
     async def cache_message(self, message: discord.Message):
-        """Cache a message for context logging and encrypt any media attachments to disk."""
         if message.guild is None or message.author.bot:
             return
-        guild_id = str(message.guild.id)
+        guild_id   = str(message.guild.id)
         channel_id = str(message.channel.id)
-        if guild_id not in self.message_cache:
-            self.message_cache[guild_id] = {}
-        if channel_id not in self.message_cache[guild_id]:
-            self.message_cache[guild_id][channel_id] = []
+        self.message_cache.setdefault(guild_id, {}).setdefault(channel_id, [])
 
-        # Download and encrypt each attachment to disk
         downloaded = []
         for idx, att in enumerate(message.attachments):
             try:
                 data = await att.read()
                 path = self._encrypt_to_disk(message.id, idx, data)
                 downloaded.append({
-                    'filename': att.filename,
-                    'path': path,
+                    'filename':     att.filename,
+                    'path':         path,
                     'content_type': att.content_type or 'application/octet-stream',
-                    'url': att.url,
+                    'url':          att.url,
                 })
             except Exception as e:
-                self.bot.logger.log(MODULE_NAME, f"Failed to cache attachment {att.filename}: {e}", "WARNING")
+                self.bot.logger.log(
+                    MODULE_NAME,
+                    f"Failed to cache attachment {att.filename}: {e}", "WARNING")
 
         if downloaded:
             self.media_cache[message.id] = {
-                'files': downloaded,
+                'files':     downloaded,
                 'author_id': message.author.id,
-                'guild_id': message.guild.id,
+                'guild_id':  message.guild.id,
             }
 
         msg_data = {
-            'id': message.id,
-            'author': str(message.author),
-            'author_id': message.author.id,
-            'content': message.content,
-            'timestamp': message.created_at.isoformat(),
+            'id':          message.id,
+            'author':      str(message.author),
+            'author_id':   message.author.id,
+            'content':     message.content,
+            'timestamp':   message.created_at.isoformat(),
             'attachments': [att.url for att in message.attachments],
-            'embeds': len(message.embeds)
+            'embeds':      len(message.embeds),
         }
-        self.message_cache[guild_id][channel_id].append(msg_data)
-        # Keep only last 100 messages per channel; evict + delete encrypted files for pushed-out message
-        if len(self.message_cache[guild_id][channel_id]) > 100:
-            evicted = self.message_cache[guild_id][channel_id].pop(0)
-            evicted_id = evicted.get('id')
-            if evicted_id:
-                self._delete_media_files(evicted_id)
+        cache_list = self.message_cache[guild_id][channel_id]
+        cache_list.append(msg_data)
+        if len(cache_list) > 100:
+            evicted = cache_list.pop(0)
+            if evicted.get('id'):
+                self._delete_media_files(evicted['id'])
 
-    def get_context_messages(self, guild_id: int, channel_id: int, around_message_id: int, count: int = None) -> List[Dict]:
-        """Get messages around a specific message ID."""
+    def get_context_messages(
+        self, guild_id: int, channel_id: int,
+        around_message_id: int, count: int = None
+    ) -> List[Dict]:
         if count is None:
-            count = CONTEXT_MESSAGE_COUNT
-        guild_key = str(guild_id)
-        channel_key = str(channel_id)
-        if guild_key not in self.message_cache or channel_key not in self.message_cache[guild_key]:
-            return []
-        messages = self.message_cache[guild_key][channel_key]
-        target_idx = None
-        for i, msg in enumerate(messages):
-            if msg['id'] == around_message_id:
-                target_idx = i
-                break
+            count = self.cfg.context_message_count
+        messages = self.message_cache.get(str(guild_id), {}).get(str(channel_id), [])
+        target_idx = next(
+            (i for i, m in enumerate(messages) if m['id'] == around_message_id), None)
         if target_idx is None:
             return messages[-count:]
-        half = count // 2
+        half  = count // 2
         start = max(0, target_idx - half)
-        end = min(len(messages), target_idx + half + 1)
+        end   = min(len(messages), target_idx + half + 1)
         return messages[start:end]
 
-    def generate_context_screenshot(self, messages: List[Dict], highlighted_msg_id: Optional[int] = None) -> io.BytesIO:
-        """Generate a synthetic screenshot of message context."""
-        width = 800
+    def generate_context_screenshot(
+        self, messages: List[Dict], highlighted_msg_id: Optional[int] = None
+    ) -> io.BytesIO:
+        width       = 800
         line_height = 60
-        padding = 20
-        height = len(messages) * line_height + padding * 2
-        img = Image.new('RGB', (width, height), color='#36393f')
-        draw = ImageDraw.Draw(img)
+        padding     = 20
+        height      = len(messages) * line_height + padding * 2
+        img         = Image.new('RGB', (width, height), color='#36393f')
+        draw        = ImageDraw.Draw(img)
         try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
-            font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
-        except:
-            font = ImageFont.load_default()
+            font      = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
+            font_bold = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
+        except Exception:
+            font      = ImageFont.load_default()
             font_bold = font
         y = padding
         for msg in messages:
             if highlighted_msg_id and msg['id'] == highlighted_msg_id:
                 draw.rectangle([0, y - 5, width, y + line_height - 5], fill='#4a4d52')
-            timestamp = datetime.fromisoformat(msg['timestamp']).strftime("%H:%M")
+            timestamp   = datetime.fromisoformat(msg['timestamp']).strftime("%H:%M")
             author_text = f"{msg['author']} - {timestamp}"
             draw.text((padding, y), author_text, fill='#7289da', font=font_bold)
             content = msg['content'][:100]
@@ -1058,59 +1380,88 @@ class ModerationSystem:
     # ==================== OVERSIGHT: LOGGING ACTIONS ====================
 
     async def log_mod_action(self, action_data: Dict) -> Optional[str]:
-        """
-        Log a moderation action. Returns action ID if logged, None if ignored (mute/warn/timeout).
-        """
         if action_data['action'] in ['mute', 'warn', 'timeout']:
             return None
-        action_id = f"{action_data['guild_id']}_{action_data['action']}_{int(datetime.utcnow().timestamp())}"
+        action_id = (f"{action_data['guild_id']}_{action_data['action']}_"
+                     f"{int(datetime.utcnow().timestamp())}")
         context_messages = []
         if 'message_id' in action_data and 'channel_id' in action_data:
             context_messages = self.get_context_messages(
                 action_data['guild_id'],
                 action_data['channel_id'],
-                action_data['message_id']
+                action_data['message_id'],
             )
-        action_record = {
-            'id': action_id,
-            'action': action_data['action'],
-            'moderator_id': action_data['moderator_id'],
-            'moderator': action_data['moderator'],
-            'user_id': action_data.get('user_id'),
-            'user': action_data.get('user'),
-            'reason': action_data['reason'],
-            'guild_id': action_data['guild_id'],
-            'channel_id': action_data.get('channel_id'),
-            'message_id': action_data.get('message_id'),
-            'timestamp': datetime.utcnow().isoformat(),
-            'context_messages': context_messages,
-            'duration': action_data.get('duration'),
-            'additional': action_data.get('additional', {}),
-            'flags': [],
-            'embed_ids': {'inchat': None, 'botlog': None},
-            'status': 'pending'
-        }
-        self.pending_actions[action_id] = action_record
-        self._save_json(self.oversight_file, self.pending_actions)
-        self.bot.logger.log(MODULE_NAME, f"Logged mod action: {action_id} by {action_data['moderator']}")
+        self._exec(
+            "INSERT OR REPLACE INTO mod_pending_actions "
+            "(action_id, action, moderator_id, moderator, user_id, user_name, reason, "
+            " guild_id, channel_id, message_id, timestamp, context_messages, duration, "
+            " additional, flags, embed_id_inchat, embed_id_botlog, status) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,'pending')",
+            (
+                action_id,
+                action_data['action'],
+                action_data['moderator_id'],
+                action_data['moderator'],
+                action_data.get('user_id'),
+                action_data.get('user'),
+                action_data['reason'],
+                action_data['guild_id'],
+                action_data.get('channel_id'),
+                action_data.get('message_id'),
+                datetime.utcnow().isoformat(),
+                json.dumps(context_messages),
+                action_data.get('duration'),
+                json.dumps(action_data.get('additional', {})),
+                json.dumps([]),
+            ),
+        )
+        self.bot.logger.log(
+            MODULE_NAME,
+            f"Logged mod action: {action_id} by {action_data['moderator']}")
         return action_id
 
-    def resolve_pending_action(self, user_id: int, action_type: str):
-        """Remove pending actions for a user when manually undone."""
-        to_delete = []
-        for aid, act in self.pending_actions.items():
-            if act.get('user_id') == user_id and act.get('action') == action_type and act.get('status') == 'pending':
-                to_delete.append(aid)
-        if to_delete:
-            for aid in to_delete:
-                del self.pending_actions[aid]
-            self._save_json(self.oversight_file, self.pending_actions)
-            self.bot.logger.log(MODULE_NAME, f"Resolved {len(to_delete)} pending {action_type} for user {user_id}")
-            return True
-        return False
+    def _get_pending_action(self, action_id: str) -> Optional[Dict]:
+        row = self._one(
+            "SELECT * FROM mod_pending_actions WHERE action_id=?", (action_id,))
+        if not row:
+            return None
+        return self._row_to_action(row)
 
-    async def send_cached_media_to_logs(self, guild: discord.Guild, message_id: int, author_str: str, reason: str, extra_content: str = None):
-        """Decrypt cached media from disk and upload to bot-logs with fresh Discord-hosted links."""
+    def _row_to_action(self, row) -> Dict:
+        return {
+            'id':               row["action_id"],
+            'action':           row["action"],
+            'moderator_id':     row["moderator_id"],
+            'moderator':        row["moderator"],
+            'user_id':          row["user_id"],
+            'user':             row["user_name"],
+            'reason':           row["reason"],
+            'guild_id':         row["guild_id"],
+            'channel_id':       row["channel_id"],
+            'message_id':       row["message_id"],
+            'timestamp':        row["timestamp"],
+            'context_messages': json.loads(row["context_messages"] or "[]"),
+            'duration':         row["duration"],
+            'additional':       json.loads(row["additional"] or "{}"),
+            'flags':            json.loads(row["flags"] or "[]"),
+            'embed_ids': {
+                'inchat': row["embed_id_inchat"],
+                'botlog': row["embed_id_botlog"],
+            },
+            'status': row["status"],
+        }
+
+    def resolve_pending_action(self, user_id: int, action_type: str):
+        self._exec(
+            "DELETE FROM mod_pending_actions "
+            "WHERE user_id=? AND action=? AND status='pending'",
+            (user_id, action_type),
+        )
+
+    async def send_cached_media_to_logs(
+        self, guild: discord.Guild, message_id: int,
+        author_str: str, reason: str, extra_content: str = None
+    ):
         bot_logs = self._get_bot_logs_channel(guild)
         if not bot_logs:
             return
@@ -1123,103 +1474,110 @@ class ModerationSystem:
                 data = self._decrypt_from_disk(f['path'])
                 files.append(discord.File(fp=io.BytesIO(data), filename=f['filename']))
             except Exception as e:
-                self.bot.logger.log(MODULE_NAME, f"Failed to decrypt cached file {f['filename']}: {e}", "WARNING")
+                self.bot.logger.log(
+                    MODULE_NAME,
+                    f"Failed to decrypt cached file {f['filename']}: {e}", "WARNING")
         if not files:
             return
         embed = discord.Embed(
-            title=reason,
-            color=discord.Color.orange(),
-            timestamp=__import__('datetime').datetime.utcnow(),
-        )
-        embed.add_field(name="User", value=author_str, inline=True)
-        embed.add_field(name="Message ID", value=str(message_id), inline=True)
+            title=reason, color=discord.Color.orange(),
+            timestamp=datetime.utcnow())
+        embed.add_field(name="User",       value=author_str,           inline=True)
+        embed.add_field(name="Message ID", value=str(message_id),      inline=True)
         if extra_content:
-            embed.add_field(name="Message Content", value=extra_content[:1024] or "*empty*", inline=False)
+            embed.add_field(name="Message Content",
+                            value=extra_content[:1024] or "*empty*", inline=False)
         embed.set_footer(text=f"{len(files)} attachment(s) re-hosted below")
         await self.send_bot_log(guild, embed, files_data=cached['files'])
 
     def track_embed(self, message_id: int, action_id: str, embed_type: str):
-        """Track an embed for deletion monitoring."""
         self.tracked_embeds[message_id] = {'action_id': action_id, 'type': embed_type}
-        if action_id in self.pending_actions:
-            self.pending_actions[action_id]['embed_ids'][embed_type] = message_id
-            self._save_json(self.oversight_file, self.pending_actions)
+        col = "embed_id_inchat" if embed_type == 'inchat' else "embed_id_botlog"
+        self._exec(
+            f"UPDATE mod_pending_actions SET {col}=? WHERE action_id=?",
+            (message_id, action_id),
+        )
 
     async def handle_embed_deletion(self, message_id: int):
-        """Handle when a tracked embed is deleted."""
         if message_id not in self.tracked_embeds:
             return
-        info = self.tracked_embeds.pop(message_id)
+        info      = self.tracked_embeds.pop(message_id)
         action_id = info['action_id']
         embed_type = info['type']
-        if action_id not in self.pending_actions:
+
+        row = self._one(
+            "SELECT flags FROM mod_pending_actions WHERE action_id=?", (action_id,))
+        if not row:
             return
-        action = self.pending_actions[action_id]
+        flags = json.loads(row["flags"] or "[]")
+
         if embed_type == 'inchat':
-            if 'inchat_deleted' not in action['flags']:
-                action['flags'].append('inchat_deleted')
+            if 'inchat_deleted' not in flags:
+                flags.append('inchat_deleted')
         else:
-            if 'botlog_deleted' not in action['flags']:
-                action['flags'].append('botlog_deleted')
-        inchat_deleted = 'inchat_deleted' in action['flags']
-        botlog_deleted = 'botlog_deleted' in action['flags']
+            if 'botlog_deleted' not in flags:
+                flags.append('botlog_deleted')
+
+        inchat_deleted = 'inchat_deleted' in flags
+        botlog_deleted = 'botlog_deleted' in flags
         if inchat_deleted and botlog_deleted:
-            if 'red_flag' not in action['flags']:
-                action['flags'].append('red_flag')
-                self.bot.logger.log(MODULE_NAME, f"🚩 RED FLAG: Both embeds deleted for action {action_id}", "WARNING")
+            if 'red_flag' not in flags:
+                flags.append('red_flag')
+                self.bot.logger.log(
+                    MODULE_NAME,
+                    f"🚩 RED FLAG: Both embeds deleted for action {action_id}", "WARNING")
         elif inchat_deleted or botlog_deleted:
-            if 'yellow_flag' not in action['flags']:
-                action['flags'].append('yellow_flag')
-                self.bot.logger.log(MODULE_NAME, f"⚠️ YELLOW FLAG: Embed deleted for action {action_id}", "WARNING")
-        self._save_json(self.oversight_file, self.pending_actions)
+            if 'yellow_flag' not in flags:
+                flags.append('yellow_flag')
+                self.bot.logger.log(
+                    MODULE_NAME,
+                    f"⚠️ YELLOW FLAG: Embed deleted for action {action_id}", "WARNING")
+
+        self._exec(
+            "UPDATE mod_pending_actions SET flags=? WHERE action_id=?",
+            (json.dumps(flags), action_id),
+        )
 
     # ==================== OVERSIGHT: ACTION REVIEW ====================
 
     async def approve_action(self, action_id: str) -> bool:
-        if action_id not in self.pending_actions:
+        row = self._one(
+            "SELECT 1 FROM mod_pending_actions WHERE action_id=?", (action_id,))
+        if not row:
             return False
-        action = self.pending_actions[action_id]
-        action['status'] = 'approved'
-        action['reviewed_at'] = datetime.utcnow().isoformat()
-        del self.pending_actions[action_id]
-        self._save_json(self.oversight_file, self.pending_actions)
+        self._exec(
+            "DELETE FROM mod_pending_actions WHERE action_id=?", (action_id,))
         self.bot.logger.log(MODULE_NAME, f"Action {action_id} approved")
         return True
 
     async def revert_action(self, action_id: str, guild: discord.Guild) -> bool:
-        if action_id not in self.pending_actions:
+        action = self._get_pending_action(action_id)
+        if not action:
             return False
-        action = self.pending_actions[action_id]
         if action['action'] == 'ban':
             return await self._revert_ban(action, guild)
         elif action['action'] == 'mute':
             return await self._revert_mute(action, guild)
-        elif action['action'] == 'kick':
-            action['status'] = 'reverted'
-            action['reviewed_at'] = datetime.utcnow().isoformat()
-            self._save_json(self.oversight_file, self.pending_actions)
-            self.bot.logger.log(MODULE_NAME, f"Kick action {action_id} marked reverted (cannot undo)")
+        else:
+            self._exec(
+                "DELETE FROM mod_pending_actions WHERE action_id=?", (action_id,))
             return True
-        # For other actions, just mark reverted
-        action['status'] = 'reverted'
-        action['reviewed_at'] = datetime.utcnow().isoformat()
-        self._save_json(self.oversight_file, self.pending_actions)
-        return True
 
     async def _revert_ban(self, action: Dict, guild: discord.Guild) -> bool:
         try:
             user_id = action['user_id']
-            user = await self.bot.fetch_user(user_id)
+            user    = await self.bot.fetch_user(user_id)
             await guild.unban(user, reason="Ban reverted after review")
             invite_link = await self._create_ban_reversal_invite(guild, user_id)
             try:
                 embed = discord.Embed(
                     title="Ban Reverted",
-                    description=f"After reviewing your case, we've decided to revert your ban from **{guild.name}**.",
-                    color=0x2ecc71,
-                    timestamp=datetime.utcnow()
-                )
-                embed.add_field(name="Rejoin Server", value=f"You can rejoin using this invite:\n{invite_link}", inline=False)
+                    description=f"After reviewing your case, we've decided to revert "
+                                f"your ban from **{guild.name}**.",
+                    color=0x2ecc71, timestamp=datetime.utcnow())
+                embed.add_field(name="Rejoin Server",
+                                value=f"You can rejoin using this invite:\n{invite_link}",
+                                inline=False)
                 embed.set_footer(text="This invite is for you only and will not expire")
                 await user.send(embed=embed)
             except discord.Forbidden:
@@ -1229,17 +1587,12 @@ class ModerationSystem:
                 log_embed = discord.Embed(
                     title="Ban Reverted (Review System)",
                     description=f"**{user}** ({user_id}) has been unbanned after review.",
-                    color=0x2ecc71,
-                    timestamp=datetime.utcnow()
-                )
+                    color=0x2ecc71, timestamp=datetime.utcnow())
                 log_embed.add_field(name="Original Reason", value=action['reason'], inline=False)
                 log_embed.add_field(name="Original Moderator", value=action['moderator'], inline=True)
                 await self.send_bot_log(guild, log_embed)
-            action['status'] = 'reverted'
-            action['reviewed_at'] = datetime.utcnow().isoformat()
-            del self.pending_actions[action['id']]
-            self._save_json(self.oversight_file, self.pending_actions)
-            self.bot.logger.log(MODULE_NAME, f"Ban reverted for user {user_id}")
+            self._exec(
+                "DELETE FROM mod_pending_actions WHERE action_id=?", (action['id'],))
             return True
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, f"Failed to revert ban {action['id']}", e)
@@ -1247,20 +1600,19 @@ class ModerationSystem:
 
     async def _revert_mute(self, action: Dict, guild: discord.Guild) -> bool:
         try:
-            user_id = action['user_id']
-            member = guild.get_member(user_id)
+            user_id    = action['user_id']
+            member     = guild.get_member(user_id)
             if not member:
                 return False
-            muted_role = discord.utils.get(guild.roles, name=MUTED_ROLE_NAME)
+            muted_role = discord.utils.get(guild.roles, name=self.cfg.muted_role_name)
             if muted_role and muted_role in member.roles:
                 await member.remove_roles(muted_role, reason="Mute reverted after review")
             try:
                 embed = discord.Embed(
                     title="Mute Reverted",
-                    description=f"After reviewing your case, your mute in **{guild.name}** has been reverted.",
-                    color=0x2ecc71,
-                    timestamp=datetime.utcnow()
-                )
+                    description=f"After reviewing your case, your mute in "
+                                f"**{guild.name}** has been reverted.",
+                    color=0x2ecc71, timestamp=datetime.utcnow())
                 await member.send(embed=embed)
             except discord.Forbidden:
                 pass
@@ -1269,17 +1621,12 @@ class ModerationSystem:
                 log_embed = discord.Embed(
                     title="Mute Reverted (Review System)",
                     description=f"**{member}** has been unmuted after review.",
-                    color=0x2ecc71,
-                    timestamp=datetime.utcnow()
-                )
+                    color=0x2ecc71, timestamp=datetime.utcnow())
                 log_embed.add_field(name="Original Reason", value=action['reason'], inline=False)
                 log_embed.add_field(name="Original Moderator", value=action['moderator'], inline=True)
                 await self.send_bot_log(guild, log_embed)
-            action['status'] = 'reverted'
-            action['reviewed_at'] = datetime.utcnow().isoformat()
-            del self.pending_actions[action['id']]
-            self._save_json(self.oversight_file, self.pending_actions)
-            self.bot.logger.log(MODULE_NAME, f"Mute reverted for user {user_id}")
+            self._exec(
+                "DELETE FROM mod_pending_actions WHERE action_id=?", (action['id'],))
             return True
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, f"Failed to revert mute {action['id']}", e)
@@ -1287,37 +1634,32 @@ class ModerationSystem:
 
     async def _create_ban_reversal_invite(self, guild: discord.Guild, user_id: int) -> str:
         try:
-            channel = None
-            for ch in guild.text_channels:
-                if ch.permissions_for(guild.me).create_instant_invite:
-                    channel = ch
-                    break
+            channel = next(
+                (ch for ch in guild.text_channels
+                 if ch.permissions_for(guild.me).create_instant_invite),
+                None,
+            )
             if not channel:
                 return "Could not create invite - no suitable channel"
             invite = await channel.create_invite(
-                max_uses=1,
-                max_age=0,
-                unique=True,
-                reason=f"Ban reversal for user {user_id}"
-            )
+                max_uses=1, max_age=0, unique=True,
+                reason=f"Ban reversal for user {user_id}")
             key = f"{guild.id}_{user_id}"
-            self.invites[key] = {
-                'code': invite.code,
-                'user_id': user_id,
-                'guild_id': guild.id,
-                'created_at': datetime.utcnow().isoformat()
-            }
-            self._save_json(self.invites_file, self.invites)
+            self._exec(
+                "INSERT INTO mod_invites (invite_key, code, user_id, guild_id, created_at) "
+                "VALUES (?,?,?,?,?) ON CONFLICT(invite_key) DO UPDATE SET "
+                "code=excluded.code, created_at=excluded.created_at",
+                (key, invite.code, user_id, guild.id, datetime.utcnow().isoformat()),
+            )
             return invite.url
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to create ban reversal invite", e)
             return "Error creating invite"
 
     def _get_bot_logs_channel(self, guild: discord.Guild) -> Optional[discord.TextChannel]:
-        bot_logs_id = CONFIG["channels"]["bot_logs_channel_id"]
-        if bot_logs_id:
-            return guild.get_channel(bot_logs_id)
-        # Fallback to logger module
+        ch_id = self.cfg.bot_logs_channel_id
+        if ch_id:
+            return guild.get_channel(ch_id)
         logger = get_event_logger(self.bot)
         if logger:
             return logger.get_bot_logs_channel(guild)
@@ -1326,59 +1668,52 @@ class ModerationSystem:
     def _register_bot_log(self, message_id: int, log_id: str, embed: discord.Embed,
                            files_data: list = None, is_warning: bool = False,
                            warning_for_log_id: str = None):
-        """Register a sent bot-log message in the rolling cache."""
         record = {
-            'log_id': log_id,
-            'message_id': message_id,
+            'log_id':              log_id,
+            'message_id':          message_id,
             'embed': {
-                'title': embed.title,
+                'title':       embed.title,
                 'description': embed.description,
-                'color': embed.color.value if embed.color else 0,
-                'fields': [{'name': f.name, 'value': f.value, 'inline': f.inline} for f in embed.fields],
-                'footer': embed.footer.text if embed.footer else None,
-                'image_url': embed.image.url if embed.image else None,
+                'color':       embed.color.value if embed.color else 0,
+                'fields':      [{'name': f.name, 'value': f.value, 'inline': f.inline}
+                                 for f in embed.fields],
+                'footer':      embed.footer.text if embed.footer else None,
+                'image_url':   embed.image.url if embed.image else None,
                 'author_name': embed.author.name if embed.author else None,
                 'author_icon': embed.author.icon_url if embed.author else None,
             },
-            'files_data': files_data or [],  # list of {'filename': str, 'data': bytes}
-            'is_warning': is_warning,
-            'warning_for_log_id': warning_for_log_id,
-            'timestamp': datetime.utcnow().isoformat(),
+            'files_data':          files_data or [],
+            'is_warning':          is_warning,
+            'warning_for_log_id':  warning_for_log_id,
+            'timestamp':           datetime.utcnow().isoformat(),
         }
         self._bot_log_cache[message_id] = record
         self._bot_log_order.append(message_id)
-        # Evict oldest if over capacity
         while len(self._bot_log_order) > self._bot_log_cache_size:
-            oldest_id = self._bot_log_order.popleft()
-            self._bot_log_cache.pop(oldest_id, None)
+            self._bot_log_cache.pop(self._bot_log_order.popleft(), None)
 
-    async def send_bot_log(self, guild: discord.Guild, embed: discord.Embed,
-                           files_data: list = None, log_id: str = None) -> Optional[int]:
-        """Send an embed to bot-logs and register it in the cache. Returns message_id.
-        Any image/video files are scanned by MediaScanner before upload."""
+    async def send_bot_log(
+        self, guild: discord.Guild, embed: discord.Embed,
+        files_data: list = None, log_id: str = None
+    ) -> Optional[int]:
         bot_logs = self._get_bot_logs_channel(guild)
         if not bot_logs:
             return None
         if log_id is None:
             log_id = f"LOG-{int(datetime.utcnow().timestamp() * 1000)}"
 
-        # Scan files through MediaScanner before uploading
         if files_data:
             verdict = await self.scanner.scan_files(
-                files_data,
-                guild=guild,
-                context=f"bot-log send (log_id={log_id})",
-            )
+                files_data, guild=guild,
+                context=f"bot-log send (log_id={log_id})")
             if verdict.blocked and not verdict.safe_files:
-                # All files blocked — send embed-only with a note, no files
                 embed.add_field(
                     name="⚠️ Attachment(s) Withheld",
-                    value="One or more files were blocked by MediaScanner. The server owner has been alerted.",
-                    inline=False,
-                )
+                    value="One or more files were blocked by MediaScanner. "
+                          "The server owner has been alerted.",
+                    inline=False)
                 files_data = None
             elif verdict.blocked:
-                # Some files blocked — only upload the safe ones
                 files_data = verdict.safe_files
 
         try:
@@ -1396,91 +1731,139 @@ class ModerationSystem:
             self.bot.logger.error(MODULE_NAME, f"Failed to send bot log: {e}")
             return None
 
-    async def handle_bot_log_deletion(self, message_id: int, deleter: discord.Member, guild: discord.Guild):
-        """Called when a bot-logs message is deleted by an elevated user."""
+    async def handle_bot_log_deletion(
+        self, message_id: int, deleter: discord.Member, guild: discord.Guild
+    ):
         record = self._bot_log_cache.get(message_id)
         if not record:
             return
 
-        log_id = record['log_id']
+        log_id             = record['log_id']
         original_embed_data = record['embed']
-        timestamp = datetime.utcnow()
+        timestamp           = datetime.utcnow()
 
-        self.deletion_attempts.append({
-            'log_id': log_id,
-            'deleter': str(deleter),
-            'deleter_id': deleter.id,
-            'timestamp': timestamp.isoformat(),
-            'original_title': original_embed_data.get('title') or '(no title)',
-            'is_warning': record.get('is_warning', False),
-        })
+        # Persist to deletion_attempts table for daily report
+        self._exec(
+            "INSERT INTO mod_deletion_attempts "
+            "(log_id, deleter, deleter_id, timestamp, original_title, is_warning) "
+            "VALUES (?,?,?,?,?,?)",
+            (
+                log_id, str(deleter), deleter.id,
+                timestamp.isoformat(),
+                original_embed_data.get('title') or '(no title)',
+                int(record.get('is_warning', False)),
+            ),
+        )
+        self.bot.logger.log(
+            MODULE_NAME,
+            f"⚠️ Bot-log deletion attempted by {deleter} (ID: {deleter.id}) "
+            f"for log {log_id}", "WARNING")
 
-        self.bot.logger.log(MODULE_NAME,
-            f"⚠️ Bot-log deletion attempted by {deleter} (ID: {deleter.id}) for log {log_id}", "WARNING")
-
-        # Rebuild original embed, turn it red, append deletion attempt info — one single message
         embed = discord.Embed(
             title=original_embed_data.get('title'),
             description=original_embed_data.get('description'),
-            color=0xff0000,
-            timestamp=timestamp,
-        )
+            color=0xff0000, timestamp=timestamp)
         for field in original_embed_data.get('fields', []):
-            embed.add_field(name=field['name'], value=field['value'], inline=field['inline'])
+            embed.add_field(
+                name=field['name'], value=field['value'], inline=field['inline'])
         if original_embed_data.get('author_name'):
             embed.set_author(
                 name=original_embed_data['author_name'],
-                icon_url=original_embed_data.get('author_icon') or discord.Embed.Empty,
-            )
+                icon_url=original_embed_data.get('author_icon') or discord.Embed.Empty)
         if original_embed_data.get('image_url'):
             embed.set_image(url=original_embed_data['image_url'])
-        embed.add_field(name="🚨 Deletion Attempted By",
-                        value=f"{deleter.mention} (`{deleter}` | `{deleter.id}`)", inline=False)
+        embed.add_field(
+            name="🚨 Deletion Attempted By",
+            value=f"{deleter.mention} (`{deleter}` | `{deleter.id}`)", inline=False)
         original_footer = original_embed_data.get('footer') or ''
-        embed.set_footer(text=f"{original_footer + ' • ' if original_footer else ''}Log ID: {log_id} • Deleting this will cause it to repost")
+        embed.set_footer(
+            text=f"{original_footer + ' • ' if original_footer else ''}"
+                 f"Log ID: {log_id} • Deleting this will cause it to repost")
 
-        new_msg_id = await self.send_bot_log(guild, embed,
-                                              files_data=record.get('files_data'),
-                                              log_id=log_id)
+        new_msg_id = await self.send_bot_log(
+            guild, embed, files_data=record.get('files_data'), log_id=log_id)
         if new_msg_id:
             self._deletion_warnings[new_msg_id] = log_id
 
     # ==================== OVERSIGHT: APPEALS ====================
 
+    def _get_appeal(self, appeal_id: str) -> Optional[sqlite3.Row]:
+        return self._one(
+            "SELECT * FROM mod_appeals WHERE appeal_id=?", (appeal_id,))
+
+    def _update_appeal_votes(self, appeal_id: str,
+                              votes_for: list, votes_against: list):
+        self._exec(
+            "UPDATE mod_appeals SET votes_for=?, votes_against=? WHERE appeal_id=?",
+            (json.dumps(votes_for), json.dumps(votes_against), appeal_id),
+        )
+
     async def submit_appeal(self, user_id: int, guild_id: int, appeal_text: str) -> str:
         appeal_id = f"{guild_id}_{user_id}_{int(datetime.utcnow().timestamp())}"
-        appeal_data = {
-            'id': appeal_id,
-            'user_id': user_id,
-            'guild_id': guild_id,
-            'appeal_text': appeal_text,
-            'submitted_at': datetime.utcnow().isoformat(),
-            'status': 'pending'
-        }
-        self.appeals[appeal_id] = appeal_data
-        self._save_json(self.appeals_file, self.appeals)
+        deadline  = (datetime.utcnow() + timedelta(hours=24)).isoformat()
+        self._exec(
+            "INSERT OR REPLACE INTO mod_appeals "
+            "(appeal_id, user_id, guild_id, appeal_text, submitted_at, deadline, "
+            " status, votes_for, votes_against, channel_message_id) "
+            "VALUES (?,?,?,?,?,?,'pending','[]','[]',NULL)",
+            (appeal_id, user_id, guild_id, appeal_text,
+             datetime.utcnow().isoformat(), deadline),
+        )
         self.bot.logger.log(MODULE_NAME, f"Appeal submitted: {appeal_id}")
+
+        try:
+            guild = self.bot.get_guild(guild_id)
+            if guild:
+                appeals_ch = discord.utils.get(guild.text_channels, name="ban-appeals")
+                if appeals_ch:
+                    user = await self.bot.fetch_user(user_id)
+                    embed = discord.Embed(
+                        title="📝 Ban Appeal",
+                        description=appeal_text,
+                        color=0x9b59b6, timestamp=datetime.utcnow())
+                    embed.add_field(name="User",
+                                    value=f"{user} (`{user_id}`)", inline=True)
+                    embed.add_field(
+                        name="Deadline",
+                        value=f"<t:{int((datetime.utcnow() + timedelta(hours=24)).timestamp())}:R>",
+                        inline=True)
+                    embed.set_footer(
+                        text=f"Appeal ID: {appeal_id} • "
+                             f"Voting closes in 24 hours • Ties are denied")
+                    view = AppealVoteView(self, appeal_id)
+                    msg  = await appeals_ch.send(embed=embed, view=view)
+                    self._exec(
+                        "UPDATE mod_appeals SET channel_message_id=? WHERE appeal_id=?",
+                        (msg.id, appeal_id),
+                    )
+                else:
+                    self.bot.logger.log(
+                        MODULE_NAME,
+                        "submit_appeal: #ban-appeals channel not found", "WARNING")
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "Failed to post appeal", e)
+
         return appeal_id
 
     async def approve_appeal(self, appeal_id: str) -> bool:
-        if appeal_id not in self.appeals:
+        row = self._get_appeal(appeal_id)
+        if not row:
             return False
-        appeal = self.appeals[appeal_id]
         try:
-            guild = self.bot.get_guild(appeal['guild_id'])
+            guild = self.bot.get_guild(row["guild_id"])
             if not guild:
                 return False
-            user = await self.bot.fetch_user(appeal['user_id'])
+            user        = await self.bot.fetch_user(row["user_id"])
+            invite_link = await self._create_ban_reversal_invite(guild, row["user_id"])
             await guild.unban(user, reason="Appeal approved")
-            invite_link = await self._create_ban_reversal_invite(guild, appeal['user_id'])
             try:
                 embed = discord.Embed(
                     title="Ban Appeal Approved",
                     description=f"Your appeal for **{guild.name}** has been approved!",
-                    color=0x2ecc71,
-                    timestamp=datetime.utcnow()
-                )
-                embed.add_field(name="Rejoin Server", value=f"You can rejoin using this invite:\n{invite_link}", inline=False)
+                    color=0x2ecc71, timestamp=datetime.utcnow())
+                embed.add_field(
+                    name="Rejoin Server",
+                    value=f"You can rejoin using this invite:\n{invite_link}", inline=False)
                 embed.set_footer(text="Welcome back!")
                 await user.send(embed=embed)
             except discord.Forbidden:
@@ -1490,41 +1873,32 @@ class ModerationSystem:
                 log_embed = discord.Embed(
                     title="Ban Appeal Approved",
                     description=f"**{user}** has been unbanned after appeal approval.",
-                    color=0x2ecc71,
-                    timestamp=datetime.utcnow()
-                )
-                log_embed.add_field(name="Appeal Text", value=appeal['appeal_text'][:1024], inline=False)
+                    color=0x2ecc71, timestamp=datetime.utcnow())
+                log_embed.add_field(name="Appeal Text",
+                                    value=row["appeal_text"][:1024], inline=False)
                 await self.send_bot_log(guild, log_embed)
-            appeal['status'] = 'approved'
-            appeal['reviewed_at'] = datetime.utcnow().isoformat()
-            del self.appeals[appeal_id]
-            self._save_json(self.appeals_file, self.appeals)
+            self._exec("DELETE FROM mod_appeals WHERE appeal_id=?", (appeal_id,))
             return True
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, f"Failed to approve appeal {appeal_id}", e)
             return False
 
     async def deny_appeal(self, appeal_id: str) -> bool:
-        if appeal_id not in self.appeals:
+        row = self._get_appeal(appeal_id)
+        if not row:
             return False
-        appeal = self.appeals[appeal_id]
         try:
-            guild = self.bot.get_guild(appeal['guild_id'])
-            user = await self.bot.fetch_user(appeal['user_id'])
+            guild = self.bot.get_guild(row["guild_id"])
+            user  = await self.bot.fetch_user(row["user_id"])
             try:
                 embed = discord.Embed(
                     title="Ban Appeal Denied",
                     description=f"Your appeal for **{guild.name}** has been reviewed and denied.",
-                    color=0xe74c3c,
-                    timestamp=datetime.utcnow()
-                )
+                    color=0xe74c3c, timestamp=datetime.utcnow())
                 await user.send(embed=embed)
             except discord.Forbidden:
                 pass
-            appeal['status'] = 'denied'
-            appeal['reviewed_at'] = datetime.utcnow().isoformat()
-            del self.appeals[appeal_id]
-            self._save_json(self.appeals_file, self.appeals)
+            self._exec("DELETE FROM mod_appeals WHERE appeal_id=?", (appeal_id,))
             return True
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, f"Failed to deny appeal {appeal_id}", e)
@@ -1535,9 +1909,9 @@ class ModerationSystem:
     async def send_action_review(self, owner: discord.User, action_id: str, action: Dict):
         embed = discord.Embed(
             title=f"🔍 {action['action'].upper()} Action Review",
-            color=0xe74c3c if 'red_flag' in action['flags'] else
-                  0xf39c12 if 'yellow_flag' in action['flags'] else 0x5865f2,
-            timestamp=datetime.fromisoformat(action['timestamp'])
+            color=(0xe74c3c if 'red_flag' in action['flags'] else
+                   0xf39c12 if 'yellow_flag' in action['flags'] else 0x5865f2),
+            timestamp=datetime.fromisoformat(action['timestamp']),
         )
         if action['flags']:
             flags_text = []
@@ -1550,85 +1924,75 @@ class ModerationSystem:
             if 'botlog_deleted' in action['flags']:
                 flags_text.append("❌ Bot-log embed deleted")
             embed.add_field(name="⚠️ Flags", value="\n".join(flags_text), inline=False)
-        embed.add_field(name="Moderator", value=f"{action['moderator']} (ID: {action['moderator_id']})", inline=True)
+        embed.add_field(
+            name="Moderator",
+            value=f"{action['moderator']} (ID: {action['moderator_id']})", inline=True)
         if action.get('user'):
-            embed.add_field(name="User", value=f"{action['user']} (ID: {action['user_id']})", inline=True)
+            embed.add_field(
+                name="User",
+                value=f"{action['user']} (ID: {action['user_id']})", inline=True)
         embed.add_field(name="Reason", value=action['reason'], inline=False)
         if action.get('duration'):
             embed.add_field(name="Duration", value=action['duration'], inline=True)
         if action['context_messages']:
-            embed.add_field(name="Context", value=f"{len(action['context_messages'])} messages logged", inline=True)
+            embed.add_field(
+                name="Context",
+                value=f"{len(action['context_messages'])} messages logged", inline=True)
         view = ActionReviewView(self, action_id, action)
         await owner.send(embed=embed, view=view)
         if action['context_messages']:
-            img = self.generate_context_screenshot(action['context_messages'], action.get('message_id'))
+            img = self.generate_context_screenshot(
+                action['context_messages'], action.get('message_id'))
             await owner.send(file=discord.File(img, "context.png"))
 
-    async def send_appeal_review(self, owner: discord.User, appeal_id: str, appeal: Dict):
-        embed = discord.Embed(
-            title="📝 Ban Appeal Review",
-            color=0x9b59b6,
-            timestamp=datetime.fromisoformat(appeal['submitted_at'])
-        )
-        embed.add_field(name="User ID", value=str(appeal['user_id']), inline=True)
-        embed.add_field(name="Guild ID", value=str(appeal['guild_id']), inline=True)
-        embed.add_field(name="Appeal Text", value=appeal['appeal_text'][:1024], inline=False)
-        view = AppealReviewView(self, appeal_id)
-        await owner.send(embed=embed, view=view)
-
     async def generate_daily_report(self):
-        """Generate and send the daily report: only covers deletion attempts."""
         try:
-            owner = await self.bot.fetch_user(OWNER_ID)
+            owner = await self.bot.fetch_user(self.cfg.owner_id)
             if not owner:
                 return
 
-            # ── Bot-log deletion attempts ──
-            botlog_attempts = list(self.deletion_attempts)
-            self.deletion_attempts.clear()  # Reset for next period
+            # Pull deletion attempts from DB then clear them
+            attempt_rows = self._all(
+                "SELECT * FROM mod_deletion_attempts ORDER BY id")
+            self._exec("DELETE FROM mod_deletion_attempts")
 
-            # ── Mod action deletion attempts (red/yellow flags from oversight) ──
-            red_flags = []
+            # Flagged pending actions
+            red_flags    = []
             yellow_flags = []
-            for action_id, action in self.pending_actions.items():
-                flags = action.get('flags', [])
-                if 'red_flag' in flags:
-                    red_flags.append((action_id, action))
-                elif 'yellow_flag' in flags:
-                    yellow_flags.append((action_id, action))
+            for row in self._all(
+                "SELECT * FROM mod_pending_actions WHERE flags != '[]' AND flags != 'null'"
+            ):
+                action = self._row_to_action(row)
+                if 'red_flag' in action['flags']:
+                    red_flags.append((action['id'], action))
+                elif 'yellow_flag' in action['flags']:
+                    yellow_flags.append((action['id'], action))
 
-            total_issues = len(botlog_attempts) + len(red_flags) + len(yellow_flags)
+            total_issues = len(attempt_rows) + len(red_flags) + len(yellow_flags)
 
             if total_issues == 0:
                 embed = discord.Embed(
                     title="📊 Daily Integrity Report",
                     description="✅ No deletion attempts or mod-action flags in the last 24 hours.",
-                    color=0x2ecc71,
-                    timestamp=datetime.utcnow()
-                )
+                    color=0x2ecc71, timestamp=datetime.utcnow())
                 await owner.send(embed=embed)
                 return
 
             embed = discord.Embed(
                 title="📊 Daily Integrity Report",
                 description=(
-                    f"**{len(botlog_attempts)}** bot-log deletion attempt(s)\n"
+                    f"**{len(attempt_rows)}** bot-log deletion attempt(s)\n"
                     f"**{len(red_flags)}** 🚩 red-flag mod action(s)\n"
                     f"**{len(yellow_flags)}** ⚠️ yellow-flag mod action(s)"
                 ),
-                color=0xff4500,
-                timestamp=datetime.utcnow()
-            )
+                color=0xff4500, timestamp=datetime.utcnow())
             await owner.send(embed=embed)
 
-            # Detail: bot-log deletion attempts
-            if botlog_attempts:
+            if attempt_rows:
                 detail = discord.Embed(
                     title="🗑️ Bot-Log Deletion Attempts",
-                    color=0xff0000,
-                    timestamp=datetime.utcnow()
-                )
-                for attempt in botlog_attempts[:20]:  # cap at 20 fields
+                    color=0xff0000, timestamp=datetime.utcnow())
+                for attempt in attempt_rows[:20]:
                     detail.add_field(
                         name=f"Log `{attempt['log_id']}`",
                         value=(
@@ -1636,16 +2000,13 @@ class ModerationSystem:
                             f"**Original:** {attempt['original_title']}\n"
                             f"**At:** {attempt['timestamp'][:19].replace('T', ' ')} UTC"
                         ),
-                        inline=False
-                    )
-                if len(botlog_attempts) > 20:
-                    detail.set_footer(text=f"...and {len(botlog_attempts) - 20} more.")
+                        inline=False)
+                if len(attempt_rows) > 20:
+                    detail.set_footer(text=f"...and {len(attempt_rows) - 20} more.")
                 await owner.send(embed=detail)
 
-            # Detail: red/yellow flag mod actions
-            if red_flags or yellow_flags:
-                for action_id, action in (red_flags + yellow_flags)[:10]:
-                    await self.send_action_review(owner, action_id, action)
+            for action_id, action in (red_flags + yellow_flags)[:10]:
+                await self.send_action_review(owner, action_id, action)
 
             self.bot.logger.log(MODULE_NAME, "Daily integrity report sent to owner")
         except Exception as e:
@@ -1654,23 +2015,87 @@ class ModerationSystem:
     # ==================== BACKGROUND TASKS ====================
 
     @tasks.loop(minutes=1)
+    async def resolve_expired_appeals(self):
+        try:
+            now      = datetime.utcnow().isoformat()
+            past_due = self._all(
+                "SELECT * FROM mod_appeals WHERE status='pending' AND deadline <= ?",
+                (now,))
+            for row in past_due:
+                appeal_id     = row["appeal_id"]
+                votes_for     = len(json.loads(row["votes_for"]))
+                votes_against = len(json.loads(row["votes_against"]))
+                accepted      = votes_for > votes_against
+
+                self.bot.logger.log(
+                    MODULE_NAME,
+                    f"Appeal {appeal_id} deadline reached — "
+                    f"Accept: {votes_for}, Deny: {votes_against} → "
+                    f"{'APPROVED' if accepted else 'DENIED'}")
+
+                try:
+                    guild = self.bot.get_guild(row["guild_id"])
+                    if guild:
+                        appeals_ch = discord.utils.get(
+                            guild.text_channels, name="ban-appeals")
+                        if appeals_ch and row["channel_message_id"]:
+                            try:
+                                msg    = await appeals_ch.fetch_message(
+                                    row["channel_message_id"])
+                                result_color = 0x2ecc71 if accepted else 0xe74c3c
+                                result_text  = (
+                                    f"✅ Accepted ({votes_for}–{votes_against})"
+                                    if accepted else
+                                    f"❌ Denied ({votes_against}–{votes_for})")
+                                embed = msg.embeds[0] if msg.embeds else discord.Embed()
+                                embed.color = result_color
+                                embed.add_field(
+                                    name="Result", value=result_text, inline=False)
+                                embed.set_footer(
+                                    text=f"Appeal ID: {appeal_id} • Voting closed")
+                                disabled_view = AppealVoteView(self, appeal_id)
+                                for item in disabled_view.children:
+                                    item.disabled = True
+                                await msg.edit(embed=embed, view=disabled_view)
+                            except Exception as e:
+                                self.bot.logger.error(
+                                    MODULE_NAME, "Failed to update appeal message", e)
+                except Exception as e:
+                    self.bot.logger.error(
+                        MODULE_NAME, "Failed to resolve appeal channel message", e)
+
+                if accepted:
+                    await self.approve_appeal(appeal_id)
+                else:
+                    await self.deny_appeal(appeal_id)
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "Error in appeal resolution task", e)
+
+    @resolve_expired_appeals.before_loop
+    async def before_resolve_expired_appeals(self):
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(minutes=1)
     async def check_expired_mutes(self):
         try:
             for mute in self.get_expired_mutes():
-                guild = self.bot.get_guild(mute['guild_id'])
+                guild  = self.bot.get_guild(mute['guild_id'])
                 if not guild:
                     continue
                 member = guild.get_member(mute['user_id'])
                 if not member:
                     self.remove_mute(mute['guild_id'], mute['user_id'])
                     continue
-                muted_role = discord.utils.get(guild.roles, name=MUTED_ROLE_NAME)
+                muted_role = discord.utils.get(
+                    guild.roles, name=self.cfg.muted_role_name)
                 if muted_role and muted_role in member.roles:
                     try:
-                        await member.remove_roles(muted_role, reason="Mute duration expired")
+                        await member.remove_roles(
+                            muted_role, reason="Mute duration expired")
                         self.bot.logger.log(MODULE_NAME, f"Auto-unmuted {member}")
                     except Exception as e:
-                        self.bot.logger.error(MODULE_NAME, f"Failed to auto-unmute {member}", e)
+                        self.bot.logger.error(
+                            MODULE_NAME, f"Failed to auto-unmute {member}", e)
                 self.remove_mute(mute['guild_id'], mute['user_id'])
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Error in mute expiry checker", e)
@@ -1681,30 +2106,27 @@ class ModerationSystem:
 
     @tasks.loop(hours=24)
     async def cleanup_invites(self):
-        """Clean up unused ban reversal invites older than configured days."""
         try:
-            cleanup_days = CONFIG["oversight"]["invite_cleanup_days"]
-            cutoff = datetime.utcnow() - timedelta(days=cleanup_days)
-            to_delete = []
-            for key, data in self.invites.items():
-                created = datetime.fromisoformat(data['created_at'])
-                if created < cutoff:
-                    try:
-                        guild = self.bot.get_guild(data['guild_id'])
-                        if guild:
-                            invites = await guild.invites()
-                            for inv in invites:
-                                if inv.code == data['code']:
-                                    await inv.delete(reason="Unused ban reversal invite cleanup")
-                                    break
-                    except:
-                        pass
-                    to_delete.append(key)
-            for key in to_delete:
-                del self.invites[key]
-            if to_delete:
-                self._save_json(self.invites_file, self.invites)
-                self.bot.logger.log(MODULE_NAME, f"Cleaned up {len(to_delete)} old ban reversal invites")
+            cleanup_days = self.cfg.invite_cleanup_days
+            cutoff = (datetime.utcnow() - timedelta(days=cleanup_days)).isoformat()
+            old_rows = self._all(
+                "SELECT * FROM mod_invites WHERE created_at < ?", (cutoff,))
+            for row in old_rows:
+                try:
+                    guild = self.bot.get_guild(row["guild_id"])
+                    if guild:
+                        invites = await guild.invites()
+                        for inv in invites:
+                            if inv.code == row["code"]:
+                                await inv.delete(reason="Unused ban reversal invite cleanup")
+                                break
+                except Exception:
+                    pass
+            if old_rows:
+                self._exec(
+                    "DELETE FROM mod_invites WHERE created_at < ?", (cutoff,))
+                self.bot.logger.log(
+                    MODULE_NAME, f"Cleaned up {len(old_rows)} old ban reversal invites")
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to cleanup old invites", e)
 
@@ -1714,10 +2136,9 @@ class ModerationSystem:
 
     @tasks.loop(hours=24)
     async def send_daily_report(self):
-        """Send daily report at configured CST time."""
         try:
-            cst = pytz.timezone('America/Chicago')
-            now = datetime.now(cst)
+            cst    = pytz.timezone('America/Chicago')
+            now    = datetime.now(cst)
             target = now.replace(hour=0, minute=0, second=0, microsecond=0)
             if now >= target:
                 target += timedelta(days=1)
@@ -1734,13 +2155,13 @@ class ModerationSystem:
 
 # ==================== UNIFIED COMMAND LOGIC ====================
 
-async def _do_ban(ctx: ModContext, mod_system: ModerationSystem,
+async def _do_ban(ctx: ModContext, mod: ModerationSystem,
                   user: discord.User, reason: str = None, delete_days: int = 0,
                   fake: bool = False, rule_number: int = None):
-    if not has_elevated_role(ctx.author):
+    cfg = mod.cfg
+    if not has_elevated_role(ctx.author, cfg):
         return await ctx.error(ERROR_NO_PERMISSION)
 
-    # --- Rule-number handling ---
     rule_text = None
     if rule_number is not None:
         rules_mgr: Optional[RulesManager] = getattr(ctx.bot, "rules_manager", None)
@@ -1748,15 +2169,10 @@ async def _do_ban(ctx: ModContext, mod_system: ModerationSystem,
             rule_text = rules_mgr.get_rule_text(rule_number)
         if not rule_text:
             return await ctx.error(
-                f"❌ Rule **{rule_number}** not found. Use  to see the current rule list."
-            )
-        # Build the full reason from the rule, appending any extra note
-        if reason and reason.strip():
-            reason = f"{rule_text} | {reason.strip()}"
-        else:
-            reason = rule_text
+                f"❌ Rule **{rule_number}** not found.")
+        reason = f"{rule_text} | {reason.strip()}" if reason and reason.strip() else rule_text
 
-    ok, err = validate_reason(reason)
+    ok, err = validate_reason(reason, cfg.min_reason_length)
     if not ok:
         return await ctx.error(err)
     if user == ctx.author:
@@ -1769,82 +2185,74 @@ async def _do_ban(ctx: ModContext, mod_system: ModerationSystem,
 
     delete_days = max(0, min(7, delete_days))
     try:
-        # Build DM embed — show rule number prominently when applicable
         dm_reason_field = reason
         if rule_number is not None and rule_text:
             dm_reason_field = f"**Rule {rule_number} violation**\n{rule_text}"
 
-        # Send Appeal DM
-        try:
-            dm = discord.Embed(title="🔨 You have been banned",
-                               description=f"You have been banned from **{ctx.guild.name}**",
-                               color=0x992d22, timestamp=datetime.utcnow())
-            dm.add_field(name="Reason", value=dm_reason_field, inline=False)
-            dm.add_field(name="Moderator", value=str(ctx.author), inline=True)
-            dm.add_field(name="📝 Appeal Process",
-                         value="If you believe this ban was unjustified, submit an appeal below.",
-                         inline=False)
-            dm.set_footer(text="Appeals are reviewed by server staff")
-            await user.send(embed=dm, view=BanAppealView(ctx.guild.id))
-        except discord.Forbidden:
-            pass
-
-        # Perform Action
         if not fake:
+            try:
+                dm = discord.Embed(
+                    title="🔨 You have been banned",
+                    description=f"You have been banned from **{ctx.guild.name}**",
+                    color=0x992d22, timestamp=datetime.utcnow())
+                dm.add_field(name="Reason",    value=dm_reason_field,    inline=False)
+                dm.add_field(name="Moderator", value=str(ctx.author),    inline=True)
+                dm.add_field(name="📝 Appeal Process",
+                             value="If you believe this ban was unjustified, submit an "
+                                   "appeal below. Staff will vote within 24 hours.",
+                             inline=False)
+                dm.set_footer(text="Appeals are reviewed by server staff")
+                await user.send(embed=dm, view=BanAppealView(ctx.guild.id))
+            except discord.Forbidden:
+                pass
             await ctx.guild.ban(user, reason=f"{reason} - By {ctx.author}",
-                                delete_message_days=delete_days)
+                                 delete_message_days=delete_days)
 
-        # In-Chat Response
-        embed = discord.Embed(title="✅ User Banned",
-                              description=f"{user.mention} has been banned.",
-                              color=0x992d22, timestamp=datetime.utcnow())
+        embed = discord.Embed(
+            title="✅ User Banned",
+            description=f"{user.mention} has been banned.",
+            color=0x992d22, timestamp=datetime.utcnow())
         if rule_number is not None:
             embed.add_field(name="Rule Violated", value=f"Rule {rule_number}", inline=True)
-            embed.add_field(name="Rule Text", value=rule_text, inline=False)
-            if reason != rule_text:  # extra note was provided
-                extra = reason[len(rule_text):].lstrip(" |").strip()
-                if extra:
-                    embed.add_field(name="Additional Note", value=extra, inline=False)
+            embed.add_field(name="Rule Text",     value=rule_text,             inline=False)
+            extra = reason[len(rule_text):].lstrip(" |").strip()
+            if extra:
+                embed.add_field(name="Additional Note", value=extra, inline=False)
         else:
             embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        embed.add_field(name="Messages Deleted", value=f"{delete_days} days", inline=True)
+        embed.add_field(name="Moderator",         value=ctx.author.mention,    inline=True)
+        embed.add_field(name="Messages Deleted",  value=f"{delete_days} days", inline=True)
         inchat_msg_id = await ctx.reply(embed=embed)
 
-        # Logs
-        el = get_event_logger(ctx.bot)
-        botlog_msg_id = None
-        if el:
-            botlog_msg_id = await el.log_ban(ctx.guild, user, ctx.author, reason, delete_days, ctx.channel)
+        if not fake:
+            el             = get_event_logger(ctx.bot)
+            botlog_msg_id  = None
+            if el:
+                botlog_msg_id = await el.log_ban(
+                    ctx.guild, user, ctx.author, reason, delete_days, ctx.channel)
+            action_id = await mod.log_mod_action({
+                'action': 'ban', 'moderator_id': ctx.author.id,
+                'moderator': str(ctx.author), 'user_id': user.id, 'user': str(user),
+                'reason': reason, 'guild_id': ctx.guild.id,
+                'channel_id': ctx.channel.id,
+                'message_id': ctx.message.id if ctx.message else None,
+                'duration': None, 'additional': {'delete_days': delete_days},
+            })
+            if inchat_msg_id and action_id:
+                mod.track_embed(inchat_msg_id, action_id, 'inchat')
+            if botlog_msg_id and action_id:
+                mod.track_embed(botlog_msg_id, action_id, 'botlog')
 
-        # Oversight logging
-        action_id = await mod_system.log_mod_action({
-            'action': 'ban',
-            'moderator_id': ctx.author.id,
-            'moderator': str(ctx.author),
-            'user_id': user.id,
-            'user': str(user),
-            'reason': reason,
-            'guild_id': ctx.guild.id,
-            'channel_id': ctx.channel.id,
-            'message_id': ctx.message.id if ctx.message else None,
-            'duration': None,
-            'additional': {'delete_days': delete_days}
-        })
-        if inchat_msg_id and action_id:
-            mod_system.track_embed(inchat_msg_id, action_id, 'inchat')
-        if botlog_msg_id and action_id:
-            mod_system.track_embed(botlog_msg_id, action_id, 'botlog')
-
-        ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} banned {user}")
-
+        ctx.bot.logger.log(MODULE_NAME,
+            f"{'[FAKE] ' if fake else ''}{ctx.author} banned {user}")
     except discord.Forbidden:
         await ctx.error("❌ I don't have permission to ban this user.")
     except Exception as e:
         await ctx.error("❌ An error occurred while trying to ban the user.")
         ctx.bot.logger.error(MODULE_NAME, "Ban failed", e)
 
-async def _do_unban(ctx: ModContext, mod_system: ModerationSystem,
+
+async def _do_unban(ctx: ModContext, mod: ModerationSystem,
                     user_id: str, reason: str = "No reason provided", fake: bool = False):
     if not ctx.author.guild_permissions.ban_members:
         return await ctx.error("❌ You don't have permission to unban members.")
@@ -1852,12 +2260,13 @@ async def _do_unban(ctx: ModContext, mod_system: ModerationSystem,
         user = await ctx.bot.fetch_user(int(user_id))
         if not fake:
             await ctx.guild.unban(user, reason=f"{reason} - By {ctx.author}")
-            mod_system.resolve_pending_action(user.id, 'ban')
-        embed = discord.Embed(title="✅ User Unbanned",
-                              description=f"{user.mention} has been unbanned.",
-                              color=0x2ecc71, timestamp=datetime.utcnow())
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+            mod.resolve_pending_action(user.id, 'ban')
+        embed = discord.Embed(
+            title="✅ User Unbanned",
+            description=f"{user.mention} has been unbanned.",
+            color=0x2ecc71, timestamp=datetime.utcnow())
+        embed.add_field(name="Reason",    value=reason,              inline=False)
+        embed.add_field(name="Moderator", value=ctx.author.mention,  inline=True)
         await ctx.reply(embed=embed)
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} unbanned {user}")
     except ValueError:
@@ -1868,11 +2277,13 @@ async def _do_unban(ctx: ModContext, mod_system: ModerationSystem,
         await ctx.error("❌ An error occurred while trying to unban.")
         ctx.bot.logger.error(MODULE_NAME, "Unban failed", e)
 
-async def _do_kick(ctx: ModContext, mod_system: ModerationSystem,
+
+async def _do_kick(ctx: ModContext, mod: ModerationSystem,
                    member: discord.Member, reason: str, fake: bool = False):
-    if not has_elevated_role(ctx.author):
+    cfg = mod.cfg
+    if not has_elevated_role(ctx.author, cfg):
         return await ctx.error(ERROR_NO_PERMISSION)
-    ok, err = validate_reason(reason)
+    ok, err = validate_reason(reason, cfg.min_reason_length)
     if not ok:
         return await ctx.error(err)
     if member == ctx.author:
@@ -1883,58 +2294,54 @@ async def _do_kick(ctx: ModContext, mod_system: ModerationSystem,
         return await ctx.error(ERROR_HIGHER_ROLE)
     try:
         try:
-            dm = discord.Embed(title="👢 You have been kicked",
-                               description=f"You have been kicked from **{ctx.guild.name}**",
-                               color=0xe67e22, timestamp=datetime.utcnow())
-            dm.add_field(name="Reason", value=reason, inline=False)
+            dm = discord.Embed(
+                title="👢 You have been kicked",
+                description=f"You have been kicked from **{ctx.guild.name}**",
+                color=0xe67e22, timestamp=datetime.utcnow())
+            dm.add_field(name="Reason",    value=reason,          inline=False)
             dm.add_field(name="Moderator", value=str(ctx.author), inline=True)
             dm.set_footer(text="You can rejoin if you have an invite link")
             await member.send(embed=dm)
         except discord.Forbidden:
             pass
-
         if not fake:
             await member.kick(reason=f"{reason} - By {ctx.author}")
-
-        embed = discord.Embed(title="✅ Member Kicked",
-                              description=f"{member.mention} has been kicked.",
-                              color=0xe67e22, timestamp=datetime.utcnow())
-        embed.add_field(name="Reason", value=reason, inline=False)
+        embed = discord.Embed(
+            title="✅ Member Kicked",
+            description=f"{member.mention} has been kicked.",
+            color=0xe67e22, timestamp=datetime.utcnow())
+        embed.add_field(name="Reason",    value=reason,             inline=False)
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
         inchat_msg_id = await ctx.reply(embed=embed)
-
         el = get_event_logger(ctx.bot)
         botlog_msg_id = None
         if el:
-            botlog_msg_id = await el.log_kick(ctx.guild, member, ctx.author, reason, ctx.channel)
-
-        action_id = await mod_system.log_mod_action({
-            'action': 'kick',
-            'moderator_id': ctx.author.id,
-            'moderator': str(ctx.author),
-            'user_id': member.id,
-            'user': str(member),
-            'reason': reason,
-            'guild_id': ctx.guild.id,
+            botlog_msg_id = await el.log_kick(
+                ctx.guild, member, ctx.author, reason, ctx.channel)
+        action_id = await mod.log_mod_action({
+            'action': 'kick', 'moderator_id': ctx.author.id,
+            'moderator': str(ctx.author), 'user_id': member.id, 'user': str(member),
+            'reason': reason, 'guild_id': ctx.guild.id,
             'channel_id': ctx.channel.id,
-            'message_id': ctx.message.id if ctx.message else None
+            'message_id': ctx.message.id if ctx.message else None,
         })
         if inchat_msg_id and action_id:
-            mod_system.track_embed(inchat_msg_id, action_id, 'inchat')
+            mod.track_embed(inchat_msg_id, action_id, 'inchat')
         if botlog_msg_id and action_id:
-            mod_system.track_embed(botlog_msg_id, action_id, 'botlog')
-
+            mod.track_embed(botlog_msg_id, action_id, 'botlog')
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} kicked {member}")
-
     except Exception as e:
         await ctx.error("❌ An error occurred while trying to kick the member.")
         ctx.bot.logger.error(MODULE_NAME, "Kick failed", e)
 
-async def _do_timeout(ctx: ModContext, mod_system: ModerationSystem,
-                      member: discord.Member, duration: int, reason: str, fake: bool = False):
-    if not has_elevated_role(ctx.author):
+
+async def _do_timeout(ctx: ModContext, mod: ModerationSystem,
+                      member: discord.Member, duration: int,
+                      reason: str, fake: bool = False):
+    cfg = mod.cfg
+    if not has_elevated_role(ctx.author, cfg):
         return await ctx.error(ERROR_NO_PERMISSION)
-    ok, err = validate_reason(reason)
+    ok, err = validate_reason(reason, cfg.min_reason_length)
     if not ok:
         return await ctx.error(err)
     if member == ctx.author:
@@ -1945,34 +2352,32 @@ async def _do_timeout(ctx: ModContext, mod_system: ModerationSystem,
         return await ctx.error("❌ Duration must be between 1 and 40320 minutes.")
     try:
         if not fake:
-            await member.timeout(datetime.utcnow() + timedelta(minutes=duration),
-                                 reason=f"{reason} - By {ctx.author}")
-        embed = discord.Embed(title="✅ Member Timed Out",
-                              description=f"{member.mention} timed out for **{duration}** minutes.",
-                              color=0xe74c3c, timestamp=datetime.utcnow())
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        embed.add_field(name="Duration", value=f"{duration} minutes", inline=True)
-        inchat_msg_id = await ctx.reply(embed=embed)
-
+            await member.timeout(
+                datetime.utcnow() + timedelta(minutes=duration),
+                reason=f"{reason} - By {ctx.author}")
+        embed = discord.Embed(
+            title="✅ Member Timed Out",
+            description=f"{member.mention} timed out for **{duration}** minutes.",
+            color=0xe74c3c, timestamp=datetime.utcnow())
+        embed.add_field(name="Reason",    value=reason,              inline=False)
+        embed.add_field(name="Moderator", value=ctx.author.mention,  inline=True)
+        embed.add_field(name="Duration",  value=f"{duration} minutes", inline=True)
+        await ctx.reply(embed=embed)
         el = get_event_logger(ctx.bot)
-        botlog_msg_id = None
         if el:
-            botlog_msg_id = await el.log_timeout(ctx.guild, member, ctx.author, reason,
-                                 f"{duration} minutes", ctx.channel)
-
-        # Timeout is excluded from oversight logging (by log_mod_action returning None)
-        # But we still want to track embeds if oversight ignores it? No, we don't track.
-        # No action_id returned, so no embed tracking.
-
+            await el.log_timeout(
+                ctx.guild, member, ctx.author, reason, f"{duration} minutes", ctx.channel)
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} timed out {member} for {duration}m")
-
     except Exception as e:
         await ctx.error("❌ An error occurred while trying to timeout the member.")
         ctx.bot.logger.error(MODULE_NAME, "Timeout failed", e)
 
-async def _do_untimeout(ctx: ModContext, mod_system: ModerationSystem, member: discord.Member, fake: bool = False):
-    if not ctx.author.guild_permissions.moderate_members and not has_elevated_role(ctx.author):
+
+async def _do_untimeout(ctx: ModContext, mod: ModerationSystem,
+                         member: discord.Member, fake: bool = False):
+    cfg = mod.cfg
+    if not ctx.author.guild_permissions.moderate_members and \
+            not has_elevated_role(ctx.author, cfg):
         return await ctx.error("❌ You don't have permission to moderate members.")
     if member == ctx.author:
         return await ctx.error(ERROR_CANNOT_ACTION_SELF)
@@ -1981,9 +2386,10 @@ async def _do_untimeout(ctx: ModContext, mod_system: ModerationSystem, member: d
     try:
         if not fake:
             await member.timeout(None, reason=f"Timeout removed by {ctx.author}")
-        embed = discord.Embed(title="✅ Timeout Removed",
-                              description=f"{member.mention}'s timeout has been removed.",
-                              color=0x2ecc71, timestamp=datetime.utcnow())
+        embed = discord.Embed(
+            title="✅ Timeout Removed",
+            description=f"{member.mention}'s timeout has been removed.",
+            color=0x2ecc71, timestamp=datetime.utcnow())
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
         await ctx.reply(embed=embed)
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} removed timeout from {member}")
@@ -1991,10 +2397,13 @@ async def _do_untimeout(ctx: ModContext, mod_system: ModerationSystem, member: d
         await ctx.error("❌ An error occurred while trying to remove the timeout.")
         ctx.bot.logger.error(MODULE_NAME, "Untimeout failed", e)
 
-async def _do_mute(ctx: ModContext, mod_system: ModerationSystem,
+
+async def _do_mute(ctx: ModContext, mod: ModerationSystem,
                    member: discord.Member, reason: str = "No reason provided",
                    duration: Optional[str] = None, fake: bool = False):
-    if not ctx.author.guild_permissions.manage_roles and not has_elevated_role(ctx.author):
+    cfg = mod.cfg
+    if not ctx.author.guild_permissions.manage_roles and \
+            not has_elevated_role(ctx.author, cfg):
         return await ctx.error("❌ You don't have permission to mute members.")
     if member == ctx.author:
         return await ctx.error(ERROR_CANNOT_ACTION_SELF)
@@ -2003,69 +2412,68 @@ async def _do_mute(ctx: ModContext, mod_system: ModerationSystem,
 
     duration_seconds, duration_str = parse_duration(duration or "")
     try:
-        muted_role = discord.utils.get(ctx.guild.roles, name=MUTED_ROLE_NAME)
+        muted_role = discord.utils.get(ctx.guild.roles, name=cfg.muted_role_name)
         if not muted_role:
             muted_role = await ctx.guild.create_role(
-                name=MUTED_ROLE_NAME, color=discord.Color.dark_gray(),
+                name=cfg.muted_role_name, color=discord.Color.dark_gray(),
                 reason="Creating Muted role for moderation")
             for ch in ctx.guild.channels:
                 try:
-                    await ch.set_permissions(muted_role, send_messages=False, speak=False)
+                    await ch.set_permissions(
+                        muted_role, send_messages=False, speak=False)
                 except Exception:
                     pass
-
         if not fake:
             await member.add_roles(muted_role, reason=reason)
-            mod_system.add_mute(ctx.guild.id, member.id, reason, ctx.author, duration_seconds)
-
+            mod.add_mute(ctx.guild.id, member.id, reason, ctx.author, duration_seconds)
         try:
-            dm = discord.Embed(title="🔇 You Have Been Muted",
-                               description=f"You have been muted in **{ctx.guild.name}**.",
-                               color=0xf39c12, timestamp=datetime.utcnow())
-            dm.add_field(name="Reason", value=reason, inline=False)
-            dm.add_field(name="Duration", value=duration_str, inline=True)
+            dm = discord.Embed(
+                title="🔇 You Have Been Muted",
+                description=f"You have been muted in **{ctx.guild.name}**.",
+                color=0xf39c12, timestamp=datetime.utcnow())
+            dm.add_field(name="Reason",    value=reason,          inline=False)
+            dm.add_field(name="Duration",  value=duration_str,    inline=True)
             dm.add_field(name="Moderator", value=str(ctx.author), inline=True)
             await member.send(embed=dm)
         except discord.Forbidden:
             pass
-
-        embed = discord.Embed(title="✅ Member Muted",
-                              description=f"{member.mention} has been muted.",
-                              color=0xf39c12, timestamp=datetime.utcnow())
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Duration", value=duration_str, inline=True)
+        embed = discord.Embed(
+            title="✅ Member Muted",
+            description=f"{member.mention} has been muted.",
+            color=0xf39c12, timestamp=datetime.utcnow())
+        embed.add_field(name="Reason",    value=reason,             inline=False)
+        embed.add_field(name="Duration",  value=duration_str,       inline=True)
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        inchat_msg_id = await ctx.reply(embed=embed)
-
+        await ctx.reply(embed=embed)
         el = get_event_logger(ctx.bot)
-        botlog_msg_id = None
         if el:
-            botlog_msg_id = await el.log_mute(ctx.guild, member, ctx.author, reason, duration_str, ctx.channel)
-
-        # Mute excluded from oversight
-        # No action_id, no tracking.
-
+            await el.log_mute(
+                ctx.guild, member, ctx.author, reason, duration_str, ctx.channel)
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} muted {member} for {duration_str}")
-
     except discord.Forbidden:
         await ctx.error("❌ I don't have permission to mute this member.")
     except Exception as e:
         await ctx.error("❌ An error occurred while trying to mute the member.")
         ctx.bot.logger.error(MODULE_NAME, "Mute failed", e)
 
-async def _do_unmute(ctx: ModContext, mod_system: ModerationSystem, member: discord.Member, fake: bool = False):
-    if not ctx.author.guild_permissions.manage_roles and not has_elevated_role(ctx.author):
+
+async def _do_unmute(ctx: ModContext, mod: ModerationSystem,
+                     member: discord.Member, fake: bool = False):
+    cfg = mod.cfg
+    if not ctx.author.guild_permissions.manage_roles and \
+            not has_elevated_role(ctx.author, cfg):
         return await ctx.error("❌ You don't have permission to manage roles.")
-    muted_role = discord.utils.get(ctx.guild.roles, name=MUTED_ROLE_NAME)
+    muted_role = discord.utils.get(ctx.guild.roles, name=cfg.muted_role_name)
     if not muted_role or muted_role not in member.roles:
         return await ctx.error("❌ This member is not muted.")
     try:
         if not fake:
             await member.remove_roles(muted_role, reason=f"Unmuted by {ctx.author}")
-            mod_system.remove_mute(ctx.guild.id, member.id)
-        embed = discord.Embed(title="✅ Member Unmuted",
-                              description=f"{member.mention} has been unmuted.",
-                              color=0x2ecc71, timestamp=datetime.utcnow())
+            mod.remove_mute(ctx.guild.id, member.id)
+        embed = discord.Embed(
+            title="✅ Member Unmuted",
+            description=f"{member.mention} has been unmuted.",
+            color=0x2ecc71, timestamp=datetime.utcnow())
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
         await ctx.reply(embed=embed)
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} unmuted {member}")
@@ -2073,11 +2481,14 @@ async def _do_unmute(ctx: ModContext, mod_system: ModerationSystem, member: disc
         await ctx.error("❌ An error occurred while trying to unmute the member.")
         ctx.bot.logger.error(MODULE_NAME, "Unmute failed", e)
 
-async def _do_softban(ctx: ModContext, mod_system: ModerationSystem,
-                      member: discord.Member, reason: str, delete_days: int = 7, fake: bool = False):
-    if not has_elevated_role(ctx.author):
+
+async def _do_softban(ctx: ModContext, mod: ModerationSystem,
+                      member: discord.Member, reason: str,
+                      delete_days: int = 7, fake: bool = False):
+    cfg = mod.cfg
+    if not has_elevated_role(ctx.author, cfg):
         return await ctx.error(ERROR_NO_PERMISSION)
-    ok, err = validate_reason(reason)
+    ok, err = validate_reason(reason, cfg.min_reason_length)
     if not ok:
         return await ctx.error(err)
     if member == ctx.author:
@@ -2086,57 +2497,50 @@ async def _do_softban(ctx: ModContext, mod_system: ModerationSystem,
         return await ctx.error(ERROR_CANNOT_ACTION_BOT)
     if member.top_role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
         return await ctx.error(ERROR_HIGHER_ROLE)
-
     delete_days = max(0, min(7, delete_days))
     try:
         if not fake:
             await member.ban(reason=f"Softban: {reason} - By {ctx.author}",
                              delete_message_days=delete_days)
             await ctx.guild.unban(member, reason=f"Softban unban - By {ctx.author}")
-
         embed = discord.Embed(
             title="✅ Member Softbanned",
             description=f"{member.mention} softbanned (messages deleted, can rejoin).",
             color=0x992d22, timestamp=datetime.utcnow())
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        embed.add_field(name="Messages Deleted", value=f"{delete_days} days", inline=True)
+        embed.add_field(name="Reason",            value=reason,              inline=False)
+        embed.add_field(name="Moderator",         value=ctx.author.mention,  inline=True)
+        embed.add_field(name="Messages Deleted",  value=f"{delete_days} days", inline=True)
         inchat_msg_id = await ctx.reply(embed=embed)
-
         el = get_event_logger(ctx.bot)
         botlog_msg_id = None
         if el:
-            botlog_msg_id = await el.log_softban(ctx.guild, member, ctx.author, reason, delete_days, ctx.channel)
-
-        action_id = await mod_system.log_mod_action({
-            'action': 'softban',
-            'moderator_id': ctx.author.id,
-            'moderator': str(ctx.author),
-            'user_id': member.id,
-            'user': str(member),
-            'reason': reason,
-            'guild_id': ctx.guild.id,
+            botlog_msg_id = await el.log_softban(
+                ctx.guild, member, ctx.author, reason, delete_days, ctx.channel)
+        action_id = await mod.log_mod_action({
+            'action': 'softban', 'moderator_id': ctx.author.id,
+            'moderator': str(ctx.author), 'user_id': member.id, 'user': str(member),
+            'reason': reason, 'guild_id': ctx.guild.id,
             'channel_id': ctx.channel.id,
             'message_id': ctx.message.id if ctx.message else None,
-            'additional': {'delete_days': delete_days}
+            'additional': {'delete_days': delete_days},
         })
         if action_id:
             if inchat_msg_id:
-                mod_system.track_embed(inchat_msg_id, action_id, 'inchat')
+                mod.track_embed(inchat_msg_id, action_id, 'inchat')
             if botlog_msg_id:
-                mod_system.track_embed(botlog_msg_id, action_id, 'botlog')
-
+                mod.track_embed(botlog_msg_id, action_id, 'botlog')
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} softbanned {member}")
-
     except Exception as e:
         await ctx.error("❌ An error occurred while trying to softban the member.")
         ctx.bot.logger.error(MODULE_NAME, "Softban failed", e)
 
-async def _do_warn(ctx: ModContext, mod_system: ModerationSystem,
+
+async def _do_warn(ctx: ModContext, mod: ModerationSystem,
                    member: discord.Member, reason: str, fake: bool = False):
-    if not has_elevated_role(ctx.author):
+    cfg = mod.cfg
+    if not has_elevated_role(ctx.author, cfg):
         return await ctx.error(ERROR_NO_PERMISSION)
-    ok, err = validate_reason(reason)
+    ok, err = validate_reason(reason, cfg.min_reason_length)
     if not ok:
         return await ctx.error(err)
     if member == ctx.author:
@@ -2144,129 +2548,130 @@ async def _do_warn(ctx: ModContext, mod_system: ModerationSystem,
     if member == ctx.bot.user:
         return await ctx.error(ERROR_CANNOT_ACTION_BOT)
     try:
-        strike_count = mod_system.get_strikes(member.id) + 1 if fake else mod_system.add_strike(member.id, reason)
+        strike_count = (mod.get_strikes(member.id) + 1
+                        if fake else mod.add_strike(member.id, reason))
         try:
-            dm = discord.Embed(title="⚠️ Warning",
-                               description=f"You have been warned in **{ctx.guild.name}**",
-                               color=0xf39c12, timestamp=datetime.utcnow())
-            dm.add_field(name="Reason", value=reason, inline=False)
-            dm.add_field(name="Moderator", value=str(ctx.author), inline=True)
-            dm.add_field(name="Total Warnings", value=str(strike_count), inline=True)
+            dm = discord.Embed(
+                title="⚠️ Warning",
+                description=f"You have been warned in **{ctx.guild.name}**",
+                color=0xf39c12, timestamp=datetime.utcnow())
+            dm.add_field(name="Reason",          value=reason,               inline=False)
+            dm.add_field(name="Moderator",        value=str(ctx.author),      inline=True)
+            dm.add_field(name="Total Warnings",   value=str(strike_count),    inline=True)
             await member.send(embed=dm)
         except discord.Forbidden:
             pass
-
-        embed = discord.Embed(title="⚠️ Member Warned",
-                              description=f"{member.mention} has been warned.",
-                              color=0xf39c12, timestamp=datetime.utcnow())
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+        embed = discord.Embed(
+            title="⚠️ Member Warned",
+            description=f"{member.mention} has been warned.",
+            color=0xf39c12, timestamp=datetime.utcnow())
+        embed.add_field(name="Reason",        value=reason,             inline=False)
+        embed.add_field(name="Moderator",     value=ctx.author.mention, inline=True)
         embed.add_field(name="Total Warnings", value=str(strike_count), inline=True)
-        inchat_msg_id = await ctx.reply(embed=embed)
-
+        await ctx.reply(embed=embed)
         el = get_event_logger(ctx.bot)
-        botlog_msg_id = None
         if el:
-            botlog_msg_id = await el.log_warn(ctx.guild, member, ctx.author, reason, strike_count, ctx.channel)
-
-        # Warn excluded from oversight
-
+            await el.log_warn(
+                ctx.guild, member, ctx.author, reason, strike_count, ctx.channel)
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} warned {member}")
-
     except Exception as e:
         await ctx.error("❌ An error occurred while trying to warn the member.")
         ctx.bot.logger.error(MODULE_NAME, "Warn failed", e)
 
-async def _do_warnings(ctx: ModContext, mod_system: ModerationSystem, member: discord.Member):
-    if not ctx.author.guild_permissions.manage_messages and not has_elevated_role(ctx.author):
+
+async def _do_warnings(ctx: ModContext, mod: ModerationSystem, member: discord.Member):
+    if not ctx.author.guild_permissions.manage_messages and \
+            not has_elevated_role(ctx.author, mod.cfg):
         return await ctx.error("❌ You don't have permission to view warnings.")
-    strikes = mod_system.get_strike_details(member.id)
+    strikes = mod.get_strike_details(member.id)
     if not strikes:
         return await ctx.reply(f"✅ **{member}** has no warnings.", ephemeral=True)
-    embed = discord.Embed(title=f"⚠️ Warnings for {member}",
-                          description=f"Total warnings: **{len(strikes)}**",
-                          color=0xf39c12, timestamp=datetime.utcnow())
+    embed = discord.Embed(
+        title=f"⚠️ Warnings for {member}",
+        description=f"Total warnings: **{len(strikes)}**",
+        color=0xf39c12, timestamp=datetime.utcnow())
     for i, s in enumerate(strikes[-10:], 1):
         ts = datetime.fromisoformat(s['timestamp']).strftime("%Y-%m-%d %H:%M UTC")
-        embed.add_field(name=f"Warning {i}",
-                        value=f"**Reason:** {s['reason']}\n**Date:** {ts}", inline=False)
+        embed.add_field(
+            name=f"Warning {i}",
+            value=f"**Reason:** {s['reason']}\n**Date:** {ts}", inline=False)
     if len(strikes) > 10:
         embed.set_footer(text=f"Showing last 10 of {len(strikes)} warnings")
     await ctx.reply(embed=embed, ephemeral=True)
 
-async def _do_clearwarnings(ctx: ModContext, mod_system: ModerationSystem, member: discord.Member):
+
+async def _do_clearwarnings(ctx: ModContext, mod: ModerationSystem, member: discord.Member):
     if not ctx.author.guild_permissions.administrator:
         return await ctx.error("❌ You need Administrator permission to clear warnings.")
-    if mod_system.clear_strikes(member.id):
-        embed = discord.Embed(title="✅ Warnings Cleared",
-                              description=f"All warnings cleared for **{member}**.",
-                              color=0x2ecc71, timestamp=datetime.utcnow())
+    if mod.clear_strikes(member.id):
+        embed = discord.Embed(
+            title="✅ Warnings Cleared",
+            description=f"All warnings cleared for **{member}**.",
+            color=0x2ecc71, timestamp=datetime.utcnow())
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
         await ctx.reply(embed=embed)
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} cleared warnings for {member}")
     else:
         await ctx.reply(f"**{member}** has no warnings to clear.", ephemeral=True)
 
-async def _do_purge(ctx: ModContext, mod_system: ModerationSystem,
-                    amount: int, target: Optional[discord.Member] = None, fake: bool = False):
-    if not has_elevated_role(ctx.author):
+
+async def _do_purge(ctx: ModContext, mod: ModerationSystem,
+                    amount: int, target: Optional[discord.Member] = None,
+                    fake: bool = False):
+    if not has_elevated_role(ctx.author, mod.cfg):
         return await ctx.error(ERROR_NO_PERMISSION)
     if not (1 <= amount <= 100):
         return await ctx.error("❌ Amount must be between 1 and 100.")
-
     if not isinstance(ctx._source, discord.Interaction):
         try:
             await ctx._source.message.delete()
         except Exception:
             pass
-
     await ctx.defer()
     try:
-        check = (lambda m: m.author.id == target.id) if target else (lambda m: True)
+        check   = (lambda m: m.author.id == target.id) if target else (lambda m: True)
         deleted = [] if fake else await ctx.channel.purge(limit=amount, check=check)
         if fake:
-            deleted = [None] * amount  # simulate deleted count for embed
+            deleted = [None] * amount
 
-        reason = f"Purged {len(deleted)} message(s)" + (f" from {target}" if target else "")
+        reason = f"Purged {len(deleted)} message(s)" + (
+            f" from {target}" if target else "")
         embed = discord.Embed(
             title="✅ Messages Purged",
             description=f"Deleted **{len(deleted)}** messages"
                         f"{f' from {target.mention}' if target else ''}.",
             color=0x2ecc71, timestamp=datetime.utcnow())
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        embed.add_field(name="Channel", value=ctx.channel.mention, inline=True)
+        embed.add_field(name="Channel",   value=ctx.channel.mention, inline=True)
         inchat_msg_id = await ctx.followup(embed=embed)
-
         el = get_event_logger(ctx.bot)
         botlog_msg_id = None
         if el:
-            botlog_msg_id = await el.log_purge(ctx.guild, ctx.author, len(deleted), ctx.channel, target)
-
-        action_id = await mod_system.log_mod_action({
-            'action': 'purge',
-            'moderator_id': ctx.author.id,
+            botlog_msg_id = await el.log_purge(
+                ctx.guild, ctx.author, len(deleted), ctx.channel, target)
+        action_id = await mod.log_mod_action({
+            'action': 'purge', 'moderator_id': ctx.author.id,
             'moderator': str(ctx.author),
             'user_id': target.id if target else None,
             'user': str(target) if target else None,
-            'reason': reason,
-            'guild_id': ctx.guild.id,
+            'reason': reason, 'guild_id': ctx.guild.id,
             'channel_id': ctx.channel.id,
             'message_id': ctx.message.id if ctx.message else None,
-            'additional': {'amount': len(deleted)}
+            'additional': {'amount': len(deleted)},
         })
         if action_id:
             if inchat_msg_id:
-                mod_system.track_embed(inchat_msg_id, action_id, 'inchat')
+                mod.track_embed(inchat_msg_id, action_id, 'inchat')
             if botlog_msg_id:
-                mod_system.track_embed(botlog_msg_id, action_id, 'botlog')
-
+                mod.track_embed(botlog_msg_id, action_id, 'botlog')
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} purged {len(deleted)} messages")
-
     except Exception as e:
-        await ctx.followup("❌ An error occurred while trying to purge messages.", ephemeral=True)
+        await ctx.followup("❌ An error occurred while trying to purge messages.",
+                           ephemeral=True)
         ctx.bot.logger.error(MODULE_NAME, "Purge failed", e)
 
-async def _do_slowmode(ctx: ModContext, mod_system: ModerationSystem,
+
+async def _do_slowmode(ctx: ModContext, mod: ModerationSystem,
                        seconds: int, channel: Optional[discord.TextChannel] = None):
     if not ctx.author.guild_permissions.manage_channels:
         return await ctx.error("❌ You don't have permission to manage channels.")
@@ -2274,7 +2679,8 @@ async def _do_slowmode(ctx: ModContext, mod_system: ModerationSystem,
         return await ctx.error("❌ Slowmode must be between 0 and 21600 seconds.")
     target = channel or ctx.channel
     try:
-        await target.edit(slowmode_delay=seconds, reason=f"Slowmode set by {ctx.author}")
+        await target.edit(slowmode_delay=seconds,
+                          reason=f"Slowmode set by {ctx.author}")
         if seconds == 0:
             embed = discord.Embed(title="✅ Slowmode Disabled",
                                   description=f"Slowmode disabled in {target.mention}.",
@@ -2285,70 +2691,71 @@ async def _do_slowmode(ctx: ModContext, mod_system: ModerationSystem,
                                   color=0x3498db)
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
         await ctx.reply(embed=embed)
-        ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} set slowmode to {seconds}s in {target.name}")
+        ctx.bot.logger.log(
+            MODULE_NAME, f"{ctx.author} set slowmode to {seconds}s in {target.name}")
     except Exception as e:
         await ctx.error("❌ An error occurred while trying to set slowmode.")
         ctx.bot.logger.error(MODULE_NAME, "Slowmode failed", e)
 
-async def _do_lock(ctx: ModContext, mod_system: ModerationSystem,
-                   reason: str, channel: Optional[discord.TextChannel] = None, fake: bool = False):
-    if not has_elevated_role(ctx.author):
+
+async def _do_lock(ctx: ModContext, mod: ModerationSystem,
+                   reason: str, channel: Optional[discord.TextChannel] = None,
+                   fake: bool = False):
+    cfg = mod.cfg
+    if not has_elevated_role(ctx.author, cfg):
         return await ctx.error(ERROR_NO_PERMISSION)
-    ok, err = validate_reason(reason)
+    ok, err = validate_reason(reason, cfg.min_reason_length)
     if not ok:
         return await ctx.error(err)
     target = channel or ctx.channel
     try:
         if not fake:
-            await target.set_permissions(ctx.guild.default_role, send_messages=False,
-                                         reason=f"{reason} - By {ctx.author}")
-        embed = discord.Embed(title="🔒 Channel Locked",
-                              description=f"{target.mention} has been locked.",
-                              color=0xe74c3c, timestamp=datetime.utcnow())
-        embed.add_field(name="Reason", value=reason, inline=False)
+            await target.set_permissions(
+                ctx.guild.default_role, send_messages=False,
+                reason=f"{reason} - By {ctx.author}")
+        embed = discord.Embed(
+            title="🔒 Channel Locked",
+            description=f"{target.mention} has been locked.",
+            color=0xe74c3c, timestamp=datetime.utcnow())
+        embed.add_field(name="Reason",    value=reason,             inline=False)
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
         inchat_msg_id = await ctx.reply(embed=embed)
-
         el = get_event_logger(ctx.bot)
         botlog_msg_id = None
         if el:
             botlog_msg_id = await el.log_lock(ctx.guild, ctx.author, reason, target)
-
-        action_id = await mod_system.log_mod_action({
-            'action': 'lock',
-            'moderator_id': ctx.author.id,
-            'moderator': str(ctx.author),
-            'user_id': None,
-            'user': None,
-            'reason': reason,
-            'guild_id': ctx.guild.id,
+        action_id = await mod.log_mod_action({
+            'action': 'lock', 'moderator_id': ctx.author.id,
+            'moderator': str(ctx.author), 'user_id': None, 'user': None,
+            'reason': reason, 'guild_id': ctx.guild.id,
             'channel_id': ctx.channel.id,
             'message_id': ctx.message.id if ctx.message else None,
-            'additional': {'channel': target.id}
+            'additional': {'channel': target.id},
         })
         if action_id:
             if inchat_msg_id:
-                mod_system.track_embed(inchat_msg_id, action_id, 'inchat')
+                mod.track_embed(inchat_msg_id, action_id, 'inchat')
             if botlog_msg_id:
-                mod_system.track_embed(botlog_msg_id, action_id, 'botlog')
-
+                mod.track_embed(botlog_msg_id, action_id, 'botlog')
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} locked {target.name}")
-
     except Exception as e:
         await ctx.error("❌ An error occurred while trying to lock the channel.")
         ctx.bot.logger.error(MODULE_NAME, "Lock failed", e)
 
-async def _do_unlock(ctx: ModContext, mod_system: ModerationSystem,
+
+async def _do_unlock(ctx: ModContext, mod: ModerationSystem,
                      channel: Optional[discord.TextChannel] = None):
     if not ctx.author.guild_permissions.manage_channels:
         return await ctx.error("❌ You don't have permission to manage channels.")
     target = channel or ctx.channel
     try:
-        await target.set_permissions(ctx.guild.default_role, send_messages=None,
-                                     reason=f"Unlocked by {ctx.author}")
-        embed = discord.Embed(title="🔓 Channel Unlocked",
-                              description=f"{target.mention} has been unlocked.",
-                              color=0x2ecc71, timestamp=datetime.utcnow())
+        await target.set_permissions(
+            ctx.guild.default_role, send_messages=None,
+            reason=f"Unlocked by {ctx.author}")
+        embed = discord.Embed(
+            title="🔓 Channel Unlocked",
+            description=f"{target.mention} has been unlocked.",
+            color=0x2ecc71, timestamp=datetime.utcnow())
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
         await ctx.reply(embed=embed)
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} unlocked {target.name}")
@@ -2360,22 +2767,24 @@ async def _do_unlock(ctx: ModContext, mod_system: ModerationSystem,
 # ==================== SETUP ====================
 
 def setup(bot):
-    # Create unified moderation system
     mod_system = ModerationSystem(bot)
-    bot._mod_system = mod_system  # expose for MediaScanner scanner sharing
-
-    # Attach to bot for backward compatibility
+    bot._mod_system        = mod_system
     bot.moderation_manager = mod_system
-    bot.mod_oversight = mod_system
-    bot.moderation = mod_system  # new unified attribute
+    bot.mod_oversight      = mod_system
+    bot.moderation         = mod_system
+
+    # Convenience shorthand used throughout
+    _mod = mod_system
+    _cfg = mod_system.cfg
 
     # ---- SLASH COMMANDS ----
+
     @bot.tree.command(name="ban", description="Ban a user from the server")
     @app_commands.describe(
         user="User to ban",
-        reason="Reason for the ban (min 10 chars) — not required if rule is provided",
-        rule="Rule number violated (overrides or supplements reason)",
-        delete_days="Days of messages to delete (0-7, default 0)",
+        reason="Reason for the ban — not required if rule is provided",
+        rule="Rule number violated",
+        delete_days="Days of messages to delete (0-7)",
         fake="Simulate without executing",
     )
     @app_commands.default_permissions(ban_members=True)
@@ -2384,10 +2793,10 @@ def setup(bot):
                         delete_days: Optional[int] = 0, fake: bool = False):
         if rule is None and not reason:
             await interaction.response.send_message(
-                "❌ You must provide either a  or a  number.", ephemeral=True)
+                "❌ You must provide either a reason or a rule number.", ephemeral=True)
             return
-        await _do_ban(ModContext(interaction), mod_system, user, reason, delete_days,
-                      fake=fake, rule_number=rule)
+        await _do_ban(ModContext(interaction), _mod, user, reason,
+                      delete_days, fake=fake, rule_number=rule)
 
     @bot.tree.command(name="unban", description="Unban a user from the server")
     @app_commands.describe(user_id="User ID to unban", reason="Reason for unban",
@@ -2395,7 +2804,7 @@ def setup(bot):
     @app_commands.default_permissions(ban_members=True)
     async def slash_unban(interaction: discord.Interaction, user_id: str,
                           reason: Optional[str] = "No reason provided", fake: bool = False):
-        await _do_unban(ModContext(interaction), mod_system, user_id, reason, fake=fake)
+        await _do_unban(ModContext(interaction), _mod, user_id, reason, fake=fake)
 
     @bot.tree.command(name="kick", description="Kick a member from the server")
     @app_commands.describe(member="Member to kick", reason="Reason (min 10 chars)",
@@ -2403,7 +2812,7 @@ def setup(bot):
     @app_commands.default_permissions(kick_members=True)
     async def slash_kick(interaction: discord.Interaction, member: discord.Member,
                          reason: str, fake: bool = False):
-        await _do_kick(ModContext(interaction), mod_system, member, reason, fake=fake)
+        await _do_kick(ModContext(interaction), _mod, member, reason, fake=fake)
 
     @bot.tree.command(name="timeout", description="Timeout a member")
     @app_commands.describe(member="Member to timeout", duration="Duration in minutes",
@@ -2411,7 +2820,7 @@ def setup(bot):
     @app_commands.default_permissions(moderate_members=True)
     async def slash_timeout(interaction: discord.Interaction, member: discord.Member,
                             duration: int, reason: str, fake: bool = False):
-        await _do_timeout(ModContext(interaction), mod_system, member, duration, reason, fake=fake)
+        await _do_timeout(ModContext(interaction), _mod, member, duration, reason, fake=fake)
 
     @bot.tree.command(name="untimeout", description="Remove timeout from a member")
     @app_commands.describe(member="Member to remove timeout from",
@@ -2419,7 +2828,7 @@ def setup(bot):
     @app_commands.default_permissions(moderate_members=True)
     async def slash_untimeout(interaction: discord.Interaction, member: discord.Member,
                                fake: bool = False):
-        await _do_untimeout(ModContext(interaction), mod_system, member, fake=fake)
+        await _do_untimeout(ModContext(interaction), _mod, member, fake=fake)
 
     @bot.tree.command(name="mute", description="Mute a member")
     @app_commands.describe(member="Member to mute", reason="Reason for mute",
@@ -2427,25 +2836,28 @@ def setup(bot):
                            fake="Simulate without executing")
     @app_commands.default_permissions(manage_roles=True)
     async def slash_mute(interaction: discord.Interaction, member: discord.Member,
-                         reason: str = "No reason provided", duration: Optional[str] = None,
-                         fake: bool = False):
-        await _do_mute(ModContext(interaction), mod_system, member, reason, duration, fake=fake)
+                         reason: str = "No reason provided",
+                         duration: Optional[str] = None, fake: bool = False):
+        await _do_mute(ModContext(interaction), _mod, member, reason, duration, fake=fake)
 
     @bot.tree.command(name="unmute", description="Unmute a member")
     @app_commands.describe(member="Member to unmute", fake="Simulate without executing")
     @app_commands.default_permissions(manage_roles=True)
     async def slash_unmute(interaction: discord.Interaction, member: discord.Member,
                             fake: bool = False):
-        await _do_unmute(ModContext(interaction), mod_system, member, fake=fake)
+        await _do_unmute(ModContext(interaction), _mod, member, fake=fake)
 
-    @bot.tree.command(name="softban", description="Softban a member (ban+unban to delete messages)")
+    @bot.tree.command(name="softban",
+                      description="Softban a member (ban+unban to delete messages)")
     @app_commands.describe(member="Member to softban", reason="Reason (min 10 chars)",
                            delete_days="Days of messages to delete (0-7, default 7)",
                            fake="Simulate without executing")
     @app_commands.default_permissions(ban_members=True)
     async def slash_softban(interaction: discord.Interaction, member: discord.Member,
-                            reason: str, delete_days: Optional[int] = 7, fake: bool = False):
-        await _do_softban(ModContext(interaction), mod_system, member, reason, delete_days, fake=fake)
+                            reason: str, delete_days: Optional[int] = 7,
+                            fake: bool = False):
+        await _do_softban(ModContext(interaction), _mod, member, reason,
+                          delete_days, fake=fake)
 
     @bot.tree.command(name="warn", description="Warn a member")
     @app_commands.describe(member="Member to warn", reason="Reason (min 10 chars)",
@@ -2453,19 +2865,19 @@ def setup(bot):
     @app_commands.default_permissions(manage_messages=True)
     async def slash_warn(interaction: discord.Interaction, member: discord.Member,
                          reason: str, fake: bool = False):
-        await _do_warn(ModContext(interaction), mod_system, member, reason, fake=fake)
+        await _do_warn(ModContext(interaction), _mod, member, reason, fake=fake)
 
     @bot.tree.command(name="warnings", description="View warnings for a member")
     @app_commands.describe(member="Member to check")
     @app_commands.default_permissions(manage_messages=True)
     async def slash_warnings(interaction: discord.Interaction, member: discord.Member):
-        await _do_warnings(ModContext(interaction), mod_system, member)
+        await _do_warnings(ModContext(interaction), _mod, member)
 
     @bot.tree.command(name="clearwarnings", description="Clear all warnings for a member")
     @app_commands.describe(member="Member to clear warnings for")
     @app_commands.default_permissions(administrator=True)
     async def slash_clearwarnings(interaction: discord.Interaction, member: discord.Member):
-        await _do_clearwarnings(ModContext(interaction), mod_system, member)
+        await _do_clearwarnings(ModContext(interaction), _mod, member)
 
     @bot.tree.command(name="purge", description="Delete multiple messages")
     @app_commands.describe(amount="Number of messages to delete (1-100)",
@@ -2474,7 +2886,7 @@ def setup(bot):
     @app_commands.default_permissions(manage_messages=True)
     async def slash_purge(interaction: discord.Interaction, amount: int,
                           user: Optional[discord.Member] = None, fake: bool = False):
-        await _do_purge(ModContext(interaction), mod_system, amount, user, fake=fake)
+        await _do_purge(ModContext(interaction), _mod, amount, user, fake=fake)
 
     @bot.tree.command(name="slowmode", description="Set channel slowmode")
     @app_commands.describe(seconds="Slowmode delay in seconds (0 to disable)",
@@ -2482,7 +2894,7 @@ def setup(bot):
     @app_commands.default_permissions(manage_channels=True)
     async def slash_slowmode(interaction: discord.Interaction, seconds: int,
                              channel: Optional[discord.TextChannel] = None):
-        await _do_slowmode(ModContext(interaction), mod_system, seconds, channel)
+        await _do_slowmode(ModContext(interaction), _mod, seconds, channel)
 
     @bot.tree.command(name="lock", description="Lock a channel")
     @app_commands.describe(reason="Reason for locking (min 10 chars)",
@@ -2491,218 +2903,220 @@ def setup(bot):
     @app_commands.default_permissions(manage_channels=True)
     async def slash_lock(interaction: discord.Interaction, reason: str,
                          channel: Optional[discord.TextChannel] = None, fake: bool = False):
-        await _do_lock(ModContext(interaction), mod_system, reason, channel, fake=fake)
+        await _do_lock(ModContext(interaction), _mod, reason, channel, fake=fake)
 
     @bot.tree.command(name="unlock", description="Unlock a channel")
     @app_commands.describe(channel="Channel to unlock (default: current)")
     @app_commands.default_permissions(manage_channels=True)
     async def slash_unlock(interaction: discord.Interaction,
                            channel: Optional[discord.TextChannel] = None):
-        await _do_unlock(ModContext(interaction), mod_system, channel)
+        await _do_unlock(ModContext(interaction), _mod, channel)
 
     # ---- PREFIX COMMANDS ----
+
     @bot.command(name="ban")
     async def prefix_ban(ctx, user: discord.User = None, *, args: str = ""):
-        """
-        Usage:
-          ?ban @user <reason> [delete_days] [fake]
-          ?ban @user rule:<number> [note] [delete_days] [fake]
-        """
         if not user:
             return await ctx.send(
-                "❌ Usage: `?ban @user <reason> [delete_days] [fake]`\n"
-                "         `?ban @user rule:<number> [note] [delete_days] [fake]`",
+                "❌ Usage: `?ban @user <reason> [rule:<n>] [days:<0-7>] [fake]`",
                 delete_after=10)
-        parts_all = args.split()
-        fake = parts_all[-1].lower() == "fake" if parts_all else False
-        if fake:
-            parts_all = parts_all[:-1]
-            args = " ".join(parts_all)
-
-        # Check for rule:<number> token anywhere in args
-        rule_number = None
-        remaining_parts = []
-        for part in parts_all:
-            if part.lower().startswith("rule:") and part[5:].isdigit():
-                rule_number = int(part[5:])
-            else:
-                remaining_parts.append(part)
-        args = " ".join(remaining_parts)
-
-        delete_days = 0
-        reason = args or None
-        if args:
-            parts = args.rsplit(None, 1)
-            if len(parts) == 2 and parts[-1].isdigit() and int(parts[-1]) <= 7:
-                delete_days = int(parts[-1])
-                reason = parts[0] or None
-
+        import re as _re
+        working    = args
+        fake       = bool(_re.search(r'(?:^|\s)fake(?:\s|$)', working, _re.IGNORECASE))
+        working    = _re.sub(r'(?:^|\s)fake(?=\s|$)', ' ', working, flags=_re.IGNORECASE)
+        rule_match = _re.search(r'(?:^|\s)rule:(\d+)(?=\s|$)', working, _re.IGNORECASE)
+        rule_number = int(rule_match.group(1)) if rule_match else None
+        if rule_match:
+            working = _re.sub(r'(?:^|\s)rule:\d+(?=\s|$)', ' ', working, flags=_re.IGNORECASE)
+        days_match  = _re.search(r'(?:^|\s)days:(\d+)(?=\s|$)', working, _re.IGNORECASE)
+        delete_days = int(days_match.group(1)) if days_match else 0
+        if days_match:
+            working = _re.sub(r'(?:^|\s)days:\d+(?=\s|$)', ' ', working, flags=_re.IGNORECASE)
+        reason = working.strip() or None
         if rule_number is None and not reason:
             return await ctx.send(
-                "❌ You must provide either a reason or `rule:<number>`.", delete_after=8)
-
-        await _do_ban(ModContext(ctx), mod_system, user, reason, delete_days,
+                "❌ You must provide either a reason or `rule:<n>`.", delete_after=8)
+        await _do_ban(ModContext(ctx), _mod, user, reason, delete_days,
                       fake=fake, rule_number=rule_number)
 
     @bot.command(name="unban")
     async def prefix_unban(ctx, user_id: str = None, *, reason: str = "No reason provided"):
         if not user_id:
             return await ctx.send("❌ Usage: `?unban <user_id> [reason]`", delete_after=8)
-        parts_all = reason.split()
-        fake = parts_all[-1].lower() == "fake" if parts_all else False
-        if fake: reason = " ".join(parts_all[:-1]) or "No reason provided"
-        await _do_unban(ModContext(ctx), mod_system, user_id, reason, fake=fake)
+        parts = reason.split()
+        fake  = parts[-1].lower() == "fake" if parts else False
+        if fake:
+            reason = " ".join(parts[:-1]) or "No reason provided"
+        await _do_unban(ModContext(ctx), _mod, user_id, reason, fake=fake)
 
     @bot.command(name="kick")
     async def prefix_kick(ctx, member: discord.Member = None, *, reason: str = ""):
         if not member:
             return await ctx.send("❌ Usage: `?kick @member <reason>`", delete_after=8)
-        parts_all = reason.split()
-        fake = parts_all[-1].lower() == "fake" if parts_all else False
-        if fake: reason = " ".join(parts_all[:-1])
-        await _do_kick(ModContext(ctx), mod_system, member, reason, fake=fake)
+        parts = reason.split()
+        fake  = parts[-1].lower() == "fake" if parts else False
+        if fake:
+            reason = " ".join(parts[:-1])
+        await _do_kick(ModContext(ctx), _mod, member, reason, fake=fake)
 
     @bot.command(name="timeout")
     async def prefix_timeout(ctx, member: discord.Member = None,
                               duration: int = None, *, reason: str = ""):
         if not member or duration is None:
-            return await ctx.send("❌ Usage: `?timeout @member <minutes> <reason>`", delete_after=8)
-        parts_all = reason.split()
-        fake = parts_all[-1].lower() == "fake" if parts_all else False
-        if fake: reason = " ".join(parts_all[:-1])
-        await _do_timeout(ModContext(ctx), mod_system, member, duration, reason, fake=fake)
+            return await ctx.send(
+                "❌ Usage: `?timeout @member <minutes> <reason>`", delete_after=8)
+        parts = reason.split()
+        fake  = parts[-1].lower() == "fake" if parts else False
+        if fake:
+            reason = " ".join(parts[:-1])
+        await _do_timeout(ModContext(ctx), _mod, member, duration, reason, fake=fake)
 
     @bot.command(name="untimeout")
     async def prefix_untimeout(ctx, member: discord.Member = None, fake: str = ""):
         if not member:
             return await ctx.send("❌ Usage: `?untimeout @member`", delete_after=8)
-        await _do_untimeout(ModContext(ctx), mod_system, member, fake=fake.lower() == "fake")
+        await _do_untimeout(ModContext(ctx), _mod, member, fake=fake.lower() == "fake")
 
     @bot.command(name="mute")
     async def prefix_mute(ctx, member: discord.Member = None, *, args: str = ""):
         if not member:
-            return await ctx.send("❌ Usage: `?mute @member [duration] [reason]`", delete_after=8)
+            return await ctx.send(
+                "❌ Usage: `?mute @member [duration] [reason]`", delete_after=8)
         duration = None
-        reason = args or "No reason provided"
-        parts = args.split(None, 1)
+        reason   = args or "No reason provided"
+        parts    = args.split(None, 1)
         if parts and re.match(r'^\d+[smhd]$', parts[0].lower()):
             duration = parts[0]
-            reason = parts[1] if len(parts) > 1 else "No reason provided"
-        fake = reason.split()[-1].lower() == "fake" if reason.split() else False
-        if fake: reason = " ".join(reason.split()[:-1]) or "No reason provided"
-        await _do_mute(ModContext(ctx), mod_system, member, reason, duration, fake=fake)
+            reason   = parts[1] if len(parts) > 1 else "No reason provided"
+        r_parts = reason.split()
+        fake    = r_parts[-1].lower() == "fake" if r_parts else False
+        if fake:
+            reason = " ".join(r_parts[:-1]) or "No reason provided"
+        await _do_mute(ModContext(ctx), _mod, member, reason, duration, fake=fake)
 
     @bot.command(name="unmute")
     async def prefix_unmute(ctx, member: discord.Member = None, fake: str = ""):
         if not member:
             return await ctx.send("❌ Usage: `?unmute @member`", delete_after=8)
-        await _do_unmute(ModContext(ctx), mod_system, member, fake=fake.lower() == "fake")
+        await _do_unmute(ModContext(ctx), _mod, member, fake=fake.lower() == "fake")
 
     @bot.command(name="softban")
     async def prefix_softban(ctx, member: discord.Member = None, *, reason: str = ""):
         if not member:
             return await ctx.send("❌ Usage: `?softban @member <reason>`", delete_after=8)
-        parts_all = reason.split()
-        fake = parts_all[-1].lower() == "fake" if parts_all else False
-        if fake: reason = " ".join(parts_all[:-1])
-        await _do_softban(ModContext(ctx), mod_system, member, reason, fake=fake)
+        parts = reason.split()
+        fake  = parts[-1].lower() == "fake" if parts else False
+        if fake:
+            reason = " ".join(parts[:-1])
+        await _do_softban(ModContext(ctx), _mod, member, reason, fake=fake)
 
     @bot.command(name="warn")
     async def prefix_warn(ctx, member: discord.Member = None, *, reason: str = ""):
         if not member:
             return await ctx.send("❌ Usage: `?warn @member <reason>`", delete_after=8)
-        parts_all = reason.split()
-        fake = parts_all[-1].lower() == "fake" if parts_all else False
-        if fake: reason = " ".join(parts_all[:-1])
-        await _do_warn(ModContext(ctx), mod_system, member, reason, fake=fake)
+        parts = reason.split()
+        fake  = parts[-1].lower() == "fake" if parts else False
+        if fake:
+            reason = " ".join(parts[:-1])
+        await _do_warn(ModContext(ctx), _mod, member, reason, fake=fake)
 
     @bot.command(name="warnings")
     async def prefix_warnings(ctx, member: discord.Member = None):
         if not member:
             return await ctx.send("❌ Usage: `?warnings @member`", delete_after=8)
-        await _do_warnings(ModContext(ctx), mod_system, member)
+        await _do_warnings(ModContext(ctx), _mod, member)
 
     @bot.command(name="clearwarnings")
     async def prefix_clearwarnings(ctx, member: discord.Member = None):
         if not member:
             return await ctx.send("❌ Usage: `?clearwarnings @member`", delete_after=8)
-        await _do_clearwarnings(ModContext(ctx), mod_system, member)
+        await _do_clearwarnings(ModContext(ctx), _mod, member)
 
     @bot.command(name="purge")
-    async def prefix_purge(ctx, amount: int = None, member: discord.Member = None, fake: str = ""):
+    async def prefix_purge(ctx, amount: int = None,
+                            member: discord.Member = None, fake: str = ""):
         if amount is None:
             return await ctx.send("❌ Usage: `?purge <amount> [@member]`", delete_after=8)
-        await _do_purge(ModContext(ctx), mod_system, amount, member, fake=fake.lower() == "fake")
+        await _do_purge(ModContext(ctx), _mod, amount, member,
+                        fake=fake.lower() == "fake")
 
     @bot.command(name="slowmode")
     async def prefix_slowmode(ctx, seconds: int = None,
                                channel: discord.TextChannel = None):
         if seconds is None:
-            return await ctx.send("❌ Usage: `?slowmode <seconds> [#channel]`", delete_after=8)
-        await _do_slowmode(ModContext(ctx), mod_system, seconds, channel)
+            return await ctx.send(
+                "❌ Usage: `?slowmode <seconds> [#channel]`", delete_after=8)
+        await _do_slowmode(ModContext(ctx), _mod, seconds, channel)
 
     @bot.command(name="lock")
     async def prefix_lock(ctx, channel: Optional[discord.TextChannel] = None, *, reason: str = ""):
-        parts_all = reason.split()
-        fake = parts_all[-1].lower() == "fake" if parts_all else False
-        if fake: reason = " ".join(parts_all[:-1])
-        await _do_lock(ModContext(ctx), mod_system, reason, channel, fake=fake)
+        parts = reason.split()
+        fake  = parts[-1].lower() == "fake" if parts else False
+        if fake:
+            reason = " ".join(parts[:-1])
+        await _do_lock(ModContext(ctx), _mod, reason, channel, fake=fake)
 
     @bot.command(name="unlock")
     async def prefix_unlock(ctx, channel: discord.TextChannel = None):
-        await _do_unlock(ModContext(ctx), mod_system, channel)
+        await _do_unlock(ModContext(ctx), _mod, channel)
 
     # ---- OVERSIGHT COMMANDS ----
-    @bot.tree.command(name="report", description="[Owner only] Trigger the moderation report immediately")
+
+    @bot.tree.command(name="report",
+                      description="[Owner only] Trigger the moderation report immediately")
     async def report_command(interaction: discord.Interaction):
-        if interaction.user.id != OWNER_ID:
-            await interaction.response.send_message("❌ This command is restricted to the bot owner.", ephemeral=True)
+        if interaction.user.id != _cfg.owner_id:
+            await interaction.response.send_message(
+                "❌ This command is restricted to the bot owner.", ephemeral=True)
             return
         await interaction.response.send_message("📊 Generating report...", ephemeral=True)
         try:
-            await mod_system.generate_daily_report()
+            await _mod.generate_daily_report()
         except Exception as e:
             bot.logger.error(MODULE_NAME, "Manual report generation failed", e)
 
     # ---- EVENT LISTENERS ----
+
     @bot.listen()
     async def on_message(message):
         if message.author.bot or not message.guild:
             return
 
-        # Cache for oversight
-        await mod_system.cache_message(message)
+        await _mod.cache_message(message)
 
         content_lower = message.content.lower()
 
-        # Auto-mod: Child Safety
-        for word in CHILD_SAFETY:
+        for word in _cfg.child_safety:
             if matches_banned_term(word, content_lower):
                 try:
                     await message.delete()
-                    await message.guild.ban(message.author,
-                                            reason=f"Auto-ban: Child safety violation - '{word}'")
-                    bot.logger.log(MODULE_NAME, f"AUTO-BAN: {message.author} child safety", "WARNING")
+                    await message.guild.ban(
+                        message.author,
+                        reason=f"Auto-ban: Child safety violation - '{word}'")
+                    bot.logger.log(
+                        MODULE_NAME, f"AUTO-BAN: {message.author} child safety", "WARNING")
                     el = get_event_logger(bot)
                     if el:
-                        await el.log_autoban(message.guild, message.author,
-                                             "Child safety violation", message.channel)
+                        await el.log_autoban(
+                            message.guild, message.author,
+                            "Child safety violation", message.channel)
                 except Exception as e:
                     bot.logger.error(MODULE_NAME, "Auto-ban failed", e)
                 return
 
-        # Auto-mod: Racial Slurs
-        for word in RACIAL_SLURS:
+        for word in _cfg.racial_slurs:
             if matches_banned_term(word, content_lower):
                 try:
                     await message.delete()
-                    count = mod_system.add_strike(
+                    count = _mod.add_strike(
                         message.author.id, f"Racial slur: '{word}'")
                     if count >= 2:
                         await message.guild.ban(
-                            message.author, reason="Auto-ban: Repeated racial slurs (2 strikes)")
-                        bot.logger.log(MODULE_NAME,
-                                       f"AUTO-BAN: {message.author} repeated slurs", "WARNING")
+                            message.author,
+                            reason="Auto-ban: Repeated racial slurs (2 strikes)")
+                        bot.logger.log(
+                            MODULE_NAME,
+                            f"AUTO-BAN: {message.author} repeated slurs", "WARNING")
                         el = get_event_logger(bot)
                         if el:
                             await el.log_autoban_strike(
@@ -2714,42 +3128,41 @@ def setup(bot):
                                 title="⚠️ Warning - Strike 1/2",
                                 description="Your message was deleted for inappropriate language.",
                                 color=0xf39c12)
-                            dm.add_field(name="Action",
-                                         value="Second strike = automatic ban.", inline=False)
+                            dm.add_field(
+                                name="Action",
+                                value="Second strike = automatic ban.", inline=False)
                             await message.author.send(embed=dm)
                         except Exception:
                             pass
-                        bot.logger.log(MODULE_NAME, f"STRIKE 1: {message.author} slur", "WARNING")
+                        bot.logger.log(
+                            MODULE_NAME, f"STRIKE 1: {message.author} slur", "WARNING")
                 except Exception as e:
                     bot.logger.error(MODULE_NAME, "Auto-mod slur handling failed", e)
                 return
 
-        # Auto-mod: Banned Words
-        for word in BANNED_WORDS:
+        for word in _cfg.banned_words:
             if matches_banned_term(word, content_lower):
                 try:
                     await message.delete()
-                    bot.logger.log(MODULE_NAME, f"Deleted banned word from {message.author}")
+                    bot.logger.log(
+                        MODULE_NAME, f"Deleted banned word from {message.author}")
                 except Exception as e:
                     bot.logger.error(MODULE_NAME, "Message deletion failed", e)
                 return
 
     @bot.listen()
     async def on_message_delete(message):
-        """Track moderation embed deletions, bot-log deletion attempts, and re-host cached media."""
-        await mod_system.handle_embed_deletion(message.id)
+        await _mod.handle_embed_deletion(message.id)
 
         if not message.guild:
             return
 
-        # ── Bot-log deletion protection ──
-        bot_logs_channel = mod_system._get_bot_logs_channel(message.guild)
+        bot_logs_channel = _mod._get_bot_logs_channel(message.guild)
         if bot_logs_channel and message.channel.id == bot_logs_channel.id:
-            if message.id in mod_system._bot_log_cache:
-                # Determine who deleted it via audit log
+            if message.id in _mod._bot_log_cache:
                 deleter = None
                 try:
-                    await asyncio.sleep(0.75)  # give audit log time to populate
+                    await asyncio.sleep(0.75)
                     async for entry in message.guild.audit_logs(
                         limit=10, action=discord.AuditLogAction.message_delete
                     ):
@@ -2758,186 +3171,192 @@ def setup(bot):
                             deleter = entry.user
                             break
                 except Exception as e:
-                    mod_system.bot.logger.log(MODULE_NAME, f"Audit log fetch failed: {e}", "WARNING")
+                    _mod.bot.logger.log(
+                        MODULE_NAME, f"Audit log fetch failed: {e}", "WARNING")
 
-                # If the bot deleted it itself (e.g. purge command), ignore
                 if deleter and deleter.id == message.guild.me.id:
                     return
 
-                # Act if elevated user deleted it, OR if we couldn't identify the deleter
-                # (fail-safe: unknown = treat as suspicious)
-                if deleter is None or has_elevated_role(deleter):
-                    await mod_system.handle_bot_log_deletion(
-                        message.id, deleter or message.guild.me, message.guild
-                    )
-                elif message.id in mod_system._deletion_warnings:
-                    # This was a deletion-warning message — resend regardless of who deleted it
-                    original_log_id = mod_system._deletion_warnings.pop(message.id)
-                    # Rebuild and resend the warning perpetually
+                if deleter is None or has_elevated_role(deleter, _cfg):
+                    await _mod.handle_bot_log_deletion(
+                        message.id, deleter or message.guild.me, message.guild)
+                elif message.id in _mod._deletion_warnings:
+                    original_log_id = _mod._deletion_warnings.pop(message.id)
                     warning_embed = discord.Embed(
                         title="🚨 Bot-Log Deletion Warning — REPOSTED",
                         description=(
                             f"A deletion warning for log `{original_log_id}` was itself deleted.\n"
-                            f"This report will continue to reappear every time it is deleted."
+                            "This report will continue to reappear every time it is deleted."
                         ),
-                        color=0xff0000,
-                        timestamp=discord.utils.utcnow(),
-                    )
-                    warning_embed.add_field(name="Original Log ID", value=original_log_id, inline=True)
-                    warning_embed.set_footer(text="Deleting this message will cause it to repost again.")
+                        color=0xff0000, timestamp=discord.utils.utcnow())
+                    warning_embed.add_field(
+                        name="Original Log ID", value=original_log_id, inline=True)
+                    warning_embed.set_footer(
+                        text="Deleting this message will cause it to repost again.")
                     try:
                         new_warn_msg = await bot_logs_channel.send(embed=warning_embed)
-                        mod_system._register_bot_log(
-                            new_warn_msg.id, f"WARN-{original_log_id}", warning_embed,
-                            is_warning=True, warning_for_log_id=original_log_id
-                        )
-                        mod_system._deletion_warnings[new_warn_msg.id] = original_log_id
+                        _mod._register_bot_log(
+                            new_warn_msg.id, f"WARN-{original_log_id}",
+                            warning_embed, is_warning=True,
+                            warning_for_log_id=original_log_id)
+                        _mod._deletion_warnings[new_warn_msg.id] = original_log_id
                     except Exception as e:
-                        mod_system.bot.logger.error(MODULE_NAME, f"Failed to repost deletion warning: {e}")
-            return  # Don't process bot-log channel messages further below
+                        _mod.bot.logger.error(
+                            MODULE_NAME, f"Failed to repost deletion warning: {e}")
+            return
 
-        # ── Cached media re-hosting for regular channel messages ──
-        if not message.author.bot and message.id in mod_system.media_cache:
-            guild_id = str(message.guild.id)
+        if not message.author.bot and message.id in _mod.media_cache:
+            guild_id   = str(message.guild.id)
             channel_id = str(message.channel.id)
-            cached = mod_system.media_cache.get(message.id)
-            rehosted = []
+            cached     = _mod.media_cache.get(message.id)
+            rehosted   = []
             if cached:
                 for f in cached['files']:
                     try:
-                        data = mod_system._decrypt_from_disk(f['path'])
+                        data = _mod._decrypt_from_disk(f['path'])
                         rehosted.append({'filename': f['filename'], 'data': data})
                     except FileNotFoundError:
-                        mod_system.bot.logger.log(MODULE_NAME,
-                            f"Skipping stale cache entry — encrypted file already gone: {f['path'].name}",
-                            "WARNING")
+                        _mod.bot.logger.log(
+                            MODULE_NAME,
+                            f"Skipping stale cache entry — encrypted file already gone: "
+                            f"{f['path'].name}", "WARNING")
                     except Exception as e:
-                        mod_system.bot.logger.log(MODULE_NAME,
-                            f"Failed to decrypt {f['filename']} for deletion log: {e}", "WARNING")
+                        _mod.bot.logger.log(
+                            MODULE_NAME,
+                            f"Failed to decrypt {f['filename']} for deletion log: {e}",
+                            "WARNING")
             if not hasattr(bot, '_pending_rehosted_media'):
                 bot._pending_rehosted_media = {}
             bot._pending_rehosted_media[message.id] = rehosted
-            mod_system._delete_media_files(message.id)  # removes index entry + any remaining files
-            channel_msgs = mod_system.message_cache.get(guild_id, {}).get(channel_id, [])
-            mod_system.message_cache[guild_id][channel_id] = [
+            _mod._delete_media_files(message.id)
+            channel_msgs = _mod.message_cache.get(guild_id, {}).get(channel_id, [])
+            _mod.message_cache[guild_id][channel_id] = [
                 m for m in channel_msgs if m['id'] != message.id
             ]
 
     @bot.listen()
     async def on_message_edit(before, after):
-        """Detect when a user removes attachments from a message after sending."""
         if not after.guild or after.author.bot:
             return
 
         before_att_ids = {att.id for att in before.attachments}
-        after_att_ids = {att.id for att in after.attachments}
-        removed_ids = before_att_ids - after_att_ids
-
+        after_att_ids  = {att.id for att in after.attachments}
+        removed_ids    = before_att_ids - after_att_ids
         if not removed_ids:
             return
 
-        # Find which attachments were removed (by id match from cached data)
-        guild_id = str(after.guild.id)
+        guild_id   = str(after.guild.id)
         channel_id = str(after.channel.id)
 
-        # Update the message cache to reflect new attachment list
-        channel_msgs = mod_system.message_cache.get(guild_id, {}).get(channel_id, [])
+        channel_msgs = _mod.message_cache.get(guild_id, {}).get(channel_id, [])
         for msg in channel_msgs:
             if msg['id'] == after.id:
                 msg['attachments'] = [att.url for att in after.attachments]
                 break
 
-        # Collect removed files from media_cache and decrypt them for re-hosting
-        cached = mod_system.media_cache.get(after.id)
+        cached        = _mod.media_cache.get(after.id)
         removed_files = []
         if cached:
             removed_filenames = {
-                att.filename for att in before.attachments if att.id in removed_ids
-            }
+                att.filename for att in before.attachments if att.id in removed_ids}
             kept = []
             for f in cached['files']:
                 if f['filename'] in removed_filenames:
                     try:
-                        data = mod_system._decrypt_from_disk(f['path'])
+                        data = _mod._decrypt_from_disk(f['path'])
                         removed_files.append({'filename': f['filename'], 'data': data})
                     except Exception as e:
-                        mod_system.bot.logger.log(MODULE_NAME, f"Failed to decrypt removed attachment {f['filename']}: {e}", "WARNING")
+                        _mod.bot.logger.log(
+                            MODULE_NAME,
+                            f"Failed to decrypt removed attachment {f['filename']}: {e}",
+                            "WARNING")
                     finally:
                         f['path'].unlink(missing_ok=True)
                 else:
                     kept.append(f)
-            # Update cache index to only reflect remaining files
             if kept:
-                mod_system.media_cache[after.id]['files'] = kept
+                _mod.media_cache[after.id]['files'] = kept
             else:
-                mod_system.media_cache.pop(after.id, None)
+                _mod.media_cache.pop(after.id, None)
 
         if not removed_files:
-            # No locally cached copies — log what we know without media
-            bot_logs = mod_system._get_bot_logs_channel(after.guild)
+            bot_logs = _mod._get_bot_logs_channel(after.guild)
             if bot_logs:
                 embed = discord.Embed(
                     title="✂️ Attachment Removed from Message",
                     color=discord.Color.yellow(),
-                    timestamp=__import__('datetime').datetime.utcnow(),
-                )
-                embed.set_author(name=str(after.author), icon_url=after.author.display_avatar.url)
-                description = f"**{after.author.mention} removed an attachment in {after.channel.mention}**"
+                    timestamp=datetime.utcnow())
+                embed.set_author(
+                    name=str(after.author),
+                    icon_url=after.author.display_avatar.url)
+                description = (f"**{after.author.mention} removed an attachment "
+                               f"in {after.channel.mention}**")
                 if after.content:
                     description += f"\n{after.content}"
                 embed.description = description
-                removed_names = ", ".join(att.filename for att in before.attachments if att.id in removed_ids)
-                embed.add_field(name="Removed File(s)", value=removed_names or "unknown", inline=False)
-                embed.add_field(name="Note", value="File was not in local cache; original URLs may be expired.", inline=False)
-                embed.set_footer(text=f"Author: {after.author.id} | Message ID: {after.id}")
-                await mod_system.send_bot_log(after.guild, embed)
+                removed_names = ", ".join(
+                    att.filename for att in before.attachments if att.id in removed_ids)
+                embed.add_field(
+                    name="Removed File(s)", value=removed_names or "unknown", inline=False)
+                embed.add_field(
+                    name="Note",
+                    value="File was not in local cache; original URLs may be expired.",
+                    inline=False)
+                embed.set_footer(
+                    text=f"Author: {after.author.id} | Message ID: {after.id}")
+                await _mod.send_bot_log(after.guild, embed)
             return
 
-        # We have cached files — build embed matching deletion log style
         image_exts = ('.png', '.jpg', '.jpeg', '.gif', '.webp')
-        audio_exts = ('.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.opus', '.mp4', '.mov', '.webm')
+        audio_exts = ('.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.opus',
+                      '.mp4', '.mov', '.webm')
 
-        image_files = [f for f in removed_files if f['filename'].lower().endswith(image_exts)]
-        other_files  = [f for f in removed_files if not f['filename'].lower().endswith(image_exts)]
+        image_files = [f for f in removed_files
+                       if f['filename'].lower().endswith(image_exts)]
+        other_files  = [f for f in removed_files
+                        if not f['filename'].lower().endswith(image_exts)]
 
-        embed = discord.Embed(
-            color=discord.Color.yellow(),
-            timestamp=__import__('datetime').datetime.utcnow(),
-        )
-        embed.set_author(name=str(after.author), icon_url=after.author.display_avatar.url)
-        description = f"**{after.author.mention} removed an attachment in {after.channel.mention}**"
+        embed = discord.Embed(color=discord.Color.yellow(), timestamp=datetime.utcnow())
+        embed.set_author(name=str(after.author),
+                         icon_url=after.author.display_avatar.url)
+        description = (f"**{after.author.mention} removed an attachment "
+                       f"in {after.channel.mention}**")
         if after.content:
             description += f"\n{after.content}"
         embed.description = description
         embed.set_footer(text=f"Author: {after.author.id} | Message ID: {after.id}")
 
-        bot_logs = mod_system._get_bot_logs_channel(after.guild)
+        bot_logs = _mod._get_bot_logs_channel(after.guild)
 
         if image_files and not other_files:
             embed.set_image(url=f"attachment://{image_files[0]['filename']}")
-            await mod_system.send_bot_log(after.guild, embed, files_data=removed_files)
+            await _mod.send_bot_log(after.guild, embed, files_data=removed_files)
         elif other_files:
             has_audio = any(f['filename'].lower().endswith(audio_exts) for f in other_files)
-            label = "audio" if has_audio else "file"
-            embed.add_field(name="Attachment", value=f"*{label} hosted above*", inline=False)
-            # Files must appear above embed — send files first as plain message, then embed via send_bot_log
+            label     = "audio" if has_audio else "file"
+            embed.add_field(name="Attachment",
+                            value=f"*{label} hosted above*", inline=False)
             if bot_logs:
-                discord_files = [discord.File(fp=io.BytesIO(f['data']), filename=f['filename']) for f in removed_files]
+                discord_files = [
+                    discord.File(fp=io.BytesIO(f['data']), filename=f['filename'])
+                    for f in removed_files
+                ]
                 await bot_logs.send(files=discord_files)
-            await mod_system.send_bot_log(after.guild, embed)
+            await _mod.send_bot_log(after.guild, embed)
         else:
-            await mod_system.send_bot_log(after.guild, embed, files_data=removed_files)
+            await _mod.send_bot_log(after.guild, embed, files_data=removed_files)
 
     @bot.listen()
     async def on_member_remove(member):
-        mod_system.save_member_roles(member)
+        _mod.save_member_roles(member)
 
     @bot.listen()
     async def on_member_join(member):
-        await mod_system.restore_member_roles(member)
+        await _mod.restore_member_roles(member)
 
     # ---- RULES MANAGER ----
-    rules_manager = RulesManager(bot)
+
+    rules_manager    = RulesManager(bot, _mod._db, _cfg)
     bot.rules_manager = rules_manager
 
     @bot.listen("on_ready")
@@ -2947,11 +3366,8 @@ def setup(bot):
             rules_manager.start_watcher(guild)
         bot.logger.log(MODULE_NAME, "Rules manager synced on ready")
 
-    # ---- RULES SLASH COMMANDS ----
-
     @bot.tree.command(name="rules", description="List all server rules")
     async def slash_rules(interaction: discord.Interaction):
-        """Sends an ephemeral embed with a summary of the rules."""
         data = rules_manager.load_rules()
         if not data:
             await interaction.response.send_message(
@@ -2964,7 +3380,7 @@ def setup(bot):
                       description="Force-refresh the #rules channel embed from rules.json")
     @app_commands.default_permissions(administrator=True)
     async def slash_updaterules(interaction: discord.Interaction):
-        if not has_elevated_role(interaction.user):
+        if not has_elevated_role(interaction.user, _cfg):
             await interaction.response.send_message(ERROR_NO_PERMISSION, ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)

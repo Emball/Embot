@@ -743,6 +743,19 @@ class ModerationSystem:
         # Pre-upload safety scanner
         self.scanner = MediaScanner(bot, OWNER_ID, self._get_bot_logs_channel)
 
+        # Purge any orphaned .enc files left over from a previous run.
+        # media_cache is in-memory only; paths stored in it from a prior process
+        # are invalid after restart, so any .enc files still on disk are stale.
+        _purged = 0
+        for _enc in self.media_dir.glob("*.enc"):
+            try:
+                _enc.unlink()
+                _purged += 1
+            except Exception:
+                pass
+        if _purged:
+            bot.logger.log(MODULE_NAME, f"Purged {_purged} orphaned .enc file(s) from previous session")
+
         # Data files
         self.roles_file = data_dir / "member_roles.json"
         self.strikes_file = data_dir / "moderation_strikes.json"
@@ -2794,12 +2807,17 @@ def setup(bot):
                     try:
                         data = mod_system._decrypt_from_disk(f['path'])
                         rehosted.append({'filename': f['filename'], 'data': data})
+                    except FileNotFoundError:
+                        mod_system.bot.logger.log(MODULE_NAME,
+                            f"Skipping stale cache entry — encrypted file already gone: {f['path'].name}",
+                            "WARNING")
                     except Exception as e:
-                        mod_system.bot.logger.log(MODULE_NAME, f"Failed to decrypt {f['filename']} for deletion log: {e}", "WARNING")
+                        mod_system.bot.logger.log(MODULE_NAME,
+                            f"Failed to decrypt {f['filename']} for deletion log: {e}", "WARNING")
             if not hasattr(bot, '_pending_rehosted_media'):
                 bot._pending_rehosted_media = {}
             bot._pending_rehosted_media[message.id] = rehosted
-            mod_system._delete_media_files(message.id)
+            mod_system._delete_media_files(message.id)  # removes index entry + any remaining files
             channel_msgs = mod_system.message_cache.get(guild_id, {}).get(channel_id, [])
             mod_system.message_cache[guild_id][channel_id] = [
                 m for m in channel_msgs if m['id'] != message.id

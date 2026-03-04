@@ -117,7 +117,7 @@ def _broken_dir() -> Path:
     p.mkdir(parents=True, exist_ok=True)
     return p
 
-
+def _whisper_model_dir() -> Path:
     """Whisper model cache directory."""
     p = _data_dir()
     p.mkdir(exist_ok=True)
@@ -310,19 +310,25 @@ def _get_ogg_duration(filepath: str) -> float:
 _whisper_model  = None
 _whisper_lock   = threading.Lock()
 _whisper_device = "cpu"
+_whisper_load_failed = False   # set True on first failure — stops retrying
 
 
 def _load_whisper() -> Optional[object]:
     """
-    Load OpenAI Whisper once, storing the model under /data/ so it doesn't
-    re-download on every restart.  Prefers CUDA GPU, falls back to CPU.
+    Load OpenAI Whisper once, storing the model under /data/.
+    Prefers CUDA GPU, falls back to CPU.
+    Sets _whisper_load_failed=True on any error so workers stop retrying.
     """
-    global _whisper_model, _whisper_device
+    global _whisper_model, _whisper_device, _whisper_load_failed
     if _whisper_model is not None:
         return _whisper_model
+    if _whisper_load_failed:
+        return None
     with _whisper_lock:
         if _whisper_model is not None:
             return _whisper_model
+        if _whisper_load_failed:
+            return None
         try:
             import whisper
             try:
@@ -330,11 +336,9 @@ def _load_whisper() -> Optional[object]:
                 _whisper_device = "cuda" if torch.cuda.is_available() else "cpu"
             except ImportError:
                 _whisper_device = "cpu"
-
             model_dir = str(_whisper_model_dir())
             print(f"[{MODULE_NAME}] Loading Whisper '{WHISPER_MODEL_SIZE}' "
-                  f"on {_whisper_device} (cache: {model_dir})…")
-            # whisper.load_model accepts download_root to pin the cache location
+                  f"on {_whisper_device} (cache: {model_dir})\u2026")
             _whisper_model = whisper.load_model(
                 WHISPER_MODEL_SIZE,
                 device=_whisper_device,
@@ -343,10 +347,11 @@ def _load_whisper() -> Optional[object]:
             print(f"[{MODULE_NAME}] Whisper loaded on {_whisper_device}")
         except ImportError:
             print(f"[{MODULE_NAME}] openai-whisper not installed — transcription disabled")
+            _whisper_load_failed = True
         except Exception as exc:
             print(f"[{MODULE_NAME}] Whisper load error: {exc}")
+            _whisper_load_failed = True
     return _whisper_model
-
 
 def _quarantine_file(filepath: str) -> str:
     """

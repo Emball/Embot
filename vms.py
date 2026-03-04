@@ -67,7 +67,8 @@ WHISPER_MODEL_SIZE        = "base"    # tiny / base / small / medium / large
 # GPU path: same — Whisper handles its own internal CUDA parallelism.
 BULK_GPU_WORKERS  = 1
 BULK_CPU_WORKERS  = 1
-BULK_BATCH_SIZE   = 16               # files committed to DB per batch
+BULK_BATCH_SIZE      = 16    # transcription results committed to DB per batch
+SCAN_BATCH_SIZE      = 256   # rows inserted/updated per commit during startup scan
 WAVEFORM_SAMPLES  = 256              # Discord expects 256-byte waveform
 
 # Common words to filter out before keyword matching
@@ -599,7 +600,7 @@ class BulkProcessor:
         self._thread.start()
         self.logger.log(MODULE_NAME,
             f"BulkProcessor started: {len(files)} files, "
-            f"workers={'GPU×' + str(BULK_GPU_WORKERS) if _is_cuda() else 'CPU×' + str(BULK_CPU_WORKERS)}")
+            f"workers={'GPU×' + str(BULK_GPU_WORKERS) if _CUDA_AVAILABLE else 'CPU×' + str(BULK_CPU_WORKERS)}")
 
     def stop(self):
         """Signal the processor to stop after finishing the current batch."""
@@ -611,7 +612,7 @@ class BulkProcessor:
     # ── Internal ────────────────────────────────────────────────────────────
 
     def _run(self, files: List[Tuple[int, str]]):
-        n_workers = BULK_GPU_WORKERS if _is_cuda() else BULK_CPU_WORKERS
+        n_workers = BULK_GPU_WORKERS if _CUDA_AVAILABLE else BULK_CPU_WORKERS
         total     = len(files)
         done      = 0
         errors    = 0
@@ -760,6 +761,10 @@ def _is_cuda() -> bool:
     except ImportError:
         return False
 
+# Cached at import time — avoids importing torch on the event loop thread
+# when BulkProcessor.start() logs the worker count
+_CUDA_AVAILABLE: bool = _is_cuda()
+
 
 # ==================== VMS MANAGER ====================
 
@@ -776,9 +781,13 @@ class VMSManager:
         self.archive_dir = _archive_dir()
         self._token: str = os.getenv("DISCORD_BOT_TOKEN", "")
         self._session: Optional[aiohttp.ClientSession] = None
-        # Small executor for single-file live transcriptions (not bulk)
-        self._executor   = ThreadPoolExecutor(max_workers=2,
-                                              thread_name_prefix="vms_live")
+        # Executor for live (single-file) transcriptions
+        self._executor      = ThreadPoolExecutor(max_workers=2,
+                                                 thread_name_prefix="vms_live")
+        # Separate executor for the startup scan so it never queues behind
+        # live transcription work and cannot block the event loop
+        self._scan_executor = ThreadPoolExecutor(max_workers=1,
+                                                 thread_name_prefix="vms_scan")
         self.queue: asyncio.Queue = asyncio.Queue()
         self._queue_task: Optional[asyncio.Task] = None
         self._bulk_stop  = threading.Event()
@@ -996,7 +1005,7 @@ class VMSManager:
         Synchronous worker — safe to run in a thread executor.
 
         Phase 1: Conform already-processed files to vm-{id}.ogg, batching
-                 DB updates (BULK_BATCH_SIZE rows per commit).
+                 DB updates (SCAN_BATCH_SIZE rows per commit).
         Phase 2: Register untracked .ogg files from vms/, archive/, broken/
                  using batched INSERTs; reads duration inline (no per-file
                  async calls needed — we're already off the event loop).
@@ -1074,7 +1083,7 @@ class VMSManager:
                 existing_names.add(ogg.name)
                 existing_paths.add(str(ogg))
                 new += 1
-                if len(inserts) >= BULK_BATCH_SIZE:
+                if len(inserts) >= SCAN_BATCH_SIZE:
                     self._db_batch_insert(inserts)
                     inserts = []
             if new:
@@ -1094,8 +1103,8 @@ class VMSManager:
         )
         reset_ids = [vid for vid, fp in untranscribed if Path(fp).exists()]
         if reset_ids:
-            for i in range(0, len(reset_ids), BULK_BATCH_SIZE):
-                chunk = reset_ids[i:i + BULK_BATCH_SIZE]
+            for i in range(0, len(reset_ids), SCAN_BATCH_SIZE):
+                chunk = reset_ids[i:i + SCAN_BATCH_SIZE]
                 placeholders = ",".join("?" * len(chunk))
                 conn = self._conn()
                 try:
@@ -1192,7 +1201,7 @@ class VMSManager:
             "Startup scan: conforming names and registering files in all dirs…")
 
         valid = await asyncio.get_event_loop().run_in_executor(
-            self._executor, self._scan_and_conform
+            self._scan_executor, self._scan_and_conform
         )
 
         # ── Phase 4: Dispatch (back in async context) ─────────────────────────

@@ -10,14 +10,6 @@ aiohttp
 # Whisper transcription with GPU support
 openai-whisper
 
-# PyTorch with CUDA support (for GPU acceleration)
-# Install from PyTorch website for your specific CUDA version:
-# Visit: https://pytorch.org/get-started/locally/
-# Example for CUDA 11.8:
-torch>=2.0.0
-torchaudio>=2.0.0
-
-
 # Other dependencies
 lyricsgenius
 ffmpeg-python

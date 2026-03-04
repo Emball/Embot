@@ -31,6 +31,7 @@ import base64
 import discord
 import numpy as np
 import os
+import queue
 import random
 import re
 import shutil
@@ -557,6 +558,9 @@ async def _send_voice_message(
 
 # ==================== BULK PROCESSOR ====================
 
+_BULK_SENTINEL = object()   # pushed into the work queue to signal "no more files"
+
+
 class BulkProcessor:
     """
     Dedicated background processor for large backlogs of pre-placed OGG files.
@@ -564,109 +568,149 @@ class BulkProcessor:
     Architecture
     ─────────────
     • Runs entirely in a separate daemon thread — zero asyncio entanglement.
-    • Uses a ThreadPoolExecutor sized for GPU (1 worker) or CPU (N/2 workers).
-    • Each worker calls _process_file_sync() which loads Whisper once and
-      reuses it across all files (no redundant model loads).
+    • Accepts work via a thread-safe queue so producers (startup scan AND
+      backfill downloader) can feed files concurrently while processing is
+      already in flight — true pipeline parallelism.
+    • Call feed(vm_id, filepath) from any thread/coroutine to add work at any time.
+    • Call done_feeding() when ALL producers are finished; the worker drains
+      whatever remains and exits cleanly.
+    • Uses a single ThreadPoolExecutor worker — Whisper is compute-bound and
+      not thread-safe; one worker is correct regardless of GPU/CPU.
     • Results are committed to SQLite in batches (BULK_BATCH_SIZE) so a crash
       mid-run doesn't lose all progress — already-committed rows are skipped on
       the next startup.
     • A threading.Event allows the main bot to signal a graceful shutdown.
-    • Progress is logged every BULK_BATCH_SIZE files so you can track a 4k+ queue.
     """
 
     def __init__(self, db_path: str, vms_dir: Path, logger, stop_event: threading.Event):
-        self.db_path    = db_path
-        self.vms_dir    = vms_dir
-        self.logger     = logger          # bot.logger — thread-safe writes
-        self.stop_event = stop_event
+        self.db_path     = db_path
+        self.vms_dir     = vms_dir
+        self.logger      = logger
+        self.stop_event  = stop_event
+        self._work_q: queue.Queue = queue.Queue()
         self._thread: Optional[threading.Thread] = None
 
     # ── Public API ──────────────────────────────────────────────────────────
 
-    def start(self, files: List[Tuple[int, str]]):
+    def start(self, initial_files: Optional[List[Tuple[int, str]]] = None):
         """
-        Kick off bulk processing of (vm_id, filepath) pairs in a daemon thread.
-        Returns immediately; progress is written to the DB in the background.
+        Start the worker thread.  Optionally pre-seed with (vm_id, filepath)
+        pairs from the startup scan.  Call done_feeding() once all producers
+        are done adding work.
         """
-        if not files:
-            self.logger.log(MODULE_NAME, "BulkProcessor: no files to process")
-            return
+        if initial_files:
+            for item in initial_files:
+                self._work_q.put(item)
 
         self._thread = threading.Thread(
             target=self._run,
-            args=(files,),
             name="vms_bulk_processor",
             daemon=True,
         )
         self._thread.start()
         self.logger.log(MODULE_NAME,
-            f"BulkProcessor started: {len(files)} files, "
-            f"workers={'GPU×' + str(BULK_GPU_WORKERS) if _CUDA_AVAILABLE else 'CPU×' + str(BULK_CPU_WORKERS)}")
+            f"BulkProcessor started "
+            f"(workers={'GPU×' + str(BULK_GPU_WORKERS) if _CUDA_AVAILABLE else 'CPU×' + str(BULK_CPU_WORKERS)})")
+
+    def feed(self, vm_id: int, filepath: str):
+        """Push one file onto the work queue — safe to call from any thread."""
+        self._work_q.put((vm_id, filepath))
+
+    def done_feeding(self):
+        """
+        Signal that no more files will be fed.
+        The worker will drain the remaining queue then exit.
+        """
+        self._work_q.put(_BULK_SENTINEL)
 
     def stop(self):
-        """Signal the processor to stop after finishing the current batch."""
+        """Hard stop — signal the worker to exit after the current batch."""
         self.stop_event.set()
+        self._work_q.put(_BULK_SENTINEL)   # unblock queue.get() if idle
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
     # ── Internal ────────────────────────────────────────────────────────────
 
-    def _run(self, files: List[Tuple[int, str]]):
-        n_workers = BULK_GPU_WORKERS if _CUDA_AVAILABLE else BULK_CPU_WORKERS
-        total     = len(files)
-        done      = 0
-        errors    = 0
-        batch_buf    = []  # [(vm_id, transcript, duration, waveform, filepath)]
-        batch_broken = []  # [(broken_path, vm_id)]
+    def _run(self):
+        n_workers    = BULK_GPU_WORKERS if _CUDA_AVAILABLE else BULK_CPU_WORKERS
+        done         = 0
+        errors       = 0
+        batch_buf    = []   # [(vm_id, transcript, duration, waveform, filepath)]
+        batch_broken = []   # [(broken_path, vm_id)]
 
-        self.logger.log(MODULE_NAME,
-            f"BulkProcessor: processing {total} files with {n_workers} worker(s)…")
+        self.logger.log(MODULE_NAME, "BulkProcessor worker started — draining queue…")
 
         try:
             with ThreadPoolExecutor(max_workers=n_workers,
                                     thread_name_prefix="vms_bulk") as pool:
-                # Submit all futures up-front; as_completed() yields them as
-                # they finish so we can commit incrementally.
-                future_map = {
-                    pool.submit(_process_file_sync, fp): (vm_id, fp)
-                    for vm_id, fp in files
-                    if Path(fp).exists()
-                }
+                pending: dict = {}   # future → (vm_id, filepath)
+                alive = True         # False once sentinel received
 
-                for future in as_completed(future_map):
+                def _try_submit():
+                    """Pull one item and submit it; return False on sentinel/stop."""
+                    item = self._work_q.get()
+                    if item is _BULK_SENTINEL or self.stop_event.is_set():
+                        return False
+                    vm_id, fp = item
+                    if Path(fp).exists():
+                        fut = pool.submit(_process_file_sync, fp)
+                        pending[fut] = (vm_id, fp)
+                    else:
+                        self.logger.log(MODULE_NAME,
+                            f"BulkProcessor: file missing, skipping VM #{vm_id}", "WARNING")
+                    return True
+
+                # Prime the executor with up to n_workers tasks immediately
+                for _ in range(n_workers):
+                    if not _try_submit():
+                        alive = False
+                        break
+
+                while alive or pending:
                     if self.stop_event.is_set():
                         self.logger.log(MODULE_NAME,
                             "BulkProcessor: stop requested — exiting early")
                         pool.shutdown(wait=False, cancel_futures=True)
                         break
 
-                    vm_id, fp = future_map[future]
-                    try:
-                        transcript, duration, waveform, is_broken = future.result()
-                        if is_broken:
-                            broken_path = str(_broken_dir() / Path(fp).name)
-                            batch_broken.append((broken_path, vm_id))
-                        else:
-                            batch_buf.append((vm_id, transcript or "", duration, waveform, fp))
-                        done += 1
-                    except Exception as exc:
-                        self.logger.log(MODULE_NAME,
-                            f"BulkProcessor: error on VM #{vm_id} ({fp}): {exc}", "WARNING")
-                        errors += 1
-                        done   += 1
+                    # Harvest completed futures
+                    completed = [f for f in list(pending) if f.done()]
+                    for future in completed:
+                        vm_id, fp = pending.pop(future)
+                        try:
+                            transcript, duration, waveform, is_broken = future.result()
+                            if is_broken:
+                                broken_path = str(_broken_dir() / Path(fp).name)
+                                batch_broken.append((broken_path, vm_id))
+                            else:
+                                batch_buf.append((vm_id, transcript or "", duration, waveform, fp))
+                            done += 1
+                        except Exception as exc:
+                            self.logger.log(MODULE_NAME,
+                                f"BulkProcessor: error on VM #{vm_id}: {exc}", "WARNING")
+                            errors += 1
+                            done   += 1
 
-                    # Commit batch
-                    if len(batch_buf) >= BULK_BATCH_SIZE or len(batch_broken) >= BULK_BATCH_SIZE:
-                        self._commit_batch(batch_buf)
-                        self._commit_broken(batch_broken)
-                        batch_buf    = []
-                        batch_broken = []
-                        self.logger.log(MODULE_NAME,
-                            f"BulkProcessor: {done}/{total} processed "
-                            f"({errors} errors) — batch committed")
+                        # Commit if batch is full
+                        if len(batch_buf) >= BULK_BATCH_SIZE or len(batch_broken) >= BULK_BATCH_SIZE:
+                            self._commit_batch(batch_buf)
+                            self._commit_broken(batch_broken)
+                            batch_buf    = []
+                            batch_broken = []
+                            self.logger.log(MODULE_NAME,
+                                f"BulkProcessor: {done} processed ({errors} errors) — batch committed")
 
-            # Commit any remainder
+                        # Refill the freed executor slot
+                        if alive:
+                            alive = _try_submit()
+
+                    # Nothing finished yet — yield briefly to avoid spinning
+                    if not completed:
+                        time.sleep(0.05)
+
+            # Final commit for any remainder
             if batch_buf:
                 self._commit_batch(batch_buf)
             if batch_broken:
@@ -677,7 +721,7 @@ class BulkProcessor:
                 f"BulkProcessor: fatal error — {exc}", "ERROR")
 
         self.logger.log(MODULE_NAME,
-            f"BulkProcessor complete: {done}/{total} processed, {errors} errors")
+            f"BulkProcessor complete: {done} processed, {errors} errors")
 
     def _commit_batch(self, batch: list):
         """
@@ -791,8 +835,9 @@ class VMSManager:
                                                  thread_name_prefix="vms_scan")
         self.queue: asyncio.Queue = asyncio.Queue()
         self._queue_task: Optional[asyncio.Task] = None
-        self._bulk_stop  = threading.Event()
+        self._bulk_stop       = threading.Event()
         self._bulk_proc: Optional[BulkProcessor] = None
+        self._backfill_running = False
 
         _init_db(self.db_path)
 
@@ -1180,8 +1225,12 @@ class VMSManager:
     async def process_unprocessed(self):
         """
         Startup entry point — offloads all blocking scan/conform/rename work
-        to a thread executor so the event loop never freezes, then dispatches
-        the resulting pending list for transcription.
+        to a thread executor so the event loop never freezes, then feeds the
+        resulting pending list into the shared BulkProcessor.
+
+        If BulkProcessor isn't running yet (no backfill in progress) this
+        method starts it.  Either way it feeds all pending files and signals
+        done_feeding() so the worker knows this producer is finished.
         """
         self.bot.logger.log(MODULE_NAME,
             "Startup scan: conforming names and registering files in all dirs…")
@@ -1190,14 +1239,19 @@ class VMSManager:
             self._scan_executor, self._scan_and_conform
         )
 
-        # ── Phase 4: Dispatch (back in async context) ─────────────────────────
         if not valid:
             self.bot.logger.log(MODULE_NAME, "No pending VMs to process")
+            # Still signal done so BulkProcessor (if already running from
+            # backfill) knows the scan producer is finished.
+            if self._bulk_proc and self._bulk_proc.is_running():
+                self._bulk_proc.done_feeding()
             return
 
-        if len(valid) > BULK_BATCH_SIZE:
-            self.bot.logger.log(MODULE_NAME,
-                f"Large backlog ({len(valid)} files) — launching BulkProcessor")
+        self.bot.logger.log(MODULE_NAME,
+            f"Scan found {len(valid)} pending VM(s) — feeding BulkProcessor")
+
+        # Start BulkProcessor if backfill didn't already start it
+        if self._bulk_proc is None or not self._bulk_proc.is_running():
             self._bulk_stop.clear()
             self._bulk_proc = BulkProcessor(
                 db_path=self.db_path,
@@ -1205,12 +1259,16 @@ class VMSManager:
                 logger=self.bot.logger,
                 stop_event=self._bulk_stop,
             )
-            self._bulk_proc.start(valid)
-        else:
-            for vm_id, fp in valid:
-                await self.enqueue(vm_id, fp)
-            self.bot.logger.log(MODULE_NAME,
-                f"Queued {len(valid)} pending VM(s) for transcription")
+            self._bulk_proc.start()
+
+        for vm_id, fp in valid:
+            self._bulk_proc.feed(vm_id, fp)
+
+        # Signal that the scan producer is done.
+        # If backfill is also running it will call done_feeding() itself when
+        # it finishes, so we only call it here when there's no backfill.
+        if not self._backfill_running:
+            self._bulk_proc.done_feeding()
 
     # ---------------------------------------------------------- Archive Job --
 
@@ -1457,11 +1515,13 @@ class VMSManager:
         download any that aren't already in the DB.
 
         Only runs when /vms is completely empty (fresh install / wiped cache).
-        Uses the bot's own HTTP session so no extra credentials are needed.
-        Skips messages whose discord_message_id is already in the DB.
-        Downloads are written directly to canonical vm-{id}.ogg paths so the
-        subsequent scan/conform pass has nothing extra to do.
+        Starts BulkProcessor immediately so transcription begins in parallel
+        with downloading — each file is fed to BulkProcessor as soon as it
+        lands on disk.  Calls done_feeding() when the download loop finishes
+        so the worker knows to drain and exit.
         """
+        self._backfill_running = True
+
         # Find #general in any guild the bot is in
         general_channel = None
         for guild in self.bot.guilds:
@@ -1473,6 +1533,7 @@ class VMSManager:
         if general_channel is None:
             self.bot.logger.log(MODULE_NAME,
                 "Backfill: could not find #general in any guild — skipping", "WARNING")
+            self._backfill_running = False
             return
 
         from datetime import timezone, timedelta
@@ -1480,7 +1541,17 @@ class VMSManager:
 
         self.bot.logger.log(MODULE_NAME,
             f"Backfill: scanning #{general_channel.name} in '{general_channel.guild.name}' "
-            f"back to {cutoff_dt.strftime('%Y-%m-%d')}…")
+            f"back to {cutoff_dt.strftime('%Y-%m-%d')} — BulkProcessor will transcribe concurrently…")
+
+        # Start BulkProcessor now so it's ready to receive files immediately
+        self._bulk_stop.clear()
+        self._bulk_proc = BulkProcessor(
+            db_path=self.db_path,
+            vms_dir=self.vms_dir,
+            logger=self.bot.logger,
+            stop_event=self._bulk_stop,
+        )
+        self._bulk_proc.start()
 
         # Build set of already-known message IDs so we skip them fast
         known_ids = {
@@ -1491,18 +1562,16 @@ class VMSManager:
         downloaded  = 0
         skipped     = 0
         errors      = 0
-        msgs_seen   = 0   # every message scanned (VM or not) — used for pacing
+        msgs_seen   = 0
 
-        # Pacing constants
-        BACKFILL_SLEEP_EVERY  = 200   # pause after every N messages scanned
-        BACKFILL_SLEEP_SECS   = 2.0   # how long to pause
-        BACKFILL_DL_SLEEP     = 0.5   # short sleep after each download
+        BACKFILL_SLEEP_EVERY = 200
+        BACKFILL_SLEEP_SECS  = 2.0
+        BACKFILL_DL_SLEEP    = 0.5
 
         try:
             async for message in general_channel.history(limit=None, after=cutoff_dt, oldest_first=True):
                 msgs_seen += 1
 
-                # Gentle pause every N messages to avoid hammering the gateway
                 if msgs_seen % BACKFILL_SLEEP_EVERY == 0:
                     self.bot.logger.log(MODULE_NAME,
                         f"Backfill: scanned {msgs_seen} messages "
@@ -1556,6 +1625,9 @@ class VMSManager:
                             (canon_name, str(canon_path), duration, vm_id)
                         )
 
+                        # Feed immediately to BulkProcessor — transcription starts now
+                        self._bulk_proc.feed(vm_id, str(canon_path))
+
                         known_ids.add(msg_id_str)
                         downloaded += 1
 
@@ -1563,7 +1635,6 @@ class VMSManager:
                             self.bot.logger.log(MODULE_NAME,
                                 f"Backfill: {downloaded} downloaded so far…")
 
-                        # Brief sleep after each download so we don't burst the CDN
                         await asyncio.sleep(BACKFILL_DL_SLEEP)
 
                     except Exception as exc:
@@ -1574,11 +1645,17 @@ class VMSManager:
         except discord.Forbidden:
             self.bot.logger.log(MODULE_NAME,
                 f"Backfill: no permission to read #{general_channel.name} — skipping", "WARNING")
-            return
         except Exception as exc:
             self.bot.logger.log(MODULE_NAME,
                 f"Backfill: history scrape error — {exc}", "ERROR")
-            return
+        finally:
+            self._backfill_running = False
+            # Signal BulkProcessor that backfill is done producing.
+            # process_unprocessed() may also call done_feeding() if it finishes
+            # after us, but done_feeding() just pushes a sentinel — harmless to
+            # push more than one since the worker exits on the first.
+            if self._bulk_proc and self._bulk_proc.is_running():
+                self._bulk_proc.done_feeding()
 
         self.bot.logger.log(MODULE_NAME,
             f"Backfill complete: {downloaded} downloaded, {skipped} already known, {errors} errors")
@@ -1586,20 +1663,29 @@ class VMSManager:
     # ---------------------------------------------------------------- Startup --
 
     async def startup(self):
-        """Full startup sequence: queue worker → backfill (if empty) → scan → archive check."""
+        """
+        Full startup sequence:
+          1. Queue worker (live VMs)
+          2a. If /vms is empty — backfill from Discord AND scan concurrently,
+              both feeding a single BulkProcessor that transcribes as files arrive.
+          2b. Otherwise — scan only, feed BulkProcessor as normal.
+          3. Archive check.
+        """
         await self._start_queue_worker()
         await asyncio.sleep(0.5)
 
-        # Backfill from Discord if /vms is completely empty
         if not any(self.vms_dir.glob("*.ogg")):
             self.bot.logger.log(MODULE_NAME,
-                "Cache is empty — starting Discord backfill before scan…")
-            await self._backfill_from_discord()
+                "Cache is empty — starting Discord backfill and scan concurrently…")
+            # Run both concurrently — backfill downloads while scan conforms
+            # any pre-existing DB rows; both feed the same BulkProcessor.
+            await asyncio.gather(
+                self._backfill_from_discord(),
+                self.process_unprocessed(),
+            )
         else:
-            self.bot.logger.log(MODULE_NAME,
-                f"Cache populated — skipping backfill")
+            await self.process_unprocessed()
 
-        await self.process_unprocessed()
         await self.run_archive_if_due()
         self.bot.logger.log(MODULE_NAME, "VMS startup complete")
 

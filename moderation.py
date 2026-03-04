@@ -3,7 +3,9 @@ import discord
 from discord import app_commands, ui
 from discord.ext import commands, tasks
 import re
-from datetime import datetime, timedelta
+import hashlib
+import uuid
+from datetime import datetime, timedelta, timezone
 import asyncio
 from typing import Optional, Dict, List
 import sqlite3
@@ -11,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import io
+from dataclasses import dataclass, field as _field
 from PIL import Image, ImageDraw, ImageFont
 import pytz
 import tempfile
@@ -576,20 +579,30 @@ class AppealVoteView(ui.View):
         self.moderation = moderation_system
         self.appeal_id  = appeal_id
 
-    def _update_labels(self):
-        appeal = self.moderation._get_appeal(self.appeal_id)
-        if not appeal:
-            return
-        accept_count = len(json.loads(appeal["votes_for"]))
-        deny_count   = len(json.loads(appeal["votes_against"]))
-        for item in self.children:
-            if hasattr(item, 'custom_id'):
-                if 'accept' in item.custom_id:
-                    item.label = f"Accept ({accept_count})"
-                elif 'deny' in item.custom_id:
-                    item.label = f"Deny ({deny_count})"
+    def _updated_embed(self, message: discord.Message,
+                        votes_for: list, votes_against: list) -> discord.Embed:
+        """Return a copy of the message embed with the vote counts updated."""
+        old = message.embeds[0] if message.embeds else None
+        embed = discord.Embed(
+            title=old.title if old else "📝 Ban Appeal",
+            description=old.description if old else "",
+            color=old.color if old else 0x9b59b6,
+            timestamp=old.timestamp if old else datetime.now(timezone.utc),
+        )
+        for field in (old.fields if old else []):
+            if field.name == "Votes":
+                continue  # will re-add below
+            embed.add_field(name=field.name, value=field.value, inline=field.inline)
+        embed.add_field(
+            name="Votes",
+            value=f"✅ Yes: **{len(votes_for)}**  ·  ❌ No: **{len(votes_against)}**",
+            inline=False,
+        )
+        if old and old.footer:
+            embed.set_footer(text=old.footer.text)
+        return embed
 
-    @ui.button(label="Accept (0)", style=discord.ButtonStyle.green,
+    @ui.button(label="Vote Yes", style=discord.ButtonStyle.green,
                emoji="✅", custom_id="appeal_accept")
     async def accept_button(self, interaction: discord.Interaction, button: ui.Button):
         cfg = self.moderation.cfg
@@ -609,7 +622,7 @@ class AppealVoteView(ui.View):
 
         if uid in votes_for:
             await interaction.response.send_message(
-                "You already voted to accept.", ephemeral=True)
+                "You already voted Yes.", ephemeral=True)
             return
         if uid in votes_against:
             votes_against.remove(uid)
@@ -617,12 +630,10 @@ class AppealVoteView(ui.View):
 
         self.moderation._update_appeal_votes(
             self.appeal_id, votes_for, votes_against)
-        self._update_labels()
-        await interaction.message.edit(view=self)
-        await interaction.response.send_message(
-            "✅ Vote recorded: Accept.", ephemeral=True)
+        updated_embed = self._updated_embed(interaction.message, votes_for, votes_against)
+        await interaction.response.edit_message(embed=updated_embed, view=self)
 
-    @ui.button(label="Deny (0)", style=discord.ButtonStyle.red,
+    @ui.button(label="Vote No", style=discord.ButtonStyle.red,
                emoji="❌", custom_id="appeal_deny")
     async def deny_button(self, interaction: discord.Interaction, button: ui.Button):
         cfg = self.moderation.cfg
@@ -642,7 +653,7 @@ class AppealVoteView(ui.View):
 
         if uid in votes_against:
             await interaction.response.send_message(
-                "You already voted to deny.", ephemeral=True)
+                "You already voted No.", ephemeral=True)
             return
         if uid in votes_for:
             votes_for.remove(uid)
@@ -650,10 +661,8 @@ class AppealVoteView(ui.View):
 
         self.moderation._update_appeal_votes(
             self.appeal_id, votes_for, votes_against)
-        self._update_labels()
-        await interaction.message.edit(view=self)
-        await interaction.response.send_message(
-            "❌ Vote recorded: Deny.", ephemeral=True)
+        updated_embed = self._updated_embed(interaction.message, votes_for, votes_against)
+        await interaction.response.edit_message(embed=updated_embed, view=self)
 
 
 class BanAppealModal(ui.Modal, title="Ban Appeal"):
@@ -677,7 +686,7 @@ class BanAppealModal(ui.Modal, title="Ban Appeal"):
             title="✅ Appeal Submitted",
             description="Your ban appeal has been submitted and will be reviewed.",
             color=0x2ecc71,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
         embed.add_field(
             name="What happens next?",
@@ -689,8 +698,6 @@ class BanAppealModal(ui.Modal, title="Ban Appeal"):
 
 
 # ==================== MEDIA SAFETY SCANNER ====================
-
-from dataclasses import dataclass, field as _field
 
 _EXPLICIT_LABELS = {
     "EXPOSED_ANUS", "EXPOSED_BUTTOCKS", "EXPOSED_BREAST_F",
@@ -759,14 +766,14 @@ class MediaScanner:
         async with self._load_lock:
             if self._models_loaded:
                 return
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, _load_nudenet)
             await loop.run_in_executor(None, _load_deepface)
             self._models_loaded = True
 
     async def scan_files(self, files_data: list, guild=None, context: str = "") -> ScanVerdict:
         await self._ensure_models()
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         safe, blocked = [], []
 
         for entry in files_data:
@@ -884,7 +891,7 @@ class MediaScanner:
                 "**No image content is included in this report.**"
             ),
             color=0xff0000,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
         embed.add_field(name="Context", value=context or "*(none)*", inline=False)
         embed.add_field(
@@ -963,7 +970,6 @@ class RulesManager:
 
     @staticmethod
     def _hash_rules(data: dict) -> str:
-        import hashlib
         return hashlib.sha256(
             json.dumps(data, sort_keys=True, ensure_ascii=False).encode()
         ).hexdigest()
@@ -989,7 +995,7 @@ class RulesManager:
             title=f"📜  {data.get('title', 'Server Rules')}",
             description=data.get("description", ""),
             color=color,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
         for rule in data.get("rules", []):
             embed.add_field(
@@ -1136,7 +1142,7 @@ class ModerationSystem:
         # Record this startup
         _db_exec(self._db,
                  "INSERT INTO mod_startup_log (startup_time) VALUES (?)",
-                 (int(datetime.utcnow().timestamp()),))
+                 (int(datetime.now(timezone.utc).timestamp()),))
 
         # Background tasks
         self.check_expired_mutes.start()
@@ -1169,7 +1175,7 @@ class ModerationSystem:
             "INSERT INTO mod_member_roles (guild_id, user_id, role_ids, saved_at, username) "
             "VALUES (?,?,?,?,?) ON CONFLICT(guild_id, user_id) DO UPDATE SET "
             "role_ids=excluded.role_ids, saved_at=excluded.saved_at, username=excluded.username",
-            (gk, uk, role_ids, datetime.utcnow().isoformat(), str(member)),
+            (gk, uk, role_ids, datetime.now(timezone.utc).isoformat(), str(member)),
         )
 
     async def restore_member_roles(self, member: discord.Member):
@@ -1194,7 +1200,7 @@ class ModerationSystem:
     def add_strike(self, user_id, reason) -> int:
         self._exec(
             "INSERT INTO mod_strikes (user_id, timestamp, reason) VALUES (?,?,?)",
-            (str(user_id), datetime.utcnow().isoformat(), reason),
+            (str(user_id), datetime.now(timezone.utc).isoformat(), reason),
         )
         return self.get_strikes(user_id)
 
@@ -1222,7 +1228,7 @@ class ModerationSystem:
     def add_mute(self, guild_id, user_id, reason, moderator, duration_seconds=None):
         expiry = None
         if duration_seconds:
-            expiry = (datetime.utcnow() + timedelta(seconds=duration_seconds)).isoformat()
+            expiry = (datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)).isoformat()
         self._exec(
             "INSERT INTO mod_mutes (guild_id, user_id, reason, moderator, timestamp, "
             "duration_seconds, expiry_time) VALUES (?,?,?,?,?,?,?) "
@@ -1231,7 +1237,7 @@ class ModerationSystem:
             "timestamp=excluded.timestamp, duration_seconds=excluded.duration_seconds, "
             "expiry_time=excluded.expiry_time",
             (str(guild_id), str(user_id), reason, str(moderator),
-             datetime.utcnow().isoformat(), duration_seconds, expiry),
+             datetime.now(timezone.utc).isoformat(), duration_seconds, expiry),
         )
 
     def remove_mute(self, guild_id, user_id):
@@ -1247,7 +1253,7 @@ class ModerationSystem:
         return row is not None
 
     def get_expired_mutes(self) -> list:
-        now  = datetime.utcnow().isoformat()
+        now  = datetime.now(timezone.utc).isoformat()
         rows = self._all(
             "SELECT guild_id, user_id FROM mod_mutes "
             "WHERE expiry_time IS NOT NULL AND expiry_time <= ?",
@@ -1383,7 +1389,7 @@ class ModerationSystem:
         if action_data['action'] in ['mute', 'warn', 'timeout']:
             return None
         action_id = (f"{action_data['guild_id']}_{action_data['action']}_"
-                     f"{int(datetime.utcnow().timestamp())}")
+                     f"{int(datetime.now(timezone.utc).timestamp())}_{uuid.uuid4().hex[:8]}")
         context_messages = []
         if 'message_id' in action_data and 'channel_id' in action_data:
             context_messages = self.get_context_messages(
@@ -1408,7 +1414,7 @@ class ModerationSystem:
                 action_data['guild_id'],
                 action_data.get('channel_id'),
                 action_data.get('message_id'),
-                datetime.utcnow().isoformat(),
+                datetime.now(timezone.utc).isoformat(),
                 json.dumps(context_messages),
                 action_data.get('duration'),
                 json.dumps(action_data.get('additional', {})),
@@ -1452,11 +1458,20 @@ class ModerationSystem:
         }
 
     def resolve_pending_action(self, user_id: int, action_type: str):
-        self._exec(
-            "DELETE FROM mod_pending_actions "
-            "WHERE user_id=? AND action=? AND status='pending'",
+        # Delete only the most recent pending action of this type for the user,
+        # to avoid accidentally wiping multiple records if the user was banned
+        # more than once.
+        row = self._one(
+            "SELECT action_id FROM mod_pending_actions "
+            "WHERE user_id=? AND action=? AND status='pending' "
+            "ORDER BY timestamp DESC LIMIT 1",
             (user_id, action_type),
         )
+        if row:
+            self._exec(
+                "DELETE FROM mod_pending_actions WHERE action_id=?",
+                (row["action_id"],),
+            )
 
     async def send_cached_media_to_logs(
         self, guild: discord.Guild, message_id: int,
@@ -1481,7 +1496,7 @@ class ModerationSystem:
             return
         embed = discord.Embed(
             title=reason, color=discord.Color.orange(),
-            timestamp=datetime.utcnow())
+            timestamp=datetime.now(timezone.utc))
         embed.add_field(name="User",       value=author_str,           inline=True)
         embed.add_field(name="Message ID", value=str(message_id),      inline=True)
         if extra_content:
@@ -1492,11 +1507,16 @@ class ModerationSystem:
 
     def track_embed(self, message_id: int, action_id: str, embed_type: str):
         self.tracked_embeds[message_id] = {'action_id': action_id, 'type': embed_type}
-        col = "embed_id_inchat" if embed_type == 'inchat' else "embed_id_botlog"
-        self._exec(
-            f"UPDATE mod_pending_actions SET {col}=? WHERE action_id=?",
-            (message_id, action_id),
-        )
+        _col_map = {'inchat': 'embed_id_inchat', 'botlog': 'embed_id_botlog'}
+        col = _col_map.get(embed_type)
+        if col is None:
+            self.bot.logger.log(MODULE_NAME, f"track_embed: unknown embed_type {embed_type!r}", "WARNING")
+            return
+        queries = {
+            'embed_id_inchat': "UPDATE mod_pending_actions SET embed_id_inchat=? WHERE action_id=?",
+            'embed_id_botlog': "UPDATE mod_pending_actions SET embed_id_botlog=? WHERE action_id=?",
+        }
+        self._exec(queries[col], (message_id, action_id))
 
     async def handle_embed_deletion(self, message_id: int):
         if message_id not in self.tracked_embeds:
@@ -1574,7 +1594,7 @@ class ModerationSystem:
                     title="Ban Reverted",
                     description=f"After reviewing your case, we've decided to revert "
                                 f"your ban from **{guild.name}**.",
-                    color=0x2ecc71, timestamp=datetime.utcnow())
+                    color=0x2ecc71, timestamp=datetime.now(timezone.utc))
                 embed.add_field(name="Rejoin Server",
                                 value=f"You can rejoin using this invite:\n{invite_link}",
                                 inline=False)
@@ -1587,7 +1607,7 @@ class ModerationSystem:
                 log_embed = discord.Embed(
                     title="Ban Reverted (Review System)",
                     description=f"**{user}** ({user_id}) has been unbanned after review.",
-                    color=0x2ecc71, timestamp=datetime.utcnow())
+                    color=0x2ecc71, timestamp=datetime.now(timezone.utc))
                 log_embed.add_field(name="Original Reason", value=action['reason'], inline=False)
                 log_embed.add_field(name="Original Moderator", value=action['moderator'], inline=True)
                 await self.send_bot_log(guild, log_embed)
@@ -1612,7 +1632,7 @@ class ModerationSystem:
                     title="Mute Reverted",
                     description=f"After reviewing your case, your mute in "
                                 f"**{guild.name}** has been reverted.",
-                    color=0x2ecc71, timestamp=datetime.utcnow())
+                    color=0x2ecc71, timestamp=datetime.now(timezone.utc))
                 await member.send(embed=embed)
             except discord.Forbidden:
                 pass
@@ -1621,7 +1641,7 @@ class ModerationSystem:
                 log_embed = discord.Embed(
                     title="Mute Reverted (Review System)",
                     description=f"**{member}** has been unmuted after review.",
-                    color=0x2ecc71, timestamp=datetime.utcnow())
+                    color=0x2ecc71, timestamp=datetime.now(timezone.utc))
                 log_embed.add_field(name="Original Reason", value=action['reason'], inline=False)
                 log_embed.add_field(name="Original Moderator", value=action['moderator'], inline=True)
                 await self.send_bot_log(guild, log_embed)
@@ -1649,7 +1669,7 @@ class ModerationSystem:
                 "INSERT INTO mod_invites (invite_key, code, user_id, guild_id, created_at) "
                 "VALUES (?,?,?,?,?) ON CONFLICT(invite_key) DO UPDATE SET "
                 "code=excluded.code, created_at=excluded.created_at",
-                (key, invite.code, user_id, guild.id, datetime.utcnow().isoformat()),
+                (key, invite.code, user_id, guild.id, datetime.now(timezone.utc).isoformat()),
             )
             return invite.url
         except Exception as e:
@@ -1685,7 +1705,7 @@ class ModerationSystem:
             'files_data':          files_data or [],
             'is_warning':          is_warning,
             'warning_for_log_id':  warning_for_log_id,
-            'timestamp':           datetime.utcnow().isoformat(),
+            'timestamp':           datetime.now(timezone.utc).isoformat(),
         }
         self._bot_log_cache[message_id] = record
         self._bot_log_order.append(message_id)
@@ -1700,7 +1720,7 @@ class ModerationSystem:
         if not bot_logs:
             return None
         if log_id is None:
-            log_id = f"LOG-{int(datetime.utcnow().timestamp() * 1000)}"
+            log_id = f"LOG-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
 
         if files_data:
             verdict = await self.scanner.scan_files(
@@ -1740,7 +1760,7 @@ class ModerationSystem:
 
         log_id             = record['log_id']
         original_embed_data = record['embed']
-        timestamp           = datetime.utcnow()
+        timestamp           = datetime.now(timezone.utc)
 
         # Persist to deletion_attempts table for daily report
         self._exec(
@@ -1769,7 +1789,7 @@ class ModerationSystem:
         if original_embed_data.get('author_name'):
             embed.set_author(
                 name=original_embed_data['author_name'],
-                icon_url=original_embed_data.get('author_icon') or discord.Embed.Empty)
+                icon_url=original_embed_data.get('author_icon') or None)
         if original_embed_data.get('image_url'):
             embed.set_image(url=original_embed_data['image_url'])
         embed.add_field(
@@ -1798,35 +1818,46 @@ class ModerationSystem:
             (json.dumps(votes_for), json.dumps(votes_against), appeal_id),
         )
 
+    @staticmethod
+    def _generate_appeal_id() -> str:
+        """Generate a short 11-character YouTube-style ID."""
+        import string, secrets
+        chars = string.ascii_letters + string.digits + "-_"
+        return ''.join(secrets.choice(chars) for _ in range(11))
+
     async def submit_appeal(self, user_id: int, guild_id: int, appeal_text: str) -> str:
-        appeal_id = f"{guild_id}_{user_id}_{int(datetime.utcnow().timestamp())}"
-        deadline  = (datetime.utcnow() + timedelta(hours=24)).isoformat()
+        appeal_id = self._generate_appeal_id()
+        deadline  = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
         self._exec(
             "INSERT OR REPLACE INTO mod_appeals "
             "(appeal_id, user_id, guild_id, appeal_text, submitted_at, deadline, "
             " status, votes_for, votes_against, channel_message_id) "
             "VALUES (?,?,?,?,?,?,'pending','[]','[]',NULL)",
             (appeal_id, user_id, guild_id, appeal_text,
-             datetime.utcnow().isoformat(), deadline),
+             datetime.now(timezone.utc).isoformat(), deadline),
         )
         self.bot.logger.log(MODULE_NAME, f"Appeal submitted: {appeal_id}")
 
         try:
             guild = self.bot.get_guild(guild_id)
             if guild:
-                appeals_ch = discord.utils.get(guild.text_channels, name="ban-appeals")
+                appeals_ch = discord.utils.get(guild.text_channels, name="mod-chat")
                 if appeals_ch:
                     user = await self.bot.fetch_user(user_id)
                     embed = discord.Embed(
                         title="📝 Ban Appeal",
                         description=appeal_text,
-                        color=0x9b59b6, timestamp=datetime.utcnow())
+                        color=0x9b59b6, timestamp=datetime.now(timezone.utc))
                     embed.add_field(name="User",
                                     value=f"{user} (`{user_id}`)", inline=True)
                     embed.add_field(
                         name="Deadline",
-                        value=f"<t:{int((datetime.utcnow() + timedelta(hours=24)).timestamp())}:R>",
+                        value=f"<t:{int((datetime.now(timezone.utc) + timedelta(hours=24)).timestamp())}:R>",
                         inline=True)
+                    embed.add_field(
+                        name="Votes",
+                        value="✅ Yes: **0**  ·  ❌ No: **0**",
+                        inline=False)
                     embed.set_footer(
                         text=f"Appeal ID: {appeal_id} • "
                              f"Voting closes in 24 hours • Ties are denied")
@@ -1839,7 +1870,7 @@ class ModerationSystem:
                 else:
                     self.bot.logger.log(
                         MODULE_NAME,
-                        "submit_appeal: #ban-appeals channel not found", "WARNING")
+                        "submit_appeal: #mod-chat channel not found", "WARNING")
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to post appeal", e)
 
@@ -1860,7 +1891,7 @@ class ModerationSystem:
                 embed = discord.Embed(
                     title="Ban Appeal Approved",
                     description=f"Your appeal for **{guild.name}** has been approved!",
-                    color=0x2ecc71, timestamp=datetime.utcnow())
+                    color=0x2ecc71, timestamp=datetime.now(timezone.utc))
                 embed.add_field(
                     name="Rejoin Server",
                     value=f"You can rejoin using this invite:\n{invite_link}", inline=False)
@@ -1873,7 +1904,7 @@ class ModerationSystem:
                 log_embed = discord.Embed(
                     title="Ban Appeal Approved",
                     description=f"**{user}** has been unbanned after appeal approval.",
-                    color=0x2ecc71, timestamp=datetime.utcnow())
+                    color=0x2ecc71, timestamp=datetime.now(timezone.utc))
                 log_embed.add_field(name="Appeal Text",
                                     value=row["appeal_text"][:1024], inline=False)
                 await self.send_bot_log(guild, log_embed)
@@ -1894,7 +1925,7 @@ class ModerationSystem:
                 embed = discord.Embed(
                     title="Ban Appeal Denied",
                     description=f"Your appeal for **{guild.name}** has been reviewed and denied.",
-                    color=0xe74c3c, timestamp=datetime.utcnow())
+                    color=0xe74c3c, timestamp=datetime.now(timezone.utc))
                 await user.send(embed=embed)
             except discord.Forbidden:
                 pass
@@ -1974,7 +2005,7 @@ class ModerationSystem:
                 embed = discord.Embed(
                     title="📊 Daily Integrity Report",
                     description="✅ No deletion attempts or mod-action flags in the last 24 hours.",
-                    color=0x2ecc71, timestamp=datetime.utcnow())
+                    color=0x2ecc71, timestamp=datetime.now(timezone.utc))
                 await owner.send(embed=embed)
                 return
 
@@ -1985,13 +2016,13 @@ class ModerationSystem:
                     f"**{len(red_flags)}** 🚩 red-flag mod action(s)\n"
                     f"**{len(yellow_flags)}** ⚠️ yellow-flag mod action(s)"
                 ),
-                color=0xff4500, timestamp=datetime.utcnow())
+                color=0xff4500, timestamp=datetime.now(timezone.utc))
             await owner.send(embed=embed)
 
             if attempt_rows:
                 detail = discord.Embed(
                     title="🗑️ Bot-Log Deletion Attempts",
-                    color=0xff0000, timestamp=datetime.utcnow())
+                    color=0xff0000, timestamp=datetime.now(timezone.utc))
                 for attempt in attempt_rows[:20]:
                     detail.add_field(
                         name=f"Log `{attempt['log_id']}`",
@@ -2017,7 +2048,7 @@ class ModerationSystem:
     @tasks.loop(minutes=1)
     async def resolve_expired_appeals(self):
         try:
-            now      = datetime.utcnow().isoformat()
+            now      = datetime.now(timezone.utc).isoformat()
             past_due = self._all(
                 "SELECT * FROM mod_appeals WHERE status='pending' AND deadline <= ?",
                 (now,))
@@ -2037,7 +2068,7 @@ class ModerationSystem:
                     guild = self.bot.get_guild(row["guild_id"])
                     if guild:
                         appeals_ch = discord.utils.get(
-                            guild.text_channels, name="ban-appeals")
+                            guild.text_channels, name="mod-chat")
                         if appeals_ch and row["channel_message_id"]:
                             try:
                                 msg    = await appeals_ch.fetch_message(
@@ -2093,10 +2124,13 @@ class ModerationSystem:
                         await member.remove_roles(
                             muted_role, reason="Mute duration expired")
                         self.bot.logger.log(MODULE_NAME, f"Auto-unmuted {member}")
+                        self.remove_mute(mute['guild_id'], mute['user_id'])
                     except Exception as e:
                         self.bot.logger.error(
                             MODULE_NAME, f"Failed to auto-unmute {member}", e)
-                self.remove_mute(mute['guild_id'], mute['user_id'])
+                else:
+                    # Role already gone (e.g. manually removed); clean up DB entry
+                    self.remove_mute(mute['guild_id'], mute['user_id'])
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Error in mute expiry checker", e)
 
@@ -2108,7 +2142,7 @@ class ModerationSystem:
     async def cleanup_invites(self):
         try:
             cleanup_days = self.cfg.invite_cleanup_days
-            cutoff = (datetime.utcnow() - timedelta(days=cleanup_days)).isoformat()
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=cleanup_days)).isoformat()
             old_rows = self._all(
                 "SELECT * FROM mod_invites WHERE created_at < ?", (cutoff,))
             for row in old_rows:
@@ -2137,13 +2171,6 @@ class ModerationSystem:
     @tasks.loop(hours=24)
     async def send_daily_report(self):
         try:
-            cst    = pytz.timezone('America/Chicago')
-            now    = datetime.now(cst)
-            target = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            if now >= target:
-                target += timedelta(days=1)
-            wait = (target - now).total_seconds()
-            await asyncio.sleep(wait)
             await self.generate_daily_report()
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to send daily report", e)
@@ -2151,6 +2178,14 @@ class ModerationSystem:
     @send_daily_report.before_loop
     async def before_send_daily_report(self):
         await self.bot.wait_until_ready()
+        # Sleep until the next midnight CST before the first run
+        cst    = pytz.timezone('America/Chicago')
+        now    = datetime.now(cst)
+        target = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
+        wait = (target - now).total_seconds()
+        await asyncio.sleep(wait)
 
 
 # ==================== UNIFIED COMMAND LOGIC ====================
@@ -2194,7 +2229,7 @@ async def _do_ban(ctx: ModContext, mod: ModerationSystem,
                 dm = discord.Embed(
                     title="🔨 You have been banned",
                     description=f"You have been banned from **{ctx.guild.name}**",
-                    color=0x992d22, timestamp=datetime.utcnow())
+                    color=0x992d22, timestamp=datetime.now(timezone.utc))
                 dm.add_field(name="Reason",    value=dm_reason_field,    inline=False)
                 dm.add_field(name="Moderator", value=str(ctx.author),    inline=True)
                 dm.add_field(name="📝 Appeal Process",
@@ -2211,7 +2246,7 @@ async def _do_ban(ctx: ModContext, mod: ModerationSystem,
         embed = discord.Embed(
             title="✅ User Banned",
             description=f"{user.mention} has been banned.",
-            color=0x992d22, timestamp=datetime.utcnow())
+            color=0x992d22, timestamp=datetime.now(timezone.utc))
         if rule_number is not None:
             embed.add_field(name="Rule Violated", value=f"Rule {rule_number}", inline=True)
             embed.add_field(name="Rule Text",     value=rule_text,             inline=False)
@@ -2264,7 +2299,7 @@ async def _do_unban(ctx: ModContext, mod: ModerationSystem,
         embed = discord.Embed(
             title="✅ User Unbanned",
             description=f"{user.mention} has been unbanned.",
-            color=0x2ecc71, timestamp=datetime.utcnow())
+            color=0x2ecc71, timestamp=datetime.now(timezone.utc))
         embed.add_field(name="Reason",    value=reason,              inline=False)
         embed.add_field(name="Moderator", value=ctx.author.mention,  inline=True)
         await ctx.reply(embed=embed)
@@ -2297,7 +2332,7 @@ async def _do_kick(ctx: ModContext, mod: ModerationSystem,
             dm = discord.Embed(
                 title="👢 You have been kicked",
                 description=f"You have been kicked from **{ctx.guild.name}**",
-                color=0xe67e22, timestamp=datetime.utcnow())
+                color=0xe67e22, timestamp=datetime.now(timezone.utc))
             dm.add_field(name="Reason",    value=reason,          inline=False)
             dm.add_field(name="Moderator", value=str(ctx.author), inline=True)
             dm.set_footer(text="You can rejoin if you have an invite link")
@@ -2309,7 +2344,7 @@ async def _do_kick(ctx: ModContext, mod: ModerationSystem,
         embed = discord.Embed(
             title="✅ Member Kicked",
             description=f"{member.mention} has been kicked.",
-            color=0xe67e22, timestamp=datetime.utcnow())
+            color=0xe67e22, timestamp=datetime.now(timezone.utc))
         embed.add_field(name="Reason",    value=reason,             inline=False)
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
         inchat_msg_id = await ctx.reply(embed=embed)
@@ -2353,12 +2388,12 @@ async def _do_timeout(ctx: ModContext, mod: ModerationSystem,
     try:
         if not fake:
             await member.timeout(
-                datetime.utcnow() + timedelta(minutes=duration),
+                datetime.now(timezone.utc) + timedelta(minutes=duration),
                 reason=f"{reason} - By {ctx.author}")
         embed = discord.Embed(
             title="✅ Member Timed Out",
             description=f"{member.mention} timed out for **{duration}** minutes.",
-            color=0xe74c3c, timestamp=datetime.utcnow())
+            color=0xe74c3c, timestamp=datetime.now(timezone.utc))
         embed.add_field(name="Reason",    value=reason,              inline=False)
         embed.add_field(name="Moderator", value=ctx.author.mention,  inline=True)
         embed.add_field(name="Duration",  value=f"{duration} minutes", inline=True)
@@ -2389,7 +2424,7 @@ async def _do_untimeout(ctx: ModContext, mod: ModerationSystem,
         embed = discord.Embed(
             title="✅ Timeout Removed",
             description=f"{member.mention}'s timeout has been removed.",
-            color=0x2ecc71, timestamp=datetime.utcnow())
+            color=0x2ecc71, timestamp=datetime.now(timezone.utc))
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
         await ctx.reply(embed=embed)
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} removed timeout from {member}")
@@ -2430,7 +2465,7 @@ async def _do_mute(ctx: ModContext, mod: ModerationSystem,
             dm = discord.Embed(
                 title="🔇 You Have Been Muted",
                 description=f"You have been muted in **{ctx.guild.name}**.",
-                color=0xf39c12, timestamp=datetime.utcnow())
+                color=0xf39c12, timestamp=datetime.now(timezone.utc))
             dm.add_field(name="Reason",    value=reason,          inline=False)
             dm.add_field(name="Duration",  value=duration_str,    inline=True)
             dm.add_field(name="Moderator", value=str(ctx.author), inline=True)
@@ -2440,7 +2475,7 @@ async def _do_mute(ctx: ModContext, mod: ModerationSystem,
         embed = discord.Embed(
             title="✅ Member Muted",
             description=f"{member.mention} has been muted.",
-            color=0xf39c12, timestamp=datetime.utcnow())
+            color=0xf39c12, timestamp=datetime.now(timezone.utc))
         embed.add_field(name="Reason",    value=reason,             inline=False)
         embed.add_field(name="Duration",  value=duration_str,       inline=True)
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
@@ -2473,7 +2508,7 @@ async def _do_unmute(ctx: ModContext, mod: ModerationSystem,
         embed = discord.Embed(
             title="✅ Member Unmuted",
             description=f"{member.mention} has been unmuted.",
-            color=0x2ecc71, timestamp=datetime.utcnow())
+            color=0x2ecc71, timestamp=datetime.now(timezone.utc))
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
         await ctx.reply(embed=embed)
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} unmuted {member}")
@@ -2506,7 +2541,7 @@ async def _do_softban(ctx: ModContext, mod: ModerationSystem,
         embed = discord.Embed(
             title="✅ Member Softbanned",
             description=f"{member.mention} softbanned (messages deleted, can rejoin).",
-            color=0x992d22, timestamp=datetime.utcnow())
+            color=0x992d22, timestamp=datetime.now(timezone.utc))
         embed.add_field(name="Reason",            value=reason,              inline=False)
         embed.add_field(name="Moderator",         value=ctx.author.mention,  inline=True)
         embed.add_field(name="Messages Deleted",  value=f"{delete_days} days", inline=True)
@@ -2554,7 +2589,7 @@ async def _do_warn(ctx: ModContext, mod: ModerationSystem,
             dm = discord.Embed(
                 title="⚠️ Warning",
                 description=f"You have been warned in **{ctx.guild.name}**",
-                color=0xf39c12, timestamp=datetime.utcnow())
+                color=0xf39c12, timestamp=datetime.now(timezone.utc))
             dm.add_field(name="Reason",          value=reason,               inline=False)
             dm.add_field(name="Moderator",        value=str(ctx.author),      inline=True)
             dm.add_field(name="Total Warnings",   value=str(strike_count),    inline=True)
@@ -2564,7 +2599,7 @@ async def _do_warn(ctx: ModContext, mod: ModerationSystem,
         embed = discord.Embed(
             title="⚠️ Member Warned",
             description=f"{member.mention} has been warned.",
-            color=0xf39c12, timestamp=datetime.utcnow())
+            color=0xf39c12, timestamp=datetime.now(timezone.utc))
         embed.add_field(name="Reason",        value=reason,             inline=False)
         embed.add_field(name="Moderator",     value=ctx.author.mention, inline=True)
         embed.add_field(name="Total Warnings", value=str(strike_count), inline=True)
@@ -2589,7 +2624,7 @@ async def _do_warnings(ctx: ModContext, mod: ModerationSystem, member: discord.M
     embed = discord.Embed(
         title=f"⚠️ Warnings for {member}",
         description=f"Total warnings: **{len(strikes)}**",
-        color=0xf39c12, timestamp=datetime.utcnow())
+        color=0xf39c12, timestamp=datetime.now(timezone.utc))
     for i, s in enumerate(strikes[-10:], 1):
         ts = datetime.fromisoformat(s['timestamp']).strftime("%Y-%m-%d %H:%M UTC")
         embed.add_field(
@@ -2607,7 +2642,7 @@ async def _do_clearwarnings(ctx: ModContext, mod: ModerationSystem, member: disc
         embed = discord.Embed(
             title="✅ Warnings Cleared",
             description=f"All warnings cleared for **{member}**.",
-            color=0x2ecc71, timestamp=datetime.utcnow())
+            color=0x2ecc71, timestamp=datetime.now(timezone.utc))
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
         await ctx.reply(embed=embed)
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} cleared warnings for {member}")
@@ -2640,7 +2675,7 @@ async def _do_purge(ctx: ModContext, mod: ModerationSystem,
             title="✅ Messages Purged",
             description=f"Deleted **{len(deleted)}** messages"
                         f"{f' from {target.mention}' if target else ''}.",
-            color=0x2ecc71, timestamp=datetime.utcnow())
+            color=0x2ecc71, timestamp=datetime.now(timezone.utc))
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
         embed.add_field(name="Channel",   value=ctx.channel.mention, inline=True)
         inchat_msg_id = await ctx.followup(embed=embed)
@@ -2716,7 +2751,7 @@ async def _do_lock(ctx: ModContext, mod: ModerationSystem,
         embed = discord.Embed(
             title="🔒 Channel Locked",
             description=f"{target.mention} has been locked.",
-            color=0xe74c3c, timestamp=datetime.utcnow())
+            color=0xe74c3c, timestamp=datetime.now(timezone.utc))
         embed.add_field(name="Reason",    value=reason,             inline=False)
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
         inchat_msg_id = await ctx.reply(embed=embed)
@@ -2755,7 +2790,7 @@ async def _do_unlock(ctx: ModContext, mod: ModerationSystem,
         embed = discord.Embed(
             title="🔓 Channel Unlocked",
             description=f"{target.mention} has been unlocked.",
-            color=0x2ecc71, timestamp=datetime.utcnow())
+            color=0x2ecc71, timestamp=datetime.now(timezone.utc))
         embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
         await ctx.reply(embed=embed)
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} unlocked {target.name}")
@@ -2920,18 +2955,17 @@ def setup(bot):
             return await ctx.send(
                 "❌ Usage: `?ban @user <reason> [rule:<n>] [days:<0-7>] [fake]`",
                 delete_after=10)
-        import re as _re
         working    = args
-        fake       = bool(_re.search(r'(?:^|\s)fake(?:\s|$)', working, _re.IGNORECASE))
-        working    = _re.sub(r'(?:^|\s)fake(?=\s|$)', ' ', working, flags=_re.IGNORECASE)
-        rule_match = _re.search(r'(?:^|\s)rule:(\d+)(?=\s|$)', working, _re.IGNORECASE)
+        fake       = bool(re.search(r'(?:^|\s)fake(?:\s|$)', working, re.IGNORECASE))
+        working    = re.sub(r'(?:^|\s)fake(?=\s|$)', ' ', working, flags=re.IGNORECASE)
+        rule_match = re.search(r'(?:^|\s)rule:(\d+)(?=\s|$)', working, re.IGNORECASE)
         rule_number = int(rule_match.group(1)) if rule_match else None
         if rule_match:
-            working = _re.sub(r'(?:^|\s)rule:\d+(?=\s|$)', ' ', working, flags=_re.IGNORECASE)
-        days_match  = _re.search(r'(?:^|\s)days:(\d+)(?=\s|$)', working, _re.IGNORECASE)
+            working = re.sub(r'(?:^|\s)rule:\d+(?=\s|$)', ' ', working, flags=re.IGNORECASE)
+        days_match  = re.search(r'(?:^|\s)days:(\d+)(?=\s|$)', working, re.IGNORECASE)
         delete_days = int(days_match.group(1)) if days_match else 0
         if days_match:
-            working = _re.sub(r'(?:^|\s)days:\d+(?=\s|$)', ' ', working, flags=_re.IGNORECASE)
+            working = re.sub(r'(?:^|\s)days:\d+(?=\s|$)', ' ', working, flags=re.IGNORECASE)
         reason = working.strip() or None
         if rule_number is None and not reason:
             return await ctx.send(
@@ -3285,7 +3319,7 @@ def setup(bot):
                 embed = discord.Embed(
                     title="✂️ Attachment Removed from Message",
                     color=discord.Color.yellow(),
-                    timestamp=datetime.utcnow())
+                    timestamp=datetime.now(timezone.utc))
                 embed.set_author(
                     name=str(after.author),
                     icon_url=after.author.display_avatar.url)
@@ -3316,7 +3350,7 @@ def setup(bot):
         other_files  = [f for f in removed_files
                         if not f['filename'].lower().endswith(image_exts)]
 
-        embed = discord.Embed(color=discord.Color.yellow(), timestamp=datetime.utcnow())
+        embed = discord.Embed(color=discord.Color.yellow(), timestamp=datetime.now(timezone.utc))
         embed.set_author(name=str(after.author),
                          icon_url=after.author.display_avatar.url)
         description = (f"**{after.author.mention} removed an attachment "

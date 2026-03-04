@@ -818,6 +818,13 @@ class CommunitySystem:
 
     async def handle_edit(self, payload: discord.RawMessageUpdateEvent):
         """Sync an edited submission. Skip if older than 30 days."""
+        # Discord fires on_raw_message_edit for its own URL embed unfurling.
+        # These payloads only contain 'embeds' and/or 'flags' — no actual user edit.
+        # Skip them to avoid spamming false "Synced edit (changed=False)" log lines.
+        _embed_only_keys = {"embeds", "flags", "id", "channel_id", "guild_id"}
+        if payload.data and set(payload.data.keys()) <= _embed_only_keys:
+            return
+
         sub = self.db.by_message(payload.message_id)
         if not sub:
             return
@@ -889,6 +896,33 @@ class CommunitySystem:
             kwargs["version"]       = f"v{maj}.{min_}"
             kwargs["version_major"] = maj
             kwargs["version_minor"] = min_
+            # Demote all other versions in the group — this one is now current
+            for old_sub in self.db.by_group(sub["group_id"]):
+                if old_sub["is_current"] and old_sub["id"] != sub["id"]:
+                    self.db.update_submission(old_sub["id"], is_current=0)
+            # Notify the author their version was retroactively updated via edit
+            try:
+                member = guild.get_member(sub["user_id"])
+                if member:
+                    dm = discord.Embed(
+                        title="📦 Version Tag Detected in Edit",
+                        description=(
+                            f"Your submission **{_extract_title(new_content) or 'Untitled'}** "
+                            f"has been updated to **v{maj}.{min_}** based on the version tag "
+                            f"you added in your edit.\n\n"
+                            "This version is now marked as the current one for your project group."
+                        ),
+                        color=0x5865f2,
+                        timestamp=_now()
+                    )
+                    dm.set_footer(text="Embot Community System")
+                    await self._dm_or_ping(member, dm)
+            except Exception as e:
+                self.cerr("Failed to DM version-edit notice", e)
+            self.clog(
+                f"Retroactive version tag detected in edit for submission {sub['id']} "
+                f"→ v{maj}.{min_} (group {sub['group_id']})"
+            )
         elif changed:
             new_minor = sub["version_minor"] + 1
             kwargs["version"]       = f"v{sub['version_major']}.{new_minor}"
@@ -901,7 +935,23 @@ class CommunitySystem:
             if h not in old_hashes:
                 self.db.register_hash(h, sub["id"], sub["user_id"])
 
-        self.clog(f"Synced edit for submission {sub['id']} (changed={changed})")
+        if changed:
+            change_parts = []
+            if set(new_att_hashes) != old_hashes:
+                change_parts.append(
+                    f"attachments {len(old_hashes)}→{len(new_att_hashes)}"
+                )
+            if set(new_links) != old_links:
+                change_parts.append(
+                    f"links {len(old_links)}→{len(new_links)}"
+                )
+            self.clog(
+                f"Synced edit for submission {sub['id']} — "
+                f"changed: {', '.join(change_parts) or 'content only'} "
+                f"→ {kwargs.get('version', sub['version'])}"
+            )
+        else:
+            self.clog(f"Synced edit for submission {sub['id']} (no meaningful changes)")
 
     # ── voting ──
 
@@ -921,7 +971,12 @@ class CommunitySystem:
         submitter = sub["user_id"]
 
         if voter_id == submitter:
-            # Don't allow self-voting — remove the reaction silently
+            # Self-voting is not allowed — remove the reaction silently
+            self.clog(
+                f"Self-vote blocked: user {voter_id} attempted to vote {emoji} "
+                f"on their own submission (group {sub['group_id']})",
+                "WARNING"
+            )
             try:
                 guild   = self.bot.get_guild(payload.guild_id)
                 channel = guild.get_channel(payload.channel_id)
@@ -957,9 +1012,13 @@ class CommunitySystem:
                     pass
 
         self.db.add_xp(submitter, xp_delta)
+        vote_action = "changed" if old_vote else "cast"
+        change_detail = (
+            f" (was {old_vote['emoji']} {old_vote['xp_delta']:+d} XP)" if old_vote else ""
+        )
         self.clog(
-            f"Vote: {emoji} ({xp_delta:+d} XP) by user {voter_id} "
-            f"on group {group_id} — submitter {submitter}"
+            f"Vote {vote_action}: {emoji} ({xp_delta:+d} XP) by user {voter_id} "
+            f"on group {group_id} — submitter {submitter}{change_detail}"
         )
 
     async def handle_reaction_remove(self, payload: discord.RawReactionActionEvent):
@@ -986,6 +1045,37 @@ class CommunitySystem:
             f"Vote removed: {emoji} by user {payload.user_id} "
             f"on group {group_id}"
         )
+
+    # ── submission deletion ──
+
+    async def handle_delete(self, payload: discord.RawMessageDeleteEvent):
+        """Mark a submission as deleted when its Discord message is removed."""
+        sub = self.db.by_message(payload.message_id)
+        if not sub:
+            return
+
+        self.db.update_submission(sub["id"], is_deleted=1)
+        self.clog(
+            f"Submission {sub['id']} marked deleted "
+            f"(message {payload.message_id} removed from channel {payload.channel_id}, "
+            f"group {sub['group_id']})"
+        )
+
+        # If the deleted submission was the current version, promote the next most-recent
+        # non-deleted version in the group so votes/spotlight still work correctly.
+        if sub["is_current"]:
+            remaining = [
+                s for s in self.db.by_group(sub["group_id"])
+                if not s["is_deleted"] and s["id"] != sub["id"]
+            ]
+            if remaining:
+                # by_group returns rows ordered by version_major, version_minor ASC
+                latest = remaining[-1]
+                self.db.update_submission(latest["id"], is_current=1)
+                self.clog(
+                    f"Promoted submission {latest['id']} (v{latest['version']}) "
+                    f"as current for group {sub['group_id']} after deletion of previous current"
+                )
 
     # ── thread reply XP ──
 
@@ -1129,6 +1219,13 @@ def setup(bot):
         if not payload.guild_id:
             return
         await cs.handle_reaction_remove(payload)
+
+    # ── Event: message delete ──
+    @bot.listen()
+    async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
+        if not payload.guild_id:
+            return
+        await cs.handle_delete(payload)
 
     # ── Task: Spotlight Friday (checks every minute) ──
     @tasks.loop(minutes=1)

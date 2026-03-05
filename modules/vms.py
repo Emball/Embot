@@ -63,6 +63,21 @@ RANDOM_PLAYBACK_MAX       = 80
 WHISPER_MODEL_SIZE        = "base"    # tiny / base / small / medium / large
 BACKFILL_DAYS             = 365       # how far back to scrape on an empty cache
 
+# ── User-installable app (context menu transcriber) ─────────────────────────
+# Set this to your Emball guild's integer ID.
+# VMs from this guild are stored persistently in the DB.
+# VMs from DMs or any other guild are transcribed ephemerally and deleted.
+EMBALL_GUILD_ID: Optional[int] = int(os.getenv("EMBALL_GUILD_ID", "0")) or None
+
+# Whisper models ordered least → most accurate (shown in the dropdown)
+WHISPER_MODELS = [
+    ("tiny",   "Tiny   — fastest, least accurate"),
+    ("base",   "Base   — fast, decent accuracy"),
+    ("small",  "Small  — balanced"),
+    ("medium", "Medium — good accuracy"),
+    ("large",  "Large  — best accuracy, slowest"),
+]
+
 # Bulk-processing concurrency
 # Whisper is NOT thread-safe and is compute-bound — running multiple instances
 # simultaneously on CPU causes memory exhaustion and process crashes.
@@ -125,6 +140,12 @@ def _broken_dir() -> Path:
 def _whisper_model_dir() -> Path:
     """Whisper model cache directory."""
     p = _script_dir() / "cache" / "whisper_models"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+def _temp_vms_dir() -> Path:
+    """Temp dir for external (non-Emball) VM transcriptions — files deleted after use."""
+    p = _script_dir() / "cache" / "vms" / "temp"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -521,6 +542,53 @@ def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool, 
         except Exception:
             pass
         return None, 0.0, "", True, broken_name
+
+
+def _transcribe_with_model(filepath: str, model_size: str) -> Tuple[Optional[str], float, bool]:
+    """
+    Transcribe a single file with the specified Whisper model size.
+    Returns (transcript, duration_secs, is_broken).
+    Used by the user-installable app context menu — does NOT touch the DB.
+    Always reloads the model if a different size is requested.
+    """
+    global _whisper_model, _whisper_device, _whisper_load_failed
+
+    try:
+        duration = _get_ogg_duration(filepath)
+        import whisper as _whisper
+        try:
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            device = "cpu"
+
+        model_dir = str(_whisper_model_dir())
+        with _whisper_lock:
+            # Load the requested model — may differ from the cached one
+            if _whisper_model is None or getattr(_whisper_model, '_vms_size', None) != model_size:
+                try:
+                    m = _whisper.load_model(model_size, device=device, download_root=model_dir)
+                    m._vms_size = model_size          # tag so we can detect size changes
+                    _whisper_model  = m
+                    _whisper_device = device
+                    _whisper_load_failed = False
+                except Exception as exc:
+                    return None, duration, True
+            model = _whisper_model
+
+        audio = _whisper.load_audio(filepath)
+        if not _is_audio_valid(audio):
+            return None, duration, True
+
+        audio  = _whisper.pad_or_trim(audio)
+        mel    = _whisper.log_mel_spectrogram(audio).to(model.device)
+        _, _   = model.detect_language(mel)
+        opts   = _whisper.DecodingOptions(fp16=False)
+        result = _whisper.decode(model, mel, opts)
+        return (result.text or "").strip() or None, duration, False
+
+    except Exception:
+        return None, 0.0, True
 
 
 # ==================== DISCORD VOICE MESSAGE API ====================
@@ -2298,3 +2366,236 @@ def setup(bot):
                         f"Playback triggered ({mode}) but no eligible VMs found")
 
     bot.logger.log(MODULE_NAME, "VMS module setup complete")
+
+    # ================================================================
+    # USER-INSTALLABLE APP — "Transcribe Voice Message" context menu
+    # ================================================================
+    #
+    # Registers a Message context menu command called "Transcribe VM".
+    # Users install it from Apps > Add to My Apps.
+    # After installing, right-clicking any voice message shows:
+    #   Apps > Transcribe VM
+    #
+    # Privacy rules:
+    #   • Inside Emball guild  → transcript posted ephemerally, VM saved to DB
+    #   • Outside Emball guild → download to cache/vms/temp/, transcribe, delete
+    #   • DMs                  → same as external (ephemeral, no storage)
+    #
+    # The initial interaction opens a model-selection view; the user picks
+    # a Whisper model from least → most accurate, then hits Transcribe.
+    # ================================================================
+
+    class ModelSelectView(discord.ui.View):
+        """Dropdown + button UI for choosing a Whisper model before transcribing."""
+
+        def __init__(self, message: discord.Message):
+            super().__init__(timeout=60)
+            self.target_message = message
+            self.selected_model = WHISPER_MODEL_SIZE   # sensible default
+
+            # Build select options least → most accurate
+            options = [
+                discord.SelectOption(
+                    label=label,
+                    value=size,
+                    default=(size == WHISPER_MODEL_SIZE),
+                )
+                for size, label in WHISPER_MODELS
+            ]
+
+            select = discord.ui.Select(
+                placeholder="Choose Whisper model (least → most accurate)…",
+                options=options,
+                min_values=1,
+                max_values=1,
+            )
+            select.callback = self._on_model_select
+            self.add_item(select)
+
+            btn = discord.ui.Button(label="Transcribe", style=discord.ButtonStyle.primary, emoji="🎙️")
+            btn.callback = self._on_transcribe
+            self.add_item(btn)
+
+        async def _on_model_select(self, interaction: discord.Interaction):
+            self.selected_model = interaction.data["values"][0]
+            chosen_label = next(
+                (lbl for sz, lbl in WHISPER_MODELS if sz == self.selected_model),
+                self.selected_model
+            )
+            await interaction.response.edit_message(
+                content=f"Model selected: **{chosen_label}**\nClick **Transcribe** when ready.",
+                view=self,
+            )
+
+        async def _on_transcribe(self, interaction: discord.Interaction):
+            """Download, transcribe, reply, and clean up if external."""
+            await interaction.response.defer(ephemeral=True, thinking=True)
+
+            msg       = self.target_message
+            guild_id  = str(msg.guild.id) if msg.guild else None
+            is_emball = (
+                msg.guild is not None
+                and EMBALL_GUILD_ID is not None
+                and msg.guild.id == EMBALL_GUILD_ID
+            )
+
+            # ── Locate the voice attachment ───────────────────────────────
+            vm_att = None
+            for att in msg.attachments:
+                raw_flags = getattr(msg.flags, 'value', 0)
+                if (
+                    bool(raw_flags & 8192)
+                    or att.filename.lower() == "voice-message.ogg"
+                    or (att.content_type and "ogg" in att.content_type.lower())
+                ):
+                    vm_att = att
+                    break
+
+            if vm_att is None:
+                await interaction.followup.send(
+                    "⚠️ No voice message found on that message.", ephemeral=True
+                )
+                return
+
+            model_size = self.selected_model
+
+            if is_emball:
+                # ── Emball path: persist to DB ────────────────────────────
+                try:
+                    vm_id = await manager.save_voice_message(msg, vm_att)
+                    if vm_id:
+                        row = manager._db_one("SELECT filename FROM vms WHERE id=?", (vm_id,))
+                        filepath = None
+                        if row:
+                            p = manager._resolve_path(row[0])
+                            filepath = str(p) if p else None
+
+                        if filepath:
+                            loop = asyncio.get_running_loop()
+                            transcript, duration, broken = await loop.run_in_executor(
+                                manager._executor,
+                                _transcribe_with_model, filepath, model_size
+                            )
+                            if broken or not transcript:
+                                await interaction.followup.send(
+                                    "⚠️ Could not transcribe that voice message.", ephemeral=True
+                                )
+                            else:
+                                # Persist transcript to DB
+                                manager._db_exec(
+                                    """UPDATE vms SET transcript=?, processed=1
+                                       WHERE id=? AND processed=0""",
+                                    (transcript, vm_id)
+                                )
+                                manager._db_exec(
+                                    "INSERT OR IGNORE INTO vms_playback (vm_id) VALUES (?)",
+                                    (vm_id,)
+                                )
+                                await interaction.followup.send(
+                                    f"> {transcript}", ephemeral=True
+                                )
+                        else:
+                            await interaction.followup.send(
+                                "⚠️ VM saved but file could not be located for transcription.",
+                                ephemeral=True
+                            )
+                    else:
+                        await interaction.followup.send(
+                            "⚠️ Failed to save voice message.", ephemeral=True
+                        )
+                except Exception as exc:
+                    bot.logger.log(MODULE_NAME,
+                        f"App transcribe (Emball) error: {exc}", "ERROR")
+                    await interaction.followup.send(
+                        "⚠️ An error occurred while transcribing.", ephemeral=True
+                    )
+
+            else:
+                # ── External / DM path: temp file, delete after ───────────
+                temp_path: Optional[Path] = None
+                try:
+                    temp_dir  = _temp_vms_dir()
+                    safe_name = re.sub(r'[^\w\-.]', '_', vm_att.filename)
+                    temp_path = temp_dir / f"ext_{msg.id}_{safe_name}"
+
+                    raw = await vm_att.read()
+                    temp_path.write_bytes(raw)
+
+                    loop = asyncio.get_running_loop()
+                    transcript, duration, broken = await loop.run_in_executor(
+                        manager._executor,
+                        _transcribe_with_model, str(temp_path), model_size
+                    )
+
+                    if broken or not transcript:
+                        await interaction.followup.send(
+                            "⚠️ Could not transcribe that voice message.", ephemeral=True
+                        )
+                    else:
+                        await interaction.followup.send(
+                            f"> {transcript}", ephemeral=True
+                        )
+
+                except Exception as exc:
+                    bot.logger.log(MODULE_NAME,
+                        f"App transcribe (external) error: {exc}", "ERROR")
+                    await interaction.followup.send(
+                        "⚠️ An error occurred while transcribing.", ephemeral=True
+                    )
+                finally:
+                    # Always clean up the temp file
+                    if temp_path and temp_path.exists():
+                        try:
+                            temp_path.unlink()
+                            bot.logger.log(MODULE_NAME,
+                                f"Deleted temp file: {temp_path.name}")
+                        except Exception as exc:
+                            bot.logger.log(MODULE_NAME,
+                                f"Failed to delete temp file {temp_path}: {exc}", "WARNING")
+
+    # ── Register context menu ─────────────────────────────────────────────────
+    @bot.tree.context_menu(name="Transcribe VM")
+    async def transcribe_vm_context(
+        interaction: discord.Interaction,
+        message: discord.Message,
+    ):
+        """
+        Right-click a voice message → Apps → Transcribe VM.
+
+        Shows a model-selection dropdown (least → most accurate) and a
+        Transcribe button.  The result is always posted ephemerally so only
+        the invoking user sees it.
+        """
+        # Quick check: does this message have any voice attachment?
+        has_vm = False
+        for att in message.attachments:
+            raw_flags = getattr(message.flags, 'value', 0)
+            if (
+                bool(raw_flags & 8192)
+                or att.filename.lower() == "voice-message.ogg"
+                or (att.content_type and "ogg" in att.content_type.lower())
+            ):
+                has_vm = True
+                break
+
+        if not has_vm:
+            await interaction.response.send_message(
+                "⚠️ That message doesn't appear to contain a voice message.",
+                ephemeral=True,
+            )
+            return
+
+        view = ModelSelectView(message)
+        chosen_label = next(
+            (lbl for sz, lbl in WHISPER_MODELS if sz == WHISPER_MODEL_SIZE),
+            WHISPER_MODEL_SIZE
+        )
+        await interaction.response.send_message(
+            f"🎙️ **Transcribe Voice Message**\n"
+            f"Select a Whisper model then click **Transcribe**.\n"
+            f"Default: **{chosen_label}**",
+            view=view,
+            ephemeral=True,
+        )
+
+    bot.logger.log(MODULE_NAME, "Registered context menu: Transcribe VM (user-installable app)")

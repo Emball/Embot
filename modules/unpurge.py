@@ -336,6 +336,7 @@ async def _unpurge_task(bot):
         sent       = 0
         closed_dms = 0
         not_found  = 0
+        skipped_in = 0
         failed     = 0
 
         logger.log(MODULE_NAME, f"Sending invites to {len(found_ids)} user(s)…")
@@ -343,6 +344,14 @@ async def _unpurge_task(bot):
 
         for uid in found_ids:
             await asyncio.sleep(DM_DELAY_SECONDS)
+
+            # Skip anyone already back in the server — no need to re-invite
+            if guild.get_member(uid) is not None:
+                logger.log(MODULE_NAME,
+                    f"User {uid} is already in '{guild.name}' — skipping.")
+                print(f"[UNPURGE]   ⏭️   [{uid}] Already in server — skipped.")
+                skipped_in += 1
+                continue
 
             user: Optional[discord.User] = bot.get_user(uid)
             if user is None:
@@ -407,16 +416,18 @@ async def _unpurge_task(bot):
         # ── Summary ───────────────────────────────────────────────────────────
         summary = (
             f"\n[UNPURGE] 📊  Done.\n"
-            f"           ✅  Sent:           {sent}\n"
-            f"           🔒  Closed DMs:     {closed_dms}\n"
-            f"           👻  Not found:      {not_found}\n"
-            f"           ❌  Other failures: {failed}\n"
-            f"           🔗  Invite URL:     {invite.url}\n"
+            f"           ✅  Sent:              {sent}\n"
+            f"           ⏭️   Already in server: {skipped_in}\n"
+            f"           🔒  Closed DMs:        {closed_dms}\n"
+            f"           👻  Not found:         {not_found}\n"
+            f"           ❌  Other failures:    {failed}\n"
+            f"           🔗  Invite URL:        {invite.url}\n"
         )
         print(summary)
         logger.log(MODULE_NAME,
-            f"Complete — sent={sent}, closed_dms={closed_dms}, "
-            f"not_found={not_found}, failed={failed}, invite={invite.url}")
+            f"Complete — sent={sent}, already_in_server={skipped_in}, "
+            f"closed_dms={closed_dms}, not_found={not_found}, "
+            f"failed={failed}, invite={invite.url}")
 
         _clear_checkpoint()
 

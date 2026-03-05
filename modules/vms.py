@@ -2191,11 +2191,9 @@ def setup(bot):
                             bot.logger.log(MODULE_NAME,
                                 f"Failed to delete temp file {temp_path}: {exc}", "WARNING")
 
-    @bot.tree.context_menu(
-        name="Transcribe VM",
-        allowed_installs=discord.app_commands.AppInstallationType(guild=True, user=True),
-        allowed_contexts=discord.app_commands.AppCommandContext(guild=True, dm_channel=True, private_channel=True),
-    )
+    @bot.tree.context_menu(name="Transcribe VM")
+    @discord.app_commands.allowed_installs(guilds=True, users=True)
+    @discord.app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
     async def transcribe_vm_context(
         interaction: discord.Interaction,
         message: discord.Message,

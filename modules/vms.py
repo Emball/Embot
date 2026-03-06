@@ -1860,10 +1860,150 @@ class VMSManager:
         self.bot.logger.log(MODULE_NAME, "VMS startup complete")
 
 
+# ==================== EXTERNAL TRANSCRIPTION QUEUE ====================
+
+EXT_COOLDOWN_SECONDS = 30   # per-user cooldown for external transcriptions
+
+_ext_queue: asyncio.Queue                          = None   # type: ignore  (set in setup)
+_ext_queue_list: list                              = []     # ordered list of pending items for position reporting
+_ext_queue_lock: asyncio.Lock                      = None   # type: ignore
+_ext_cooldowns: dict                               = {}     # user_id → last request timestamp
+_ext_worker_task: Optional[asyncio.Task]           = None
+_ext_avg_secs: float                               = 5.0    # rolling average transcription time (seed)
+_EXT_AVG_ALPHA: float                              = 0.3    # EMA smoothing factor
+
+
+def _ext_cooldown_remaining(user_id: str) -> float:
+    """Seconds remaining on a user's external transcription cooldown, or 0 if clear."""
+    last = _ext_cooldowns.get(user_id, 0.0)
+    remaining = EXT_COOLDOWN_SECONDS - (time.time() - last)
+    return max(0.0, remaining)
+
+
+def _ext_queue_eta(position: int) -> float:
+    """Estimated seconds until item at given 1-based queue position is processed."""
+    return position * _ext_avg_secs
+
+
+def _ext_status_embed(position: int, total: int, done: bool = False,
+                      transcript: str = None, error: str = None) -> discord.Embed:
+    """Build a status embed for an external transcription request."""
+    if error:
+        e = discord.Embed(color=0xe74c3c)
+        e.description = f"⚠️ {error}"
+        return e
+    if done:
+        e = discord.Embed(color=0x2ecc71)
+        e.description = f"> {transcript}"
+        return e
+    eta = _ext_queue_eta(position)
+    eta_str = f"~{int(eta)}s" if eta < 60 else f"~{int(eta // 60)}m {int(eta % 60)}s"
+    e = discord.Embed(
+        title="🎙️ Transcribing…",
+        color=0x3498db,
+    )
+    if position == 1:
+        e.description = "⏳ Processing now…"
+    else:
+        e.description = f"**Position {position}** of {total} in queue\nEstimated wait: {eta_str}"
+    return e
+
+
 # ==================== MODULE SETUP ====================
 
 def setup(bot):
     bot.logger.log(MODULE_NAME, "Setting up VMS module")
+
+    global _ext_queue, _ext_queue_lock, _ext_worker_task
+
+    _ext_queue      = asyncio.Queue()
+    _ext_queue_lock = asyncio.Lock()
+
+    async def _ext_worker():
+        """Sequential worker for external VM transcriptions."""
+        global _ext_avg_secs
+        while True:
+            try:
+                item = await _ext_queue.get()
+                vm_att, temp_path, interaction, ephemeral, followup_msg = item
+
+                # Update all waiting items' embeds with new positions
+                async with _ext_queue_lock:
+                    remaining = list(_ext_queue._queue)  # snapshot
+                total_now = 1 + len(remaining)
+
+                # Mark as "processing now"
+                try:
+                    await followup_msg.edit(embed=_ext_status_embed(1, total_now))
+                except Exception:
+                    pass
+
+                # Update position display for everyone else in queue
+                for i, (_, _, _, _, other_msg) in enumerate(remaining, start=2):
+                    try:
+                        await other_msg.edit(embed=_ext_status_embed(i, total_now))
+                    except Exception:
+                        pass
+
+                # Do the transcription
+                t_start = time.time()
+                transcript = None
+                broken     = False
+                try:
+                    raw = await vm_att.read()
+                    temp_path.write_bytes(raw)
+
+                    loop = asyncio.get_running_loop()
+                    transcript, duration, broken = await loop.run_in_executor(
+                        manager._executor,
+                        _transcribe_with_model, str(temp_path), WHISPER_MODEL_SIZE
+                    )
+                except Exception as exc:
+                    bot.logger.log(MODULE_NAME, f"Ext queue worker error: {exc}", "ERROR")
+                    broken = True
+                finally:
+                    if temp_path.exists():
+                        try:
+                            temp_path.unlink()
+                        except Exception:
+                            pass
+
+                elapsed = time.time() - t_start
+                _ext_avg_secs = _EXT_AVG_ALPHA * elapsed + (1 - _EXT_AVG_ALPHA) * _ext_avg_secs
+
+                # Edit the response with the result
+                try:
+                    if broken or not transcript:
+                        await followup_msg.edit(
+                            embed=_ext_status_embed(0, 0, error="Could not transcribe that voice message.")
+                        )
+                    else:
+                        await followup_msg.edit(
+                            embed=_ext_status_embed(0, 0, done=True, transcript=transcript)
+                        )
+                except Exception as exc:
+                    bot.logger.log(MODULE_NAME, f"Ext queue: failed to edit result: {exc}", "WARNING")
+
+                # Remove from tracking list and update remaining positions
+                async with _ext_queue_lock:
+                    remaining_after = list(_ext_queue._queue)
+                total_after = len(remaining_after)
+                for i, (_, _, _, _, other_msg) in enumerate(remaining_after, start=1):
+                    try:
+                        await other_msg.edit(embed=_ext_status_embed(i, total_after))
+                    except Exception:
+                        pass
+
+                _ext_queue.task_done()
+
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                bot.logger.log(MODULE_NAME, f"Ext queue worker unexpected error: {exc}", "ERROR")
+                await asyncio.sleep(1)
+
+    _ext_worker_task = asyncio.create_task(_ext_worker())
+    bot.logger.log(MODULE_NAME, "External transcription queue worker started")
 
     manager         = VMSManager(bot)
     bot.vms_manager = manager
@@ -2053,43 +2193,31 @@ def setup(bot):
             and message.guild.id == EMBALL_GUILD_ID
         )
 
-        # DMs and external guilds — ephemeral only, never touch the DB
+        # DMs and external guilds — queue-based, ephemeral always, never touch the DB
         if not is_emball:
-            temp_path: Optional[Path] = None
-            try:
-                temp_dir  = _temp_vms_dir()
-                safe_name = re.sub(r'[^\w\-.]', '_', vm_att.filename)
-                temp_path = temp_dir / f"ext_{message.id}_{safe_name}"
-
-                raw = await vm_att.read()
-                temp_path.write_bytes(raw)
-
-                loop = asyncio.get_running_loop()
-                transcript, duration, broken = await loop.run_in_executor(
-                    manager._executor,
-                    _transcribe_with_model, str(temp_path), WHISPER_MODEL_SIZE
-                )
-
-                if broken or not transcript:
-                    await interaction.followup.send(
-                        "⚠️ Could not transcribe that voice message.", ephemeral=True
-                    )
-                else:
-                    await interaction.followup.send(f"> {transcript}", ephemeral=True)
-
-            except Exception as exc:
-                bot.logger.log(MODULE_NAME, f"App transcribe (external) error: {exc}", "ERROR")
+            user_id = str(interaction.user.id)
+            remaining_cd = _ext_cooldown_remaining(user_id)
+            if remaining_cd > 0:
                 await interaction.followup.send(
-                    "⚠️ An error occurred while transcribing.", ephemeral=True
+                    f"⏱️ You're on cooldown. Try again in **{int(remaining_cd)+1}s**.",
+                    ephemeral=True
                 )
-            finally:
-                if temp_path and temp_path.exists():
-                    try:
-                        temp_path.unlink()
-                        bot.logger.log(MODULE_NAME, f"Deleted temp file: {temp_path.name}")
-                    except Exception as exc:
-                        bot.logger.log(MODULE_NAME,
-                            f"Failed to delete temp file {temp_path}: {exc}", "WARNING")
+                return
+
+            _ext_cooldowns[user_id] = time.time()
+
+            temp_dir  = _temp_vms_dir()
+            safe_name = re.sub(r'[^\w\-.]', '_', vm_att.filename)
+            temp_path = temp_dir / f"ext_{message.id}_{safe_name}"
+
+            # Post initial queue status embed
+            async with _ext_queue_lock:
+                position  = _ext_queue.qsize() + 1
+            total     = position
+            init_embed = _ext_status_embed(position, total)
+            followup_msg = await interaction.followup.send(embed=init_embed, ephemeral=True, wait=True)
+
+            await _ext_queue.put((vm_att, temp_path, interaction, ephemeral, followup_msg))
             return
 
         # Emball guild — check if already cached first

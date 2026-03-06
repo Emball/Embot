@@ -45,15 +45,6 @@ BACKFILL_DAYS             = 365
 # Emball guild ID — VMs from here are stored persistently; all others are ephemeral
 EMBALL_GUILD_ID: Optional[int] = int(os.getenv("EMBALL_GUILD_ID", "0")) or None
 
-# Whisper models ordered least → most accurate (shown in the context menu dropdown)
-WHISPER_MODELS = [
-    ("tiny",   "Tiny   — fastest, least accurate"),
-    ("base",   "Base   — fast, decent accuracy"),
-    ("small",  "Small  — balanced"),
-    ("medium", "Medium — good accuracy"),
-    ("large",  "Large  — best accuracy, slowest"),
-]
-
 # Whisper is NOT thread-safe — always 1 worker regardless of CPU/GPU count
 BULK_GPU_WORKERS  = 1
 BULK_CPU_WORKERS  = 1
@@ -2030,175 +2021,16 @@ def setup(bot):
 
     bot.logger.log(MODULE_NAME, "VMS module setup complete")
 
-    class ModelSelectView(discord.ui.View):
-        """Model picker for the Transcribe VM context menu."""
-
-        def __init__(self, message: discord.Message):
-            super().__init__(timeout=60)
-            self.target_message = message
-            self.selected_model = WHISPER_MODEL_SIZE
-
-            options = [
-                discord.SelectOption(
-                    label=label,
-                    value=size,
-                    default=(size == WHISPER_MODEL_SIZE),
-                )
-                for size, label in WHISPER_MODELS
-            ]
-
-            select = discord.ui.Select(
-                placeholder="Choose Whisper model (least → most accurate)…",
-                options=options,
-                min_values=1,
-                max_values=1,
-            )
-            select.callback = self._on_model_select
-            self.add_item(select)
-
-            btn = discord.ui.Button(label="Transcribe", style=discord.ButtonStyle.primary, emoji="🎙️")
-            btn.callback = self._on_transcribe
-            self.add_item(btn)
-
-        async def _on_model_select(self, interaction: discord.Interaction):
-            self.selected_model = interaction.data["values"][0]
-            chosen_label = next(
-                (lbl for sz, lbl in WHISPER_MODELS if sz == self.selected_model),
-                self.selected_model
-            )
-            await interaction.response.edit_message(
-                content=f"Model selected: **{chosen_label}**\nClick **Transcribe** when ready.",
-                view=self,
-            )
-
-        async def _on_transcribe(self, interaction: discord.Interaction):
-            await interaction.response.defer(ephemeral=True, thinking=True)
-
-            msg       = self.target_message
-            guild_id  = str(msg.guild.id) if msg.guild else None
-            is_emball = (
-                msg.guild is not None
-                and EMBALL_GUILD_ID is not None
-                and msg.guild.id == EMBALL_GUILD_ID
-            )
-
-            vm_att = None
-            for att in msg.attachments:
-                raw_flags = getattr(msg.flags, 'value', 0)
-                if (
-                    bool(raw_flags & 8192)
-                    or att.filename.lower() == "voice-message.ogg"
-                    or (att.content_type and "ogg" in att.content_type.lower())
-                ):
-                    vm_att = att
-                    break
-
-            if vm_att is None:
-                await interaction.followup.send(
-                    "⚠️ No voice message found on that message.", ephemeral=True
-                )
-                return
-
-            model_size = self.selected_model
-
-            if is_emball:
-                try:
-                    vm_id = await manager.save_voice_message(msg, vm_att)
-                    if vm_id:
-                        row = manager._db_one("SELECT filename FROM vms WHERE id=?", (vm_id,))
-                        filepath = None
-                        if row:
-                            p = manager._resolve_path(row[0])
-                            filepath = str(p) if p else None
-
-                        if filepath:
-                            loop = asyncio.get_running_loop()
-                            transcript, duration, broken = await loop.run_in_executor(
-                                manager._executor,
-                                _transcribe_with_model, filepath, model_size
-                            )
-                            if broken or not transcript:
-                                await interaction.followup.send(
-                                    "⚠️ Could not transcribe that voice message.", ephemeral=True
-                                )
-                            else:
-                                manager._db_exec(
-                                    """UPDATE vms SET transcript=?, processed=1
-                                       WHERE id=? AND processed=0""",
-                                    (transcript, vm_id)
-                                )
-                                manager._db_exec(
-                                    "INSERT OR IGNORE INTO vms_playback (vm_id) VALUES (?)",
-                                    (vm_id,)
-                                )
-                                await interaction.followup.send(
-                                    f"> {transcript}", ephemeral=True
-                                )
-                        else:
-                            await interaction.followup.send(
-                                "⚠️ VM saved but file could not be located for transcription.",
-                                ephemeral=True
-                            )
-                    else:
-                        await interaction.followup.send(
-                            "⚠️ Failed to save voice message.", ephemeral=True
-                        )
-                except Exception as exc:
-                    bot.logger.log(MODULE_NAME,
-                        f"App transcribe (Emball) error: {exc}", "ERROR")
-                    await interaction.followup.send(
-                        "⚠️ An error occurred while transcribing.", ephemeral=True
-                    )
-
-            else:
-                temp_path: Optional[Path] = None
-                try:
-                    temp_dir  = _temp_vms_dir()
-                    safe_name = re.sub(r'[^\w\-.]', '_', vm_att.filename)
-                    temp_path = temp_dir / f"ext_{msg.id}_{safe_name}"
-
-                    raw = await vm_att.read()
-                    temp_path.write_bytes(raw)
-
-                    loop = asyncio.get_running_loop()
-                    transcript, duration, broken = await loop.run_in_executor(
-                        manager._executor,
-                        _transcribe_with_model, str(temp_path), model_size
-                    )
-
-                    if broken or not transcript:
-                        await interaction.followup.send(
-                            "⚠️ Could not transcribe that voice message.", ephemeral=True
-                        )
-                    else:
-                        await interaction.followup.send(
-                            f"> {transcript}", ephemeral=True
-                        )
-
-                except Exception as exc:
-                    bot.logger.log(MODULE_NAME,
-                        f"App transcribe (external) error: {exc}", "ERROR")
-                    await interaction.followup.send(
-                        "⚠️ An error occurred while transcribing.", ephemeral=True
-                    )
-                finally:
-                    if temp_path and temp_path.exists():
-                        try:
-                            temp_path.unlink()
-                            bot.logger.log(MODULE_NAME,
-                                f"Deleted temp file: {temp_path.name}")
-                        except Exception as exc:
-                            bot.logger.log(MODULE_NAME,
-                                f"Failed to delete temp file {temp_path}: {exc}", "WARNING")
-
-    @bot.tree.context_menu(name="Transcribe VM")
-    @discord.app_commands.allowed_installs(guilds=True, users=True)
-    @discord.app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-    async def transcribe_vm_context(
+    async def _do_transcribe(
         interaction: discord.Interaction,
         message: discord.Message,
+        ephemeral: bool,
     ):
-        has_vm = False
+        """Shared handler for both Transcribe VM context menu commands."""
+        await interaction.response.defer(ephemeral=ephemeral, thinking=True)
+
+        # Find the voice attachment
+        vm_att = None
         for att in message.attachments:
             raw_flags = getattr(message.flags, 'value', 0)
             if (
@@ -2206,27 +2038,145 @@ def setup(bot):
                 or att.filename.lower() == "voice-message.ogg"
                 or (att.content_type and "ogg" in att.content_type.lower())
             ):
-                has_vm = True
+                vm_att = att
                 break
 
-        if not has_vm:
-            await interaction.response.send_message(
-                "⚠️ That message doesn't appear to contain a voice message.",
-                ephemeral=True,
+        if vm_att is None:
+            await interaction.followup.send(
+                "⚠️ No voice message found on that message.", ephemeral=True
             )
             return
 
-        view = ModelSelectView(message)
-        chosen_label = next(
-            (lbl for sz, lbl in WHISPER_MODELS if sz == WHISPER_MODEL_SIZE),
-            WHISPER_MODEL_SIZE
-        )
-        await interaction.response.send_message(
-            f"🎙️ **Transcribe Voice Message**\n"
-            f"Select a Whisper model then click **Transcribe**.\n"
-            f"Default: **{chosen_label}**",
-            view=view,
-            ephemeral=True,
+        is_emball = (
+            message.guild is not None
+            and EMBALL_GUILD_ID is not None
+            and message.guild.id == EMBALL_GUILD_ID
         )
 
-    bot.logger.log(MODULE_NAME, "Registered context menu: Transcribe VM (user-installable app)")
+        # DMs and external guilds — ephemeral only, never touch the DB
+        if not is_emball:
+            temp_path: Optional[Path] = None
+            try:
+                temp_dir  = _temp_vms_dir()
+                safe_name = re.sub(r'[^\w\-.]', '_', vm_att.filename)
+                temp_path = temp_dir / f"ext_{message.id}_{safe_name}"
+
+                raw = await vm_att.read()
+                temp_path.write_bytes(raw)
+
+                loop = asyncio.get_running_loop()
+                transcript, duration, broken = await loop.run_in_executor(
+                    manager._executor,
+                    _transcribe_with_model, str(temp_path), WHISPER_MODEL_SIZE
+                )
+
+                if broken or not transcript:
+                    await interaction.followup.send(
+                        "⚠️ Could not transcribe that voice message.", ephemeral=True
+                    )
+                else:
+                    await interaction.followup.send(f"> {transcript}", ephemeral=True)
+
+            except Exception as exc:
+                bot.logger.log(MODULE_NAME, f"App transcribe (external) error: {exc}", "ERROR")
+                await interaction.followup.send(
+                    "⚠️ An error occurred while transcribing.", ephemeral=True
+                )
+            finally:
+                if temp_path and temp_path.exists():
+                    try:
+                        temp_path.unlink()
+                        bot.logger.log(MODULE_NAME, f"Deleted temp file: {temp_path.name}")
+                    except Exception as exc:
+                        bot.logger.log(MODULE_NAME,
+                            f"Failed to delete temp file {temp_path}: {exc}", "WARNING")
+            return
+
+        # Emball guild — check if already cached first
+        try:
+            existing = manager._db_one(
+                """SELECT transcript FROM vms
+                   WHERE discord_message_id=? AND transcript IS NOT NULL AND transcript != ''""",
+                (str(message.id),)
+            )
+            if existing:
+                await interaction.followup.send(f"> {existing[0]}", ephemeral=ephemeral)
+                return
+
+            vm_id = await manager.save_voice_message(message, vm_att)
+            if not vm_id:
+                await interaction.followup.send(
+                    "⚠️ Failed to save voice message.", ephemeral=True
+                )
+                return
+
+            row      = manager._db_one("SELECT filename FROM vms WHERE id=?", (vm_id,))
+            filepath = str(manager._resolve_path(row[0])) if row else None
+
+            if not filepath:
+                await interaction.followup.send(
+                    "⚠️ VM saved but file could not be located for transcription.", ephemeral=True
+                )
+                return
+
+            loop = asyncio.get_running_loop()
+            transcript, duration, broken = await loop.run_in_executor(
+                manager._executor,
+                _transcribe_with_model, filepath, WHISPER_MODEL_SIZE
+            )
+
+            if broken or not transcript:
+                await interaction.followup.send(
+                    "⚠️ Could not transcribe that voice message.", ephemeral=True
+                )
+                return
+
+            manager._db_exec(
+                "UPDATE vms SET transcript=?, processed=1 WHERE id=? AND processed=0",
+                (transcript, vm_id)
+            )
+            manager._db_exec(
+                "INSERT OR IGNORE INTO vms_playback (vm_id) VALUES (?)", (vm_id,)
+            )
+            await interaction.followup.send(f"> {transcript}", ephemeral=ephemeral)
+
+        except Exception as exc:
+            bot.logger.log(MODULE_NAME, f"App transcribe (Emball) error: {exc}", "ERROR")
+            await interaction.followup.send(
+                "⚠️ An error occurred while transcribing.", ephemeral=True
+            )
+
+    def _has_vm(message: discord.Message) -> bool:
+        for att in message.attachments:
+            raw_flags = getattr(message.flags, 'value', 0)
+            if (
+                bool(raw_flags & 8192)
+                or att.filename.lower() == "voice-message.ogg"
+                or (att.content_type and "ogg" in att.content_type.lower())
+            ):
+                return True
+        return False
+
+    @bot.tree.context_menu(name="Transcribe VM (For Everyone)")
+    @discord.app_commands.allowed_installs(guilds=True, users=True)
+    @discord.app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+    async def transcribe_vm_public(interaction: discord.Interaction, message: discord.Message):
+        if not _has_vm(message):
+            await interaction.response.send_message(
+                "⚠️ That message doesn't contain a voice message.", ephemeral=True
+            )
+            return
+        await _do_transcribe(interaction, message, ephemeral=False)
+
+    @bot.tree.context_menu(name="Transcribe VM (Only Me)")
+    @discord.app_commands.allowed_installs(guilds=True, users=True)
+    @discord.app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+    async def transcribe_vm_private(interaction: discord.Interaction, message: discord.Message):
+        if not _has_vm(message):
+            await interaction.response.send_message(
+                "⚠️ That message doesn't contain a voice message.", ephemeral=True
+            )
+            return
+        await _do_transcribe(interaction, message, ephemeral=True)
+
+    bot.logger.log(MODULE_NAME, "Registered context menus: Transcribe VM (For Everyone) / Transcribe VM (Only Me)")

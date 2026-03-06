@@ -62,7 +62,10 @@ class LinkManager:
             return False
         
         # Extract command name (remove prefix)
-        command = message.content[len(self.prefix):].split()[0].lower()
+        parts = message.content[len(self.prefix):].split()
+        if not parts:
+            return False
+        command = parts[0].lower()
         
         # Let the bot framework handle real registered commands (ban, kick, etc.)
         if self.bot.get_command(command):

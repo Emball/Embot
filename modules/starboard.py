@@ -37,6 +37,7 @@ def _load_starboard_config() -> dict:
         "threshold": 3,
         "emoji": "⭐",
         "self_star": False,
+        "ignore_before": "",  # ISO date e.g. "2025-01-01" — messages before this are ignored
     }
     if config_path.exists():
         try:
@@ -73,15 +74,15 @@ def _get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(str(_db_path()))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
-    conn.executescript(DB_SCHEMA)
-    conn.commit()
     return conn
 
 
 def _init_db() -> None:
-    """Initialise DB (create tables, migrate legacy JSON if present)."""
+    """Initialise DB (create tables). Must only be called once at startup."""
     _db_path().parent.mkdir(parents=True, exist_ok=True)
     conn = _get_conn()
+    conn.executescript(DB_SCHEMA)
+    conn.commit()
     conn.close()
 
 
@@ -249,6 +250,16 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
             message = await source_channel.fetch_message(payload.message_id)
         except (discord.NotFound, discord.Forbidden):
             return
+
+        # ignore_before guard — skip messages older than the configured cutoff
+        if CONFIG.get("ignore_before"):
+            try:
+                from datetime import datetime, timezone
+                cutoff = datetime.fromisoformat(CONFIG["ignore_before"]).replace(tzinfo=timezone.utc)
+                if message.created_at < cutoff:
+                    return
+            except ValueError:
+                pass  # Bad date format — ignore the guard
 
         # Self-star guard
         if not CONFIG["self_star"] and payload.user_id == message.author.id:

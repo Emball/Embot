@@ -519,14 +519,16 @@ class BanAppealView(ui.View):
         super().__init__(timeout=None)
         self.guild_id = guild_id
 
-    @ui.button(label="Submit Appeal", style=discord.ButtonStyle.primary, emoji="📝")
+    @ui.button(label="Submit Appeal", style=discord.ButtonStyle.primary, emoji="📝",
+               custom_id="ban_appeal_submit")
     async def appeal_button(self, interaction: discord.Interaction, button: ui.Button):
         if not hasattr(interaction.client, 'moderation') or \
                 not hasattr(interaction.client.moderation, 'submit_appeal'):
             await interaction.response.send_message(
                 "❌ Appeal system not available.", ephemeral=True)
             return
-        modal = BanAppealModal(interaction.client.moderation, self.guild_id)
+        guild_id = interaction.guild_id or self.guild_id
+        modal = BanAppealModal(interaction.client.moderation, guild_id)
         await interaction.response.send_modal(modal)
 
 
@@ -536,10 +538,15 @@ class ActionReviewView(ui.View):
         self.moderation = moderation_system
         self.action_id  = action_id
         self.action     = action
+        # Stable custom_ids embed the action_id so they survive restarts
+        self.approve_btn.custom_id  = f"action_approve:{action_id}"
+        self.revert_btn.custom_id   = f"action_revert:{action_id}"
+        self.view_chat_btn.custom_id = f"action_viewchat:{action_id}"
 
     @ui.button(label="Approve", style=discord.ButtonStyle.green, emoji="✅")
-    async def approve_button(self, interaction: discord.Interaction, button: ui.Button):
-        success = await self.moderation.approve_action(self.action_id)
+    async def approve_btn(self, interaction: discord.Interaction, button: ui.Button):
+        action_id = button.custom_id.split(":", 1)[1]
+        success = await self.moderation.approve_action(action_id)
         if success:
             await interaction.response.send_message(
                 "✅ Action approved and removed from pending.", ephemeral=True)
@@ -551,12 +558,17 @@ class ActionReviewView(ui.View):
                 "❌ Failed to approve action.", ephemeral=True)
 
     @ui.button(label="Revert", style=discord.ButtonStyle.red, emoji="↩️")
-    async def revert_button(self, interaction: discord.Interaction, button: ui.Button):
-        guild = self.moderation.bot.get_guild(self.action['guild_id'])
+    async def revert_btn(self, interaction: discord.Interaction, button: ui.Button):
+        action_id  = button.custom_id.split(":", 1)[1]
+        action     = self.moderation._get_pending_action(action_id)
+        if not action:
+            await interaction.response.send_message("❌ Action not found.", ephemeral=True)
+            return
+        guild = self.moderation.bot.get_guild(action['guild_id'])
         if not guild:
             await interaction.response.send_message("❌ Guild not found.", ephemeral=True)
             return
-        success = await self.moderation.revert_action(self.action_id, guild)
+        success = await self.moderation.revert_action(action_id, guild)
         if success:
             await interaction.response.send_message(
                 "↩️ Action reverted successfully.", ephemeral=True)
@@ -568,14 +580,16 @@ class ActionReviewView(ui.View):
                 "❌ Failed to revert action.", ephemeral=True)
 
     @ui.button(label="View Chat", style=discord.ButtonStyle.gray, emoji="💬")
-    async def view_chat_button(self, interaction: discord.Interaction, button: ui.Button):
-        if not self.action.get('channel_id') or not self.action.get('message_id'):
+    async def view_chat_btn(self, interaction: discord.Interaction, button: ui.Button):
+        action_id = button.custom_id.split(":", 1)[1]
+        action    = self.moderation._get_pending_action(action_id)
+        if not action or not action.get('channel_id') or not action.get('message_id'):
             await interaction.response.send_message(
                 "❌ No chat link available.", ephemeral=True)
             return
-        guild_id   = self.action['guild_id']
-        channel_id = self.action['channel_id']
-        message_id = self.action['message_id']
+        guild_id   = action['guild_id']
+        channel_id = action['channel_id']
+        message_id = action['message_id']
         jump_link  = f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
         await interaction.response.send_message(
             f"📍 [Jump to message]({jump_link})", ephemeral=True)
@@ -2594,6 +2608,14 @@ def setup(bot):
     bot.moderation_manager = mod_system
     bot.mod_oversight      = mod_system
     bot.moderation         = mod_system
+
+    # Re-register persistent views so buttons work after bot restarts
+    bot.add_view(BanAppealView(guild_id=0))
+    bot.add_view(AppealVoteView(moderation_system=mod_system, appeal_id="__placeholder__"))
+    # Re-register one ActionReviewView per pending action so owner DM buttons still work
+    for row in mod_system._all("SELECT * FROM mod_pending_actions WHERE status='pending'"):
+        action = mod_system._row_to_action(row)
+        bot.add_view(ActionReviewView(mod_system, action['id'], action))
 
     # Convenience shorthand used throughout
     _mod = mod_system

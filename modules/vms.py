@@ -232,6 +232,12 @@ CREATE TABLE IF NOT EXISTS vms_kv (
     key     TEXT PRIMARY KEY,
     value   TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS vms_transcription_disabled (
+    user_id     TEXT NOT NULL,
+    guild_id    TEXT NOT NULL,
+    PRIMARY KEY (user_id, guild_id)
+);
 """
 
 
@@ -970,6 +976,29 @@ class VMSManager:
         """Add a live voice message to the transcription queue."""
         await self.queue.put((vm_id, filepath, reply_to))
         self.bot.logger.log(MODULE_NAME, f"VM #{vm_id} queued for transcription")
+
+    # ----------------------------------------------- Transcription Opt-out --
+
+    def is_transcription_disabled(self, user_id: str, guild_id: str) -> bool:
+        """Return True if the user has disabled auto-transcription in this guild."""
+        row = self._db_one(
+            "SELECT 1 FROM vms_transcription_disabled WHERE user_id=? AND guild_id=?",
+            (user_id, guild_id)
+        )
+        return row is not None
+
+    def set_transcription_disabled(self, user_id: str, guild_id: str, disabled: bool):
+        """Enable or disable auto-transcription for a user in a guild."""
+        if disabled:
+            self._db_exec(
+                "INSERT OR IGNORE INTO vms_transcription_disabled (user_id, guild_id) VALUES (?, ?)",
+                (user_id, guild_id)
+            )
+        else:
+            self._db_exec(
+                "DELETE FROM vms_transcription_disabled WHERE user_id=? AND guild_id=?",
+                (user_id, guild_id)
+            )
 
     # ------------------------------------------------------- Save Voice Msg --
 
@@ -2124,7 +2153,18 @@ def setup(bot):
                 if row:
                     resolved = manager._resolve_path(row[0])
                     if resolved:
-                        await manager.enqueue(vm_id, str(resolved), reply_to=message)
+                        # Skip auto-transcription if the user has opted out in this guild
+                        guild_id = str(message.guild.id) if message.guild else None
+                        opted_out = (
+                            guild_id is not None and
+                            manager.is_transcription_disabled(str(message.author.id), guild_id)
+                        )
+                        if not opted_out:
+                            await manager.enqueue(vm_id, str(resolved), reply_to=message)
+                        else:
+                            bot.logger.log(MODULE_NAME,
+                                f"Auto-transcription skipped for VM #{vm_id} "
+                                f"(user {message.author} has opted out)")
             return
 
         is_mention  = bot.user in message.mentions
@@ -2329,3 +2369,50 @@ def setup(bot):
         await _do_transcribe(interaction, message, ephemeral=True)
 
     bot.logger.log(MODULE_NAME, "Registered context menus: Transcribe VM (For Everyone) / Transcribe VM (Only Me)")
+
+    @bot.tree.command(
+        name="vmtranscribe",
+        description="Enable or disable automatic transcription of your voice messages in this server."
+    )
+    @discord.app_commands.guild_only()
+    @discord.app_commands.describe(setting="Whether to enable or disable auto-transcription of your VMs.")
+    @discord.app_commands.choices(setting=[
+        discord.app_commands.Choice(name="disable", value="disable"),
+        discord.app_commands.Choice(name="enable",  value="enable"),
+    ])
+    async def vm_transcribe_toggle(interaction: discord.Interaction, setting: str):
+        user_id  = str(interaction.user.id)
+        guild_id = str(interaction.guild_id)
+
+        if setting == "disable":
+            if manager.is_transcription_disabled(user_id, guild_id):
+                await interaction.response.send_message(
+                    "🔇 Auto-transcription of your voice messages is already **disabled** in this server.",
+                    ephemeral=True
+                )
+            else:
+                manager.set_transcription_disabled(user_id, guild_id, disabled=True)
+                bot.logger.log(MODULE_NAME,
+                    f"Auto-transcription disabled for user {interaction.user} in guild {guild_id}")
+                await interaction.response.send_message(
+                    "🔇 Auto-transcription of your voice messages has been **disabled** in this server.\n"
+                    "Your VMs will still be saved — they just won't be transcribed automatically.\n"
+                    "You can re-enable at any time with `/vmtranscribe enable`.",
+                    ephemeral=True
+                )
+        else:  # enable
+            if not manager.is_transcription_disabled(user_id, guild_id):
+                await interaction.response.send_message(
+                    "🔊 Auto-transcription of your voice messages is already **enabled** in this server.",
+                    ephemeral=True
+                )
+            else:
+                manager.set_transcription_disabled(user_id, guild_id, disabled=False)
+                bot.logger.log(MODULE_NAME,
+                    f"Auto-transcription re-enabled for user {interaction.user} in guild {guild_id}")
+                await interaction.response.send_message(
+                    "🔊 Auto-transcription of your voice messages has been **enabled** in this server.",
+                    ephemeral=True
+                )
+
+    bot.logger.log(MODULE_NAME, "Registered slash command: /vmtranscribe")

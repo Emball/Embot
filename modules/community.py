@@ -1449,7 +1449,7 @@ def setup(bot):
 
     # ── Slash commands ──
 
-    @bot.tree.command(name="community_setup", description="Configure community submission channels")
+    @bot.tree.command(name="community_setup", description="[Admin] Configure community submission channels")
     @app_commands.describe(
         projects_channel="The #projects channel",
         artwork_channel="The #artwork channel",
@@ -1578,7 +1578,7 @@ def setup(bot):
         embed.set_footer(text=f"Submission ID: {sub['id']}")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @bot.tree.command(name="spotlight_preview", description="Preview this week's Spotlight Friday winner")
+    @bot.tree.command(name="spotlight_preview", description="[Admin] Preview this week's Spotlight Friday winner")
     @app_commands.default_permissions(administrator=True)
     async def spotlight_preview(interaction: discord.Interaction):
         exclude = cs.db.get_config("spotlight_exclude_user_id")
@@ -1600,7 +1600,7 @@ def setup(bot):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @bot.tree.command(name="spotlight_run", description="Force-run Spotlight Friday now (admin only)")
+    @bot.tree.command(name="spotlight_run", description="[Admin] Force-run Spotlight Friday now")
     @app_commands.default_permissions(administrator=True)
     async def spotlight_run(interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)

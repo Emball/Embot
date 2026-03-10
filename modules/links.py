@@ -111,7 +111,7 @@ def setup(bot):
         await link_manager.handle_link_command(message)
     
     # Slash commands for managing links
-    @bot.tree.command(name="linkset", description="Set or update a link command")
+    @bot.tree.command(name="linkset", description="[Admin] Set or update a quick-link command")
     @app_commands.describe(
         name="Name of the link command (without ?)",
         url="URL to link to",
@@ -161,7 +161,7 @@ def setup(bot):
         await interaction.response.send_message(embed=embed)
         bot.logger.log(MODULE_NAME, f"{interaction.user} {'created' if is_new else 'updated'} link: ?{name}")
     
-    @bot.tree.command(name="linkremove", description="Remove a link command")
+    @bot.tree.command(name="linkremove", description="[Admin] Remove a quick-link command")
     @app_commands.describe(name="Name of the link command to remove (without ?)")
     @app_commands.default_permissions(administrator=True)
     async def link_remove(interaction: discord.Interaction, name: str):
@@ -188,7 +188,7 @@ def setup(bot):
         await interaction.response.send_message(embed=embed)
         bot.logger.log(MODULE_NAME, f"{interaction.user} removed link: ?{name}")
     
-    @bot.tree.command(name="linktoggle", description="Enable or disable a link command")
+    @bot.tree.command(name="linktoggle", description="[Admin] Enable or disable a quick-link command")
     @app_commands.describe(name="Name of the link command to toggle (without ?)")
     @app_commands.default_permissions(administrator=True)
     async def link_toggle(interaction: discord.Interaction, name: str):

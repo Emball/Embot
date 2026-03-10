@@ -1560,12 +1560,7 @@ class VMSManager:
                     await asyncio.sleep(BACKFILL_SLEEP_SECS)
 
                 for att in message.attachments:
-                    raw_flags = getattr(message.flags, 'value', 0)
-                    is_vm = (
-                        bool(raw_flags & 8192) or
-                        att.filename.lower() == "voice-message.ogg" or
-                        (att.content_type and "ogg" in att.content_type.lower())
-                    )
+                    is_vm = att.filename.lower() == "voice-message.ogg"
                     if not is_vm:
                         continue
 
@@ -1714,12 +1709,7 @@ class VMSManager:
                     await asyncio.sleep(BACKFILL_SLEEP_SECS)
 
                 for att in message.attachments:
-                    raw_flags = getattr(message.flags, 'value', 0)
-                    is_vm = (
-                        bool(raw_flags & 8192) or
-                        att.filename.lower() == "voice-message.ogg" or
-                        (att.content_type and "ogg" in att.content_type.lower())
-                    )
+                    is_vm = att.filename.lower() == "voice-message.ogg"
                     if not is_vm:
                         continue
 
@@ -1938,6 +1928,176 @@ def _ext_status_embed(position: int, total: int, done: bool = False,
 
 # ==================== MODULE SETUP ====================
 
+def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
+    """
+    Compute stats exclusively from active (processed=1) VMs in the Emball guild.
+    Runs synchronously — call via run_in_executor.
+    """
+    from collections import Counter
+
+    # ── Core counts ──────────────────────────────────────────────────────────
+    rows = manager._db_all(
+        """SELECT v.id, v.duration_secs, v.transcript, v.created_at,
+                  v.discord_channel_id, v.filename,
+                  COALESCE(p.play_count, 0)
+           FROM vms v
+           LEFT JOIN vms_playback p ON v.id = p.vm_id
+           WHERE v.processed = 1
+             AND v.guild_id  = ?""",
+        (str(EMBALL_GUILD_ID),)
+    )
+
+    if not rows:
+        embed = discord.Embed(
+            title="🎙️ VM Stats",
+            description="No transcribed voice messages in the active cache yet.",
+            color=0x5865f2,
+        )
+        return embed
+
+    total_vms        = len(rows)
+    durations        = [r[1] for r in rows if r[1]]
+    transcripts      = [r[2] for r in rows if r[2]]
+    created_ats      = [r[3] for r in rows]
+    channel_ids      = [r[4] for r in rows if r[4]]
+    filenames        = [r[5] for r in rows if r[5]]
+    play_counts      = [r[6] for r in rows]
+
+    total_secs       = sum(durations)
+    avg_secs         = total_secs / len(durations) if durations else 0
+    longest_secs     = max(durations) if durations else 0
+    shortest_secs    = min(d for d in durations if d > 0) if durations else 0
+
+    # ── Word / transcript stats ───────────────────────────────────────────────
+    all_words: list[str] = []
+    word_counts_per_vm: list[int] = []
+    for t in transcripts:
+        words = re.findall(r"\b[a-zA-Z']{2,}\b", t)
+        all_words.extend(w.lower() for w in words)
+        word_counts_per_vm.append(len(words))
+
+    total_words    = len(all_words)
+    avg_words      = total_words / len(word_counts_per_vm) if word_counts_per_vm else 0
+    word_freq      = Counter(w for w in all_words if w not in STOP_WORDS)
+    top_words      = word_freq.most_common(5)
+
+    # ── Playback stats ────────────────────────────────────────────────────────
+    total_plays    = sum(play_counts)
+    most_played_id, most_played_count = None, 0
+    for r in rows:
+        if r[6] > most_played_count:
+            most_played_count = r[6]
+            most_played_id    = r[0]
+
+    # ── Most active channel ───────────────────────────────────────────────────
+    channel_freq   = Counter(channel_ids)
+    top_channel_id = channel_freq.most_common(1)[0][0] if channel_freq else None
+
+    # ── Most prolific user (parsed from canonical filenames) ─────────────────
+    user_counter: Counter = Counter()
+    for fn in filenames:
+        parsed = _parse_vm_filename(fn)
+        if parsed.get("username"):
+            user_counter[parsed["username"]] += 1
+    top_user, top_user_count = user_counter.most_common(1)[0] if user_counter else (None, 0)
+
+    # ── Time-based fun facts ──────────────────────────────────────────────────
+    now         = int(time.time())
+    newest_ts   = max(created_ats)
+    oldest_ts   = min(created_ats)
+    span_days   = max(1, (newest_ts - oldest_ts) // 86400)
+    vms_per_day = total_vms / span_days
+
+    hour_counter: Counter = Counter()
+    for ts in created_ats:
+        hour_counter[datetime.fromtimestamp(ts).hour] += 1
+    peak_hour, peak_hour_count = hour_counter.most_common(1)[0] if hour_counter else (0, 0)
+
+    # ── Format helpers ────────────────────────────────────────────────────────
+    def fmt_dur(secs: float) -> str:
+        secs = int(secs)
+        if secs < 60:
+            return f"{secs}s"
+        m, s = divmod(secs, 60)
+        return f"{m}m {s}s"
+
+    def fmt_big(secs: float) -> str:
+        """Express a large duration in the most readable unit."""
+        if secs < 3600:
+            return f"{secs/60:.1f} minutes"
+        if secs < 86400:
+            return f"{secs/3600:.1f} hours"
+        return f"{secs/86400:.1f} days"
+
+    # ── Build embed ───────────────────────────────────────────────────────────
+    embed = discord.Embed(
+        title="🎙️ Voice Message Stats",
+        color=0x5865f2,
+        timestamp=datetime.utcnow(),
+    )
+
+    # — Overview
+    embed.add_field(
+        name="📊 Overview",
+        value=(
+            f"**{total_vms:,}** voice messages transcribed\n"
+            f"**{fmt_big(total_secs)}** of total audio\n"
+            f"**{total_words:,}** words spoken in total"
+        ),
+        inline=False,
+    )
+
+    # — Duration
+    embed.add_field(
+        name="⏱️ Duration",
+        value=(
+            f"Average: **{fmt_dur(avg_secs)}**\n"
+            f"Longest: **{fmt_dur(longest_secs)}**\n"
+            f"Shortest: **{fmt_dur(shortest_secs)}**"
+        ),
+        inline=True,
+    )
+
+    # — Words
+    embed.add_field(
+        name="💬 Words",
+        value=(
+            f"Avg per VM: **{avg_words:.0f}**\n"
+            f"Top words:\n"
+            + "\n".join(f"`{w}` ×{c:,}" for w, c in top_words)
+        ),
+        inline=True,
+    )
+
+    # — Playback
+    embed.add_field(
+        name="▶️ Playback",
+        value=(
+            f"Total plays: **{total_plays:,}**\n"
+            + (f"Most played: VM **#{most_played_id}** ({most_played_count}×)" if most_played_id else "No plays yet")
+        ),
+        inline=True,
+    )
+
+    # — Fun facts
+    peak_hour_fmt = datetime.strptime(str(peak_hour), "%H").strftime("%-I %p")
+    facts = [
+        f"🏆 Chattiest sender: **{top_user}** with {top_user_count} VMs" if top_user else None,
+        f"📺 Busiest channel: <#{top_channel_id}>" if top_channel_id else None,
+        f"🌙 Peak sending hour: **{peak_hour_fmt}** ({peak_hour_count} VMs)",
+        f"📅 Avg rate: **{vms_per_day:.1f}** VMs/day over the last {span_days:,} days",
+        f"📖 That's roughly **{total_words / max(total_vms,1):.0f}** words per VM on average",
+    ]
+    embed.add_field(
+        name="✨ Fun Facts",
+        value="\n".join(f for f in facts if f),
+        inline=False,
+    )
+
+    embed.set_footer(text="Active cache only · archived & deleted VMs excluded")
+    return embed
+
+
 def setup(bot):
     bot.logger.log(MODULE_NAME, "Setting up VMS module")
 
@@ -2129,12 +2289,7 @@ def setup(bot):
             return
 
         for att in message.attachments:
-            raw_flags = getattr(message.flags, 'value', 0)
-            is_vm = (
-                bool(raw_flags & 8192) or
-                att.filename.lower() == "voice-message.ogg" or
-                (att.content_type and "ogg" in att.content_type.lower())
-            )
+            is_vm = att.filename.lower() == "voice-message.ogg"
             if not is_vm:
                 continue
 
@@ -2230,12 +2385,7 @@ def setup(bot):
         # Find the voice attachment
         vm_att = None
         for att in message.attachments:
-            raw_flags = getattr(message.flags, 'value', 0)
-            if (
-                bool(raw_flags & 8192)
-                or att.filename.lower() == "voice-message.ogg"
-                or (att.content_type and "ogg" in att.content_type.lower())
-            ):
+            if att.filename.lower() == "voice-message.ogg":
                 vm_att = att
                 break
 
@@ -2337,12 +2487,7 @@ def setup(bot):
 
     def _has_vm(message: discord.Message) -> bool:
         for att in message.attachments:
-            raw_flags = getattr(message.flags, 'value', 0)
-            if (
-                bool(raw_flags & 8192)
-                or att.filename.lower() == "voice-message.ogg"
-                or (att.content_type and "ogg" in att.content_type.lower())
-            ):
+            if att.filename.lower() == "voice-message.ogg":
                 return True
         return False
 
@@ -2416,3 +2561,21 @@ def setup(bot):
                 )
 
     bot.logger.log(MODULE_NAME, "Registered slash command: /vmtranscribe")
+
+    @bot.tree.command(
+        name="vmstats",
+        description="Fun stats and facts about the voice message archive."
+    )
+    @discord.app_commands.guild_only()
+    async def vm_stats(interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True)
+
+        try:
+            loop = asyncio.get_running_loop()
+            embed = await loop.run_in_executor(manager._executor, _build_stats_embed, manager)
+            await interaction.followup.send(embed=embed)
+        except Exception as exc:
+            bot.logger.error(MODULE_NAME, "vmstats command error", exc)
+            await interaction.followup.send("⚠️ Failed to fetch stats.", ephemeral=True)
+
+    bot.logger.log(MODULE_NAME, "Registered slash command: /vmstats")

@@ -2623,7 +2623,7 @@ def setup(bot):
 
     # ---- SLASH COMMANDS ----
 
-    @bot.tree.command(name="ban", description="Ban a user from the server")
+    @bot.tree.command(name="ban", description="[Mod] Ban a user from the server")
     @app_commands.describe(
         user="User to ban",
         reason="Reason for the ban — not required if rule is provided",
@@ -2642,7 +2642,7 @@ def setup(bot):
         await _do_ban(ModContext(interaction), _mod, user, reason,
                       delete_days, fake=fake, rule_number=rule)
 
-    @bot.tree.command(name="unban", description="Unban a user from the server")
+    @bot.tree.command(name="unban", description="[Mod] Unban a user from the server")
     @app_commands.describe(user_id="User ID to unban", reason="Reason for unban",
                            fake="Simulate without executing")
     @app_commands.default_permissions(ban_members=True)
@@ -2650,7 +2650,7 @@ def setup(bot):
                           reason: Optional[str] = "No reason provided", fake: bool = False):
         await _do_unban(ModContext(interaction), _mod, user_id, reason, fake=fake)
 
-    @bot.tree.command(name="kick", description="Kick a member from the server")
+    @bot.tree.command(name="kick", description="[Mod] Kick a member from the server")
     @app_commands.describe(member="Member to kick", reason="Reason (min 10 chars)",
                            fake="Simulate without executing")
     @app_commands.default_permissions(kick_members=True)
@@ -2658,7 +2658,7 @@ def setup(bot):
                          reason: str, fake: bool = False):
         await _do_kick(ModContext(interaction), _mod, member, reason, fake=fake)
 
-    @bot.tree.command(name="timeout", description="Timeout a member")
+    @bot.tree.command(name="timeout", description="[Mod] Timeout a member")
     @app_commands.describe(member="Member to timeout", duration="Duration in minutes",
                            reason="Reason (min 10 chars)", fake="Simulate without executing")
     @app_commands.default_permissions(moderate_members=True)
@@ -2666,7 +2666,7 @@ def setup(bot):
                             duration: int, reason: str, fake: bool = False):
         await _do_timeout(ModContext(interaction), _mod, member, duration, reason, fake=fake)
 
-    @bot.tree.command(name="untimeout", description="Remove timeout from a member")
+    @bot.tree.command(name="untimeout", description="[Mod] Remove timeout from a member")
     @app_commands.describe(member="Member to remove timeout from",
                            fake="Simulate without executing")
     @app_commands.default_permissions(moderate_members=True)
@@ -2674,7 +2674,7 @@ def setup(bot):
                                fake: bool = False):
         await _do_untimeout(ModContext(interaction), _mod, member, fake=fake)
 
-    @bot.tree.command(name="mute", description="Mute a member")
+    @bot.tree.command(name="mute", description="[Mod] Mute a member")
     @app_commands.describe(member="Member to mute", reason="Reason for mute",
                            duration="Duration e.g. 10m, 1h, 1d (empty = permanent)",
                            fake="Simulate without executing")
@@ -2684,7 +2684,7 @@ def setup(bot):
                          duration: Optional[str] = None, fake: bool = False):
         await _do_mute(ModContext(interaction), _mod, member, reason, duration, fake=fake)
 
-    @bot.tree.command(name="unmute", description="Unmute a member")
+    @bot.tree.command(name="unmute", description="[Mod] Unmute a member")
     @app_commands.describe(member="Member to unmute", fake="Simulate without executing")
     @app_commands.default_permissions(manage_roles=True)
     async def slash_unmute(interaction: discord.Interaction, member: discord.Member,
@@ -2692,7 +2692,7 @@ def setup(bot):
         await _do_unmute(ModContext(interaction), _mod, member, fake=fake)
 
     @bot.tree.command(name="softban",
-                      description="Softban a member (ban+unban to delete messages)")
+                      description="[Mod] Softban a member (ban+unban to delete messages)")
     @app_commands.describe(member="Member to softban", reason="Reason (min 10 chars)",
                            delete_days="Days of messages to delete (0-7, default 7)",
                            fake="Simulate without executing")
@@ -2703,7 +2703,7 @@ def setup(bot):
         await _do_softban(ModContext(interaction), _mod, member, reason,
                           delete_days, fake=fake)
 
-    @bot.tree.command(name="warn", description="Warn a member")
+    @bot.tree.command(name="warn", description="[Mod] Warn a member")
     @app_commands.describe(member="Member to warn", reason="Reason (min 10 chars)",
                            fake="Simulate without executing")
     @app_commands.default_permissions(manage_messages=True)
@@ -2711,19 +2711,19 @@ def setup(bot):
                          reason: str, fake: bool = False):
         await _do_warn(ModContext(interaction), _mod, member, reason, fake=fake)
 
-    @bot.tree.command(name="warnings", description="View warnings for a member")
+    @bot.tree.command(name="warnings", description="[Mod] View warnings for a member")
     @app_commands.describe(member="Member to check")
     @app_commands.default_permissions(manage_messages=True)
     async def slash_warnings(interaction: discord.Interaction, member: discord.Member):
         await _do_warnings(ModContext(interaction), _mod, member)
 
-    @bot.tree.command(name="clearwarnings", description="Clear all warnings for a member")
+    @bot.tree.command(name="clearwarnings", description="[Admin] Clear all warnings for a member")
     @app_commands.describe(member="Member to clear warnings for")
     @app_commands.default_permissions(administrator=True)
     async def slash_clearwarnings(interaction: discord.Interaction, member: discord.Member):
         await _do_clearwarnings(ModContext(interaction), _mod, member)
 
-    @bot.tree.command(name="purge", description="Delete multiple messages")
+    @bot.tree.command(name="purge", description="[Mod] Bulk-delete messages in this channel")
     @app_commands.describe(amount="Number of messages to delete (1-100)",
                            user="Only delete messages from this user (optional)",
                            fake="Simulate without executing")
@@ -2732,7 +2732,7 @@ def setup(bot):
                           user: Optional[discord.Member] = None, fake: bool = False):
         await _do_purge(ModContext(interaction), _mod, amount, user, fake=fake)
 
-    @bot.tree.command(name="slowmode", description="Set channel slowmode")
+    @bot.tree.command(name="slowmode", description="[Mod] Set slowmode delay for this channel")
     @app_commands.describe(seconds="Slowmode delay in seconds (0 to disable)",
                            channel="Channel to apply to (default: current)")
     @app_commands.default_permissions(manage_channels=True)
@@ -2740,7 +2740,7 @@ def setup(bot):
                              channel: Optional[discord.TextChannel] = None):
         await _do_slowmode(ModContext(interaction), _mod, seconds, channel)
 
-    @bot.tree.command(name="lock", description="Lock a channel")
+    @bot.tree.command(name="lock", description="[Mod] Prevent members from sending messages")
     @app_commands.describe(reason="Reason for locking (min 10 chars)",
                            channel="Channel to lock (default: current)",
                            fake="Simulate without executing")
@@ -2749,7 +2749,7 @@ def setup(bot):
                          channel: Optional[discord.TextChannel] = None, fake: bool = False):
         await _do_lock(ModContext(interaction), _mod, reason, channel, fake=fake)
 
-    @bot.tree.command(name="unlock", description="Unlock a channel")
+    @bot.tree.command(name="unlock", description="[Mod] Re-allow members to send messages")
     @app_commands.describe(channel="Channel to unlock (default: current)")
     @app_commands.default_permissions(manage_channels=True)
     async def slash_unlock(interaction: discord.Interaction,
@@ -3154,7 +3154,7 @@ def setup(bot):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @bot.tree.command(name="updaterules",
-                      description="Force-refresh the #rules channel embed from rules.json")
+                      description="[Admin] Force-refresh the #rules channel embed")
     @app_commands.default_permissions(administrator=True)
     async def slash_updaterules(interaction: discord.Interaction):
         if not has_elevated_role(interaction.user, _cfg):

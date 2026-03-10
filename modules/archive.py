@@ -706,7 +706,7 @@ def setup(bot):
             await interaction.followup.send("❌ An unexpected error occurred.", ephemeral=True)
             await log_command_execution(bot, interaction, command_data, False, error=str(e))
 
-    @bot.tree.command(name="rebuild_index", description="[Admin] Rebuild song index")
+    @bot.tree.command(name="rebuild_index", description="[Admin] Rebuild the song index cache")
     async def rebuild_index(interaction: discord.Interaction):
         """Admin command to rebuild index"""
         if not interaction.user.guild_permissions.administrator:

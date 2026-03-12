@@ -251,16 +251,6 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
         except (discord.NotFound, discord.Forbidden):
             return
 
-        # ignore_before guard — skip messages older than the configured cutoff
-        if CONFIG.get("ignore_before"):
-            try:
-                from datetime import datetime, timezone
-                cutoff = datetime.fromisoformat(CONFIG["ignore_before"]).replace(tzinfo=timezone.utc)
-                if message.created_at < cutoff:
-                    return
-            except ValueError:
-                pass  # Bad date format — ignore the guard
-
         # Self-star guard
         if not CONFIG["self_star"] and payload.user_id == message.author.id:
             return
@@ -305,6 +295,16 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
             })
 
         else:
+            # ignore_before guard — only blocks *new* starboard entries for old messages.
+            # Already-tracked messages (entry is not None) keep updating regardless.
+            if CONFIG.get("ignore_before"):
+                try:
+                    cutoff = datetime.fromisoformat(CONFIG["ignore_before"]).replace(tzinfo=timezone.utc)
+                    if message.created_at < cutoff:
+                        return
+                except ValueError:
+                    pass  # Bad date format — ignore the guard
+
             try:
                 sb_msg = await starboard_channel.send(content=content, embed=embed)
             except discord.Forbidden:

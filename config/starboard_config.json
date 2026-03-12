@@ -3,5 +3,6 @@
   "threshold": 3,
   "emoji": "⭐",
   "self_star": false,
+  "ignore_before": "2026-02-28",
   "_comment": "Set channel_id to the ID of your starboard channel. Reload the module after editing."
 }

@@ -542,11 +542,18 @@ def _get_songs_in_folder(song_index: dict, fmt: str, folder: str) -> list:
     songs.sort(key=lambda s: s['metadata'].get('title', s['original_title']).lower())
     return songs
 
-def _folder_options_for_page(folders: list, page: int):
+def _make_key(value: str, value_map: dict) -> str:
+    """Return a stable <=100-char key for a full path/folder, storing it in value_map."""
+    import hashlib
+    key = hashlib.md5(value.encode()).hexdigest()[:16]
+    value_map[key] = value
+    return key
+
+def _folder_options_for_page(folders: list, page: int, value_map: dict):
     total = len(folders)
     if total <= 25:
         return (
-            [discord.SelectOption(label=_clean_folder_name(f)[:100], value=f) for f in folders],
+            [discord.SelectOption(label=_clean_folder_name(f)[:100], value=_make_key(f, value_map)) for f in folders],
             False, False,
         )
     start = page * NAV_PAGE_SIZE
@@ -557,19 +564,19 @@ def _folder_options_for_page(folders: list, page: int):
     if has_prev:
         opts.append(discord.SelectOption(label="Previous page", value="__prev__"))
     for f in folders[start:end]:
-        opts.append(discord.SelectOption(label=_clean_folder_name(f)[:100], value=f))
+        opts.append(discord.SelectOption(label=_clean_folder_name(f)[:100], value=_make_key(f, value_map)))
     if has_next:
         opts.append(discord.SelectOption(label="Next page", value="__next__"))
     return opts, has_prev, has_next
 
-def _song_options_for_page(songs: list, page: int):
+def _song_options_for_page(songs: list, page: int, value_map: dict):
     total = len(songs)
     if total <= 25:
         return (
             [
                 discord.SelectOption(
                     label=s['metadata'].get('title', s['original_title'])[:100],
-                    value=s['path'],
+                    value=_make_key(s['path'], value_map),
                     description=(s['metadata'].get('year', '') or '')[:50] or None,
                 )
                 for s in songs
@@ -586,7 +593,7 @@ def _song_options_for_page(songs: list, page: int):
     for s in songs[start:end]:
         opts.append(discord.SelectOption(
             label=s['metadata'].get('title', s['original_title'])[:100],
-            value=s['path'],
+            value=_make_key(s['path'], value_map),
             description=(s['metadata'].get('year', '') or '')[:50] or None,
         ))
     if has_next:
@@ -610,6 +617,7 @@ class ArchiveNavigatorView(discord.ui.View):
         self._songs: list = []
         self._folder_page = 0
         self._song_page = 0
+        self._value_map: dict = {}   # short key -> full path/folder string
         self._render_format_step()
 
     # ── Step renderers ────────────────────────────────────────────────────────
@@ -626,7 +634,7 @@ class ArchiveNavigatorView(discord.ui.View):
 
     def _render_folder_step(self):
         self.clear_items()
-        opts, has_prev, has_next = _folder_options_for_page(self._folders, self._folder_page)
+        opts, has_prev, has_next = _folder_options_for_page(self._folders, self._folder_page, self._value_map)
         pages = (len(self._folders) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
         ph = f"Choose a folder… (page {self._folder_page + 1}/{pages})" if pages > 1 \
             else "Choose a folder…"
@@ -640,7 +648,7 @@ class ArchiveNavigatorView(discord.ui.View):
 
     def _render_song_step(self):
         self.clear_items()
-        opts, has_prev, has_next = _song_options_for_page(self._songs, self._song_page)
+        opts, has_prev, has_next = _song_options_for_page(self._songs, self._song_page, self._value_map)
         pages = (len(self._songs) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
         ph = f"Choose a song… (page {self._song_page + 1}/{pages})" if pages > 1 \
             else "Choose a song…"
@@ -683,6 +691,7 @@ class ArchiveNavigatorView(discord.ui.View):
             await interaction.response.send_message(
                 "This didn't work. Please try again later.", ephemeral=True); return
         val = interaction.data["values"][0]
+        val = self._value_map.get(val, val)  # resolve hash key -> real folder path
         if val == "__prev__":
             self._folder_page = max(0, self._folder_page - 1)
             self._render_folder_step()
@@ -707,6 +716,7 @@ class ArchiveNavigatorView(discord.ui.View):
             await interaction.response.send_message(
                 "This didn't work. Please try again later.", ephemeral=True); return
         val = interaction.data["values"][0]
+        val = self._value_map.get(val, val)  # resolve hash key -> real file path
         if val == "__prev__":
             self._song_page = max(0, self._song_page - 1)
             self._render_song_step()

@@ -26,13 +26,45 @@ script_dir = Path(__file__).parent.absolute()
 data_dir = script_dir / "logs"
 data_dir.mkdir(exist_ok=True)
 
+# ==================== CONFIG ====================
+
+_CONFIG_PATH = script_dir / "config" / "embot.json"
+_CONFIG_DEFAULTS = {
+    "command_prefixes":           ["!", "?"],
+    "home_guild_id":              0,
+    "latency_warning_threshold":  1.0,
+    "heartbeat_interval_seconds": 60,
+}
+
+def load_config() -> dict:
+    """Load config/embot.json, filling in defaults for any missing keys."""
+    cfg = dict(_CONFIG_DEFAULTS)
+    if _CONFIG_PATH.exists():
+        try:
+            with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+                user_cfg = json.load(f)
+            cfg.update(user_cfg)
+        except Exception as e:
+            print(f"[MAIN] [WARNING] Failed to read {_CONFIG_PATH}, using defaults: {e}")
+    else:
+        # Write a starter config so the user knows what's available
+        _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(_CONFIG_DEFAULTS, f, indent=4)
+        print(f"[MAIN] [INFO] Created default config at {_CONFIG_PATH}")
+    return cfg
+
+_cfg = load_config()
+
+# ==================== BOT INIT ====================
+
 # Initialize bot with intents
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
 intents.members = True  # Required for Member lookup in prefix commands
 
-bot = commands.Bot(command_prefix=["!", "?"], intents=intents)
+bot = commands.Bot(command_prefix=_cfg["command_prefixes"], intents=intents)
 
 class ConsoleLogger:
     """Centralized console and file logging system for all modules"""
@@ -310,13 +342,16 @@ async def monitor_heartbeat():
         try:
             # Check the last heartbeat time
             latency = bot.latency
-            if latency > 1.0:  # High latency warning
+            threshold = bot.config.get("latency_warning_threshold", 1.0)
+            if latency > threshold:
                 bot.logger.log("MAIN", f"High latency detected: {latency:.2f}s", "WARNING")
             
-            await asyncio.sleep(60)  # Check every minute
+            interval = bot.config.get("heartbeat_interval_seconds", 60)
+            await asyncio.sleep(interval)
         except Exception as e:
             bot.logger.error("MAIN", "Heartbeat monitor error", e)
-            await asyncio.sleep(60)
+            interval = bot.config.get("heartbeat_interval_seconds", 60)
+            await asyncio.sleep(interval)
 
 def run_console():
     """Run interactive console for commands - available in all modes"""
@@ -617,14 +652,35 @@ def handle_signal(signum, frame):
     loop.create_task(shutdown_bot(signame))
 
 if __name__ == "__main__":
-    # Get token from environment variable
+    # Token stays in the environment — never put it in a config file
     TOKEN = os.getenv('DISCORD_BOT_TOKEN')
-    
+
     if not TOKEN:
         bot.logger.error("MAIN", "DISCORD_BOT_TOKEN environment variable not set!")
         bot.logger.log("MAIN", "Please set your Discord bot token:")
         bot.logger.log("MAIN", "export DISCORD_BOT_TOKEN='your-token-here'")
         sys.exit(1)
+
+    # Attach config to bot so modules can read it via bot.config
+    bot.config = _cfg
+
+    home_guild_id = int(_cfg.get("home_guild_id") or 0)
+    if not home_guild_id:
+        bot.logger.error("MAIN", "home_guild_id is not set in config/embot.json!")
+        bot.logger.log("MAIN", f"Edit {_CONFIG_PATH} and set home_guild_id to your server's ID.")
+        sys.exit(1)
+
+    bot.home_guild_id = home_guild_id
+
+    @bot.event
+    async def on_guild_join(guild: discord.Guild):
+        if guild.id != bot.home_guild_id:
+            bot.logger.log("MAIN", f"Joined unauthorized guild '{guild.name}' ({guild.id}) — leaving immediately.", "WARNING")
+            try:
+                await guild.leave()
+                bot.logger.log("MAIN", f"Successfully left unauthorized guild {guild.id}.")
+            except Exception as e:
+                bot.logger.error("MAIN", f"Failed to leave unauthorized guild {guild.id}", e)
     
     try:
         # Register signal handlers for graceful shutdown

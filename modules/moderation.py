@@ -1743,9 +1743,10 @@ class ModerationSystem:
             guild = self.bot.get_guild(row["guild_id"])
             user  = await self.bot.fetch_user(row["user_id"])
             try:
+                guild_name = guild.name if guild else f"server {row['guild_id']}"
                 embed = discord.Embed(
                     title="Ban Appeal Denied",
-                    description=f"Your appeal for **{guild.name}** has been reviewed and denied.",
+                    description=f"Your appeal for **{guild_name}** has been reviewed and denied.",
                     color=0xe74c3c, timestamp=datetime.now(timezone.utc))
                 await user.send(embed=embed)
             except discord.Forbidden:

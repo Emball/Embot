@@ -1,0 +1,9 @@
+{
+    "command_prefixes": [
+        "!",
+        "?"
+    ],
+    "home_guild_id": 1229868495307669605,
+    "latency_warning_threshold": 1.0,
+    "heartbeat_interval_seconds": 60
+}

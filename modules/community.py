@@ -221,11 +221,16 @@ class CommunityDB:
         # string — the engine supports both. The callable receives the connection and
         # the two helper methods so you can guard against re-runs:
         #
-        # (2, "Add channel_name to submissions", lambda c, col_ok, tbl_ok: (
+        # (3, "Add channel_name to submissions", lambda c, col_ok, tbl_ok: (
         #     c.execute("ALTER TABLE submissions ADD COLUMN channel_name TEXT")
         #     if not col_ok(c, "submissions", "channel_name") else None
         # )),
         # ──────────────────────────────────────────────────────────────────
+
+        (2, "Add reactions_blocked flag to submissions", lambda c, col_ok, tbl_ok: (
+            c.execute("ALTER TABLE submissions ADD COLUMN reactions_blocked INTEGER NOT NULL DEFAULT 0")
+            if not col_ok(c, "submissions", "reactions_blocked") else None
+        )),
     ]
 
     def __init__(self, db_path: Path):
@@ -1260,18 +1265,28 @@ class CommunitySystem:
             except Exception:
                 continue
 
-            # Check setup reactions
-            existing_emojis = {str(r.emoji) for r in message.reactions}
-            for emoji in SETUP_EMOJIS:
-                if emoji not in existing_emojis:
-                    try:
-                        await message.add_reaction(emoji)
-                        self.clog(
-                            f"Integrity: restored missing reaction {emoji} on submission {sub['id']}.",
-                            "WARNING"
-                        )
-                    except Exception as e:
-                        self.cerr(f"Integrity: failed to restore reaction {emoji} on {sub['id']}", e)
+            # Check setup reactions (skip if the author has blocked the bot)
+            if not sub["reactions_blocked"]:
+                existing_emojis = {str(r.emoji) for r in message.reactions}
+                for emoji in SETUP_EMOJIS:
+                    if emoji not in existing_emojis:
+                        try:
+                            await message.add_reaction(emoji)
+                            self.clog(
+                                f"Integrity: restored missing reaction {emoji} on submission {sub['id']}.",
+                                "WARNING"
+                            )
+                        except discord.Forbidden as e:
+                            if getattr(e, 'code', None) == 90001:
+                                self.db.update_submission(sub["id"], reactions_blocked=1)
+                                self.clog(
+                                    f"Integrity: reaction blocked on submission {sub['id']} (author blocked bot) — skipping future reaction checks.",
+                                    "WARNING"
+                                )
+                                break
+                            self.cerr(f"Integrity: failed to restore reaction {emoji} on {sub['id']}", e)
+                        except Exception as e:
+                            self.cerr(f"Integrity: failed to restore reaction {emoji} on {sub['id']}", e)
 
             # Check thread still exists if one was created
             if sub["thread_id"]:

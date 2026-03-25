@@ -555,11 +555,11 @@ def _folder_options_for_page(folders: list, page: int):
     has_next = end < total
     opts = []
     if has_prev:
-        opts.append(discord.SelectOption(label="Previous page", value="__prev__", emoji="◀"))
+        opts.append(discord.SelectOption(label="Previous page", value="__prev__"))
     for f in folders[start:end]:
         opts.append(discord.SelectOption(label=_clean_folder_name(f)[:100], value=f))
     if has_next:
-        opts.append(discord.SelectOption(label="Next page", value="__next__", emoji="▶"))
+        opts.append(discord.SelectOption(label="Next page", value="__next__"))
     return opts, has_prev, has_next
 
 def _song_options_for_page(songs: list, page: int):
@@ -582,7 +582,7 @@ def _song_options_for_page(songs: list, page: int):
     has_next = end < total
     opts = []
     if has_prev:
-        opts.append(discord.SelectOption(label="Previous page", value="__prev__", emoji="◀"))
+        opts.append(discord.SelectOption(label="Previous page", value="__prev__"))
     for s in songs[start:end]:
         opts.append(discord.SelectOption(
             label=s['metadata'].get('title', s['original_title'])[:100],
@@ -590,7 +590,7 @@ def _song_options_for_page(songs: list, page: int):
             description=(s['metadata'].get('year', '') or '')[:50] or None,
         ))
     if has_next:
-        opts.append(discord.SelectOption(label="Next page", value="__next__", emoji="▶"))
+        opts.append(discord.SelectOption(label="Next page", value="__next__"))
     return opts, has_prev, has_next
 
 
@@ -618,7 +618,7 @@ class ArchiveNavigatorView(discord.ui.View):
         self.clear_items()
         sel = discord.ui.Select(
             placeholder="Choose a format…",
-            options=[discord.SelectOption(label=fmt, value=fmt, emoji="🎵") for fmt in FORMATS],
+            options=[discord.SelectOption(label=fmt, value=fmt) for fmt in FORMATS],
             custom_id="nav_fmt",
         )
         sel.callback = self._on_format
@@ -634,7 +634,7 @@ class ArchiveNavigatorView(discord.ui.View):
         sel.callback = self._on_folder
         self.add_item(sel)
         back = discord.ui.Button(label="Back", style=discord.ButtonStyle.secondary,
-                                 custom_id="nav_b_fmt", emoji="←")
+                                 custom_id="nav_b_fmt")
         back.callback = self._on_back_to_format
         self.add_item(back)
 
@@ -648,7 +648,7 @@ class ArchiveNavigatorView(discord.ui.View):
         sel.callback = self._on_song
         self.add_item(sel)
         back = discord.ui.Button(label="Back", style=discord.ButtonStyle.secondary,
-                                 custom_id="nav_b_folder", emoji="←")
+                                 custom_id="nav_b_folder")
         back.callback = self._on_back_to_folder
         self.add_item(back)
 
@@ -775,7 +775,6 @@ class _ArchiveInfoView(discord.ui.View):
         btn = discord.ui.Button(
             label="Browse Archive",
             style=discord.ButtonStyle.success,
-            emoji="🗄️",
             custom_id="archive_browse_v1",
         )
         btn.callback = self._on_browse

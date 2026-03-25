@@ -1,4 +1,5 @@
 {
-  "eminem_root": "D:\Media\Music\Eminem",
-  "_comment": "Set eminem_root to the root folder of the Eminem music library, or set the EMINEM_ROOT environment variable instead."
+  "eminem_root": "D:\\Media\\Music\\Eminem",
+  "_comment": "...",
+  "info_embed_msg_id": "1486511888178217091"
 }

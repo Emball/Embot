@@ -152,6 +152,26 @@ CREATE TABLE IF NOT EXISTS mod_startup_log (
     startup_time INTEGER NOT NULL
 );
 
+-- ── Suspicion / fed-fingerprint system ────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS mod_suspicion (
+    guild_id        TEXT NOT NULL,
+    user_id         TEXT NOT NULL,
+    score           INTEGER NOT NULL DEFAULT 0,
+    flagged         INTEGER NOT NULL DEFAULT 0,   -- 1 = manually confirmed flagged
+    cleared         INTEGER NOT NULL DEFAULT 0,   -- 1 = manually cleared by mod
+    join_invite     TEXT,                          -- invite code used to join
+    invite_source   TEXT,                          -- 'leaktracker'|'youtube'|'custom'|'unknown'
+    scored_at       TEXT NOT NULL,
+    flagged_at      TEXT,
+    cleared_at      TEXT,
+    cleared_by      TEXT,
+    note            TEXT,
+    signals         TEXT NOT NULL DEFAULT '[]',   -- JSON array of triggered signal keys
+    PRIMARY KEY (guild_id, user_id)
+);
+
+
+
 """
 
 # ── Default seed data ─────────────────────────────────────────────────────────
@@ -3169,4 +3189,567 @@ def setup(bot):
             await interaction.followup.send(
                 "ℹ️ Rules embed is already up to date.", ephemeral=True)
 
+    _setup_suspicion(bot, _mod, _cfg)
     bot.logger.log(MODULE_NAME, "Moderation setup complete")
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SUSPICION / FED-FINGERPRINT SYSTEM
+# ══════════════════════════════════════════════════════════════════════════════
+#
+#  Each signal below contributes a point value to a member's suspicion score.
+#  If the score meets or exceeds SUSPICION_THRESHOLD the account is auto-flagged
+#  and access to sensitive bot features (e.g. remaster downloads) is silently
+#  denied. Mods can manually clear or flag any account.
+#
+#  Public API for other modules:
+#      from moderation import is_flagged
+#      if is_flagged(guild_id, user_id): ...
+#
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Scoring weights ────────────────────────────────────────────────────────────
+# Tune these freely. Score >= SUSPICION_THRESHOLD → auto-flagged.
+
+SUSPICION_THRESHOLD = 6
+
+SIGNAL_WEIGHTS: dict[str, int] = {
+    # Account characteristics
+    "account_age_under_7d":      4,   # created less than 7 days ago
+    "account_age_under_30d":     2,   # created less than 30 days ago
+    "default_avatar":            2,   # still using a Discord default avatar
+    "no_bio":                    1,   # no profile bio / about me set
+    "throwaway_username":        1,   # username matches random/throwaway patterns
+
+    # Server behaviour
+    "joined_recently_under_7d":  1,   # joined this server less than 7 days ago
+    "no_messages":               2,   # zero messages ever recorded in server
+    "only_releases_role":        2,   # only role is @everyone + releases (no others)
+
+    # Join vector — most significant signal
+    "invite_leaktracker":        5,   # joined via a known leak-tracker invite
+    "invite_youtube":            1,   # joined via the YouTube description invite
+    "invite_unknown":            2,   # joined via an invite we can't identify
+    # "invite_custom" contributes 0 — trusted member invite, no penalty
+}
+
+# ── Username patterns that look like throwaway accounts ───────────────────────
+import re as _re
+_THROWAWAY_PATTERNS = [
+    _re.compile(r'^[a-z]{3,6}\d{4,}$'),          # word + 4+ digits  e.g. "user2847"
+    _re.compile(r'^\d{6,}$'),                      # all digits
+    _re.compile(r'^[a-z0-9]{20,}$'),               # very long random alphanumeric
+    _re.compile(r'^(user|account|member)\d+$', _re.I),
+]
+
+# ── Default avatar asset IDs (Discord's built-in defaults) ───────────────────
+# Discord default avatars are served from /assets/ — we detect them by checking
+# if display_avatar.key is one of the known default keys, or if the URL contains
+# /embed/avatars/ (the legacy path) or /assets/ (the new path).
+def _is_default_avatar(member: discord.Member) -> bool:
+    url = str(member.display_avatar.url)
+    return "/embed/avatars/" in url or "/assets/" in url and "a_" not in url
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SuspicionEngine
+# ══════════════════════════════════════════════════════════════════════════════
+
+class SuspicionEngine:
+    """
+    Scores members against a set of risk signals and maintains a flag/clear
+    record in the moderation DB. Designed to be instantiated once in setup()
+    and stored on bot.suspicion.
+    """
+
+    def __init__(self, bot: commands.Bot, db_path: str, cfg: "ModConfig"):
+        self.bot      = bot
+        self._db      = db_path
+        self.cfg      = cfg
+
+
+    # ── DB helpers ────────────────────────────────────────────────────────────
+
+    def _exec(self, q, p=()):  _db_exec(self._db, q, p)
+    def _one(self, q, p=()):   return _db_one(self._db, q, p)
+    def _all(self, q, p=()):   return _db_all(self._db, q, p)
+
+    # ── Invite classification ─────────────────────────────────────────────────
+
+    def _label_invite(self, code: str) -> str:
+        """
+        Classify an invite code using config/moderation.json:
+            "invite_labels": {
+                "leaktracker": ["abc123", "xyz789"],
+                "youtube":     ["yt4ever"]
+            }
+        If the code matches a leaktracker or youtube entry, that label is returned.
+        Anything else is assumed to be a custom (member-created) invite — trusted.
+        """
+        labels: dict = self.cfg.get("invite_labels", {})
+        for label, codes in labels.items():
+            if code in (codes or []):
+                return label
+        return "custom"
+
+    # ── Scoring ───────────────────────────────────────────────────────────────
+
+    async def score_member(self, member: discord.Member,
+                           invite_source: str = "custom") -> dict:
+        """
+        Evaluate all signals for a member and upsert their suspicion record.
+        Returns the record dict.
+        """
+        gid = str(member.guild.id)
+        uid = str(member.id)
+        now = datetime.now(timezone.utc)
+
+        signals: list[str] = []
+        score = 0
+
+        def add(signal: str):
+            w = SIGNAL_WEIGHTS.get(signal, 0)
+            signals.append(signal)
+            return w
+
+        # ── Account age ───────────────────────────────────────────────────────
+        acct_age = (now - member.created_at).days
+        if acct_age < 7:
+            score += add("account_age_under_7d")
+        elif acct_age < 30:
+            score += add("account_age_under_30d")
+
+        # ── Default avatar ────────────────────────────────────────────────────
+        if _is_default_avatar(member):
+            score += add("default_avatar")
+
+        # ── No bio (requires members intent; gracefully skip if unavailable) ──
+        # discord.py exposes bio via member.bio after fetch — we skip if absent
+        # to avoid an extra HTTP call on every join. Instead we check lazily.
+        # Mark it for deferred check.
+        bio_signal_pending = True   # resolved below via fetch if possible
+
+        # ── Throwaway username ────────────────────────────────────────────────
+        uname = (member.name or "").lower()
+        if any(p.match(uname) for p in _THROWAWAY_PATTERNS):
+            score += add("throwaway_username")
+
+        # ── Joined recently ───────────────────────────────────────────────────
+        if member.joined_at:
+            join_age = (now - member.joined_at).days
+            if join_age < 7:
+                score += add("joined_recently_under_7d")
+
+        # ── No messages ───────────────────────────────────────────────────────
+        # We can only know this if moderation.py has been tracking messages.
+        # We rely on the absence of any cached message history as a proxy.
+        # This is intentionally conservative — if we can't tell, we don't score.
+        # The no_messages signal is set to 0 for brand-new members; it updates
+        # when score_member is called again after observation time.
+        existing = self._one(
+            "SELECT * FROM mod_suspicion WHERE guild_id=? AND user_id=?", (gid, uid))
+        if existing:
+            # Re-score: check if they've sent any messages since last scored
+            # (message counting is tracked via on_message below)
+            msg_count = self._one(
+                "SELECT msg_count FROM mod_suspicion WHERE guild_id=? AND user_id=?", (gid, uid))
+            if msg_count and msg_count["msg_count"] == 0:
+                score += add("no_messages")
+
+        # ── Only has releases role + @everyone ────────────────────────────────
+        releases_role_name = self.cfg.get("releases_role_name",
+                                          self.bot.__dict__.get("_remasters_role_name",
+                                                                "Emball Releases"))
+        non_default_roles = [r for r in member.roles
+                             if r.name != "@everyone" and r.name != releases_role_name]
+        if not non_default_roles:
+            score += add("only_releases_role")
+
+        # ── Invite source ─────────────────────────────────────────────────────
+        if invite_source == "leaktracker":
+            score += add("invite_leaktracker")
+        elif invite_source == "youtube":
+            score += add("invite_youtube")
+        # "custom" → 0 points (trusted member invite)
+
+        # ── Deferred bio check ────────────────────────────────────────────────
+        try:
+            fetched = await member.guild.fetch_member(member.id)
+            profile = await fetched.user.profile()   # type: ignore[attr-defined]
+            if not profile.bio:
+                score += add("no_bio")
+        except Exception:
+            pass  # Not available or rate-limited — skip
+
+        # ── Persist ───────────────────────────────────────────────────────────
+        auto_flagged  = score >= SUSPICION_THRESHOLD
+        flagged_at    = now.isoformat() if auto_flagged else None
+
+        # Don't overwrite a manual clear
+        if existing and existing["cleared"]:
+            auto_flagged = False
+            flagged_at   = None
+
+        self._exec(
+            """
+            INSERT INTO mod_suspicion
+              (guild_id, user_id, score, flagged, cleared, invite_source,
+               scored_at, flagged_at, signals)
+            VALUES (?,?,?,?,0,?,?,?,?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+              score         = excluded.score,
+              flagged       = CASE WHEN cleared=1 THEN flagged ELSE excluded.flagged END,
+              invite_source = excluded.invite_source,
+              scored_at     = excluded.scored_at,
+              flagged_at    = CASE WHEN cleared=1 THEN flagged_at ELSE excluded.flagged_at END,
+              signals       = excluded.signals
+            """,
+            (gid, uid, score, int(auto_flagged),
+             invite_source,
+             now.isoformat(), flagged_at,
+             json.dumps(signals))
+        )
+
+        record = self._one(
+            "SELECT * FROM mod_suspicion WHERE guild_id=? AND user_id=?", (gid, uid))
+        record = dict(record)
+
+        if auto_flagged and not (existing and existing["flagged"]):
+            self.bot.logger.log(
+                MODULE_NAME,
+                f"AUTO-FLAGGED {member} (id={uid}) — score {score}/{SUSPICION_THRESHOLD} "
+                f"signals: {signals}"
+            )
+            await self._notify_mods(member, record)
+
+        return record
+
+    async def _notify_mods(self, member: discord.Member, record: dict) -> None:
+        """Post a quiet heads-up to the bot-logs channel."""
+        bot_logs = None
+        for guild in self.bot.guilds:
+            ch_id = self.cfg.bot_logs_channel_id
+            if ch_id:
+                bot_logs = guild.get_channel(ch_id)
+                if bot_logs:
+                    break
+        if not bot_logs:
+            return
+
+        signals = json.loads(record.get("signals", "[]"))
+        score   = record.get("score", 0)
+
+        embed = discord.Embed(
+            title="🔎  Suspicious Account Flagged",
+            color=discord.Color.from_rgb(255, 160, 50),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_author(
+            name=str(member),
+            icon_url=member.display_avatar.url,
+        )
+        embed.add_field(name="User", value=member.mention, inline=True)
+        embed.add_field(name="Score", value=f"`{score}` / threshold `{SUSPICION_THRESHOLD}`", inline=True)
+        embed.add_field(name="Invite source", value=record.get('invite_source', 'custom'), inline=True)
+        embed.add_field(
+            name="Signals",
+            value="\n".join(f"• `{s}`  (+{SIGNAL_WEIGHTS.get(s, 0)})" for s in signals) or "none",
+            inline=False,
+        )
+        embed.set_footer(text=f"Use /fedcheck, /fedflag, or /fedclear to manage  ·  ID: {member.id}")
+        await bot_logs.send(embed=embed)
+
+    # ── Manual flag / clear ───────────────────────────────────────────────────
+
+    def manual_flag(self, guild_id: str, user_id: str, note: str = "") -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        self._exec(
+            """
+            INSERT INTO mod_suspicion
+              (guild_id, user_id, score, flagged, cleared, scored_at, flagged_at, signals, note)
+            VALUES (?,?,0,1,0,?,?,?,?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+              flagged=1, cleared=0, flagged_at=excluded.flagged_at, note=excluded.note
+            """,
+            (guild_id, user_id, now, now, "[]", note)
+        )
+
+    def manual_clear(self, guild_id: str, user_id: str, cleared_by: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        self._exec(
+            """
+            INSERT INTO mod_suspicion
+              (guild_id, user_id, score, flagged, cleared, scored_at, cleared_at, cleared_by, signals)
+            VALUES (?,?,0,0,1,?,?,?,?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+              flagged=0, cleared=1, cleared_at=excluded.cleared_at, cleared_by=excluded.cleared_by
+            """,
+            (guild_id, user_id, now, now, cleared_by, "[]")
+        )
+
+    # ── Public query ──────────────────────────────────────────────────────────
+
+    def is_flagged(self, guild_id: str, user_id: str) -> bool:
+        """
+        Returns True if the user is flagged and has NOT been manually cleared.
+        This is the function remasters.py (and any other module) should call.
+        """
+        row = self._one(
+            "SELECT flagged, cleared FROM mod_suspicion WHERE guild_id=? AND user_id=?",
+            (str(guild_id), str(user_id))
+        )
+        if not row:
+            return False
+        return bool(row["flagged"]) and not bool(row["cleared"])
+
+    def get_record(self, guild_id: str, user_id: str) -> dict | None:
+        row = self._one(
+            "SELECT * FROM mod_suspicion WHERE guild_id=? AND user_id=?",
+            (str(guild_id), str(user_id))
+        )
+        return dict(row) if row else None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Module-level public API (imported by remasters.py and others)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def is_flagged(guild_id, user_id: str) -> bool:
+    """
+    Convenience wrapper so other modules can do:
+        from moderation import is_flagged
+        if is_flagged(guild_id, user_id): ...
+    Requires bot.suspicion to have been set up (i.e. moderation module loaded).
+    Returns False safely if the suspicion system is unavailable.
+    """
+    import sys as _sys
+    mod = _sys.modules.get("moderation")
+    if not mod:
+        return False
+    engine: SuspicionEngine | None = getattr(mod, "_suspicion_engine", None)
+    if not engine:
+        return False
+    return engine.is_flagged(str(guild_id), str(user_id))
+
+
+# ── Store engine reference at module level for the public API ─────────────────
+_suspicion_engine: SuspicionEngine | None = None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SUSPICION SYSTEM — wired into setup()
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _setup_suspicion(bot: commands.Bot, _mod: "ModerationSystem", _cfg: "ModConfig"):
+    """Called at the end of setup() to attach the suspicion system."""
+    global _suspicion_engine
+
+    engine = SuspicionEngine(bot, _mod._db, _cfg)
+    _suspicion_engine = engine
+    bot.suspicion     = engine   # accessible as bot.suspicion from anywhere
+
+    # ── On member join: classify invite + score ───────────────────────────
+    @bot.listen("on_member_join")
+    async def _suspicion_on_member_join(member: discord.Member):
+        # Try to identify which invite was used; requires Manage Guild perm.
+        invite_source = "custom"
+        try:
+            invites = await member.guild.invites()
+            labels: dict = _cfg.get("invite_labels", {})
+            for inv in invites:
+                for label, codes in labels.items():
+                    if inv.code in (codes or []):
+                        # We can't reliably diff without a pre-join snapshot,
+                        # but if the server only has one leaktracker/youtube
+                        # invite, seeing it in the list is sufficient signal.
+                        invite_source = label
+                        break
+        except discord.Forbidden:
+            pass
+        await engine.score_member(member, invite_source=invite_source)
+
+    # ── Rescore on role change (only_releases_role signal may change) ──────
+    @bot.listen("on_member_update")
+    async def _suspicion_on_member_update(before: discord.Member, after: discord.Member):
+        if [r.id for r in before.roles] != [r.id for r in after.roles]:
+            # Only rescore if they already have a record (don't create on every update)
+            existing = engine.get_record(str(after.guild.id), str(after.id))
+            if existing and not existing.get("cleared"):
+                await engine.score_member(after)
+
+    # ── Track message counts for the no_messages signal ───────────────────
+    @bot.listen("on_message")
+    async def _suspicion_on_message(message: discord.Message):
+        if message.author.bot or not message.guild:
+            return
+        gid = str(message.guild.id)
+        uid = str(message.author.id)
+        # Increment message counter — using an extra column we add lazily via ALTER
+        try:
+            engine._exec(
+                "UPDATE mod_suspicion SET msg_count = COALESCE(msg_count, 0) + 1 "
+                "WHERE guild_id=? AND user_id=?",
+                (gid, uid)
+            )
+        except Exception:
+            pass  # Column may not exist yet; migration handles it
+
+    # ── /fedcheck ──────────────────────────────────────────────────────────
+    @bot.tree.command(name="fedcheck",
+                      description="[Mod] Show suspicion report for a member")
+    @app_commands.describe(member="Member to inspect")
+    @app_commands.default_permissions(manage_messages=True)
+    async def slash_fedcheck(interaction: discord.Interaction, member: discord.Member):
+        if not has_elevated_role(interaction.user, _cfg):
+            await interaction.response.send_message(ERROR_NO_PERMISSION, ephemeral=True)
+            return
+
+        record = engine.get_record(str(interaction.guild_id), str(member.id))
+
+        embed = discord.Embed(
+            title=f"🔎  Suspicion Report — {member}",
+            color=(discord.Color.red() if (record and record["flagged"] and not record["cleared"])
+                   else discord.Color.green() if (record and record["cleared"])
+                   else discord.Color.greyple()),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="Status",
+                        value=("🚩 Flagged" if record and record["flagged"] and not record["cleared"]
+                               else "✅ Cleared" if record and record["cleared"]
+                               else "⬜ Unscored"),
+                        inline=True)
+        embed.add_field(name="Score",
+                        value=f"`{record['score'] if record else '—'}` / `{SUSPICION_THRESHOLD}`",
+                        inline=True)
+
+        if record:
+            signals = json.loads(record.get("signals") or "[]")
+            embed.add_field(
+                name="Triggered signals",
+                value=("\n".join(f"• `{s}`  (+{SIGNAL_WEIGHTS.get(s, 0)})" for s in signals)
+                       or "none"),
+                inline=False,
+            )
+            embed.add_field(name="Invite source",
+                            value=record.get('invite_source', 'custom'),
+                            inline=True)
+            embed.add_field(name="Scored at",
+                            value=record.get("scored_at", "—")[:19].replace("T", " "),
+                            inline=True)
+            if record.get("cleared"):
+                embed.add_field(name="Cleared by",
+                                value=record.get("cleared_by", "unknown"),
+                                inline=True)
+            if record.get("note"):
+                embed.add_field(name="Note", value=record["note"], inline=False)
+
+        acct_age = (datetime.now(timezone.utc) - member.created_at).days
+        join_age = ((datetime.now(timezone.utc) - member.joined_at).days
+                    if member.joined_at else "?")
+        embed.add_field(name="Account age",  value=f"{acct_age}d", inline=True)
+        embed.add_field(name="Server tenure", value=f"{join_age}d", inline=True)
+        embed.set_footer(text=f"ID: {member.id}")
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ── /fedflag ───────────────────────────────────────────────────────────
+    @bot.tree.command(name="fedflag",
+                      description="[Mod] Manually flag a member as suspicious")
+    @app_commands.describe(member="Member to flag", note="Optional note")
+    @app_commands.default_permissions(manage_messages=True)
+    async def slash_fedflag(interaction: discord.Interaction,
+                            member: discord.Member,
+                            note: str = ""):
+        if not has_elevated_role(interaction.user, _cfg):
+            await interaction.response.send_message(ERROR_NO_PERMISSION, ephemeral=True)
+            return
+        if member.id == interaction.user.id:
+            await interaction.response.send_message(ERROR_CANNOT_ACTION_SELF, ephemeral=True)
+            return
+
+        engine.manual_flag(str(interaction.guild_id), str(member.id), note=note)
+        bot.logger.log(MODULE_NAME,
+                       f"MANUAL FLAG: {member} flagged by {interaction.user} — {note or 'no note'}")
+        await interaction.response.send_message(
+            f"🚩 **{member}** has been flagged. They will be silently denied access to "
+            f"protected features.",
+            ephemeral=True
+        )
+
+    # ── /fedclear ──────────────────────────────────────────────────────────
+    @bot.tree.command(name="fedclear",
+                      description="[Mod] Clear a suspicion flag from a member")
+    @app_commands.describe(member="Member to clear")
+    @app_commands.default_permissions(manage_messages=True)
+    async def slash_fedclear(interaction: discord.Interaction, member: discord.Member):
+        if not has_elevated_role(interaction.user, _cfg):
+            await interaction.response.send_message(ERROR_NO_PERMISSION, ephemeral=True)
+            return
+
+        engine.manual_clear(str(interaction.guild_id), str(member.id),
+                             cleared_by=str(interaction.user))
+        bot.logger.log(MODULE_NAME,
+                       f"CLEARED: {member} cleared by {interaction.user}")
+        await interaction.response.send_message(
+            f"✅ Suspicion flag cleared for **{member}**. They now have normal access.",
+            ephemeral=True
+        )
+
+    # ── /fedscan ───────────────────────────────────────────────────────────
+    @bot.tree.command(name="fedscan",
+                      description="[Admin] Re-score all members in the server")
+    @app_commands.default_permissions(administrator=True)
+    async def slash_fedscan(interaction: discord.Interaction):
+        if not has_elevated_role(interaction.user, _cfg):
+            await interaction.response.send_message(ERROR_NO_PERMISSION, ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        guild   = interaction.guild
+        scanned = 0
+        flagged = 0
+        async for member in guild.fetch_members(limit=None):
+            if member.bot:
+                continue
+            record = await engine.score_member(member)
+            scanned += 1
+            if record.get("flagged") and not record.get("cleared"):
+                flagged += 1
+        await interaction.followup.send(
+            f"✅ Scan complete — **{scanned}** members scored, **{flagged}** flagged.",
+            ephemeral=True
+        )
+
+    # ── /fedinvites ────────────────────────────────────────────────────────
+    @bot.tree.command(name="fedinvites",
+                      description="[Admin] Show invite classification labels")
+    @app_commands.default_permissions(administrator=True)
+    async def slash_fedinvites(interaction: discord.Interaction):
+        if not has_elevated_role(interaction.user, _cfg):
+            await interaction.response.send_message(ERROR_NO_PERMISSION, ephemeral=True)
+            return
+        labels: dict = _cfg.get("invite_labels", {})
+        if not labels:
+            await interaction.response.send_message(
+                "No invite labels configured yet. Add them to `config/moderation.json` under "
+                "`invite_labels`: `{\"leaktracker\": [\"code1\"], \"youtube\": [\"code2\"]}`",
+                ephemeral=True
+            )
+            return
+        lines = []
+        for label, codes in labels.items():
+            for code in codes:
+                lines.append(f"• `{code}` → **{label}**")
+        await interaction.response.send_message(
+            "**Invite label config:**\n" + "\n".join(lines) or "Empty.",
+            ephemeral=True
+        )
+
+    # ── Lazy column migration for msg_count ────────────────────────────────
+    try:
+        _db_exec(_mod._db,
+                 "ALTER TABLE mod_suspicion ADD COLUMN msg_count INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass  # Column already exists — fine
+
+    bot.logger.log(MODULE_NAME, "Suspicion engine loaded — commands: /fedcheck /fedflag /fedclear /fedscan /fedinvites")
+

@@ -427,137 +427,25 @@ async def get_cached_url(bot, file_path):
 
 async def _deliver_song(bot, interaction: discord.Interaction, candidate: dict) -> None:
     """
-    Primary: upload file as ephemeral reply with Components v2 layout.
-    Fallback: CDN-cached URL sent via DM.
+    Send "Uploading…" ephemeral, upload to #songcache, then edit that same
+    message to just a CDN hyperlink. One ephemeral, no clutter.
     """
     p = Path(candidate['path'])
     md = candidate['metadata']
 
-    # ── Primary: ephemeral direct file upload ────────────────────────────────
-    try:
-        if p.exists():
-            bot.logger.log(MODULE_NAME, f"Delivering '{p.name}' via ephemeral upload")
-            art_bytes = extract_artwork(str(p))
+    # Send the waiting message and keep the message object so we can edit it
+    msg = await interaction.followup.send("Uploading file, please wait…", ephemeral=True, wait=True)
 
-            title = md.get('title', p.stem)
-            artist = md.get('artist', 'Eminem')
-            album = md.get('album', '')
-            year = md.get('year', '')
-
-            # Build metadata line
-            meta_parts = [f"**{artist}**"]
-            if album:
-                meta_parts.append(album)
-            if year:
-                meta_parts.append(year)
-            meta_line = "  ·  ".join(meta_parts)
-
-            if art_bytes:
-                view = discord.ui.LayoutView(timeout=None)
-                section = discord.ui.Section(
-                    discord.ui.TextDisplay(f"## {title}"),
-                    discord.ui.TextDisplay(meta_line),
-                    accessory=discord.ui.Thumbnail(
-                        "attachment://cover.jpg",
-                        description=f"Cover art for {title}",
-                    ),
-                )
-                view.add_item(section)
-                await interaction.followup.send(
-                    view=view,
-                    file=discord.File(BytesIO(art_bytes), filename="cover.jpg"),
-                    ephemeral=True,
-                )
-            else:
-                view = discord.ui.LayoutView(timeout=None)
-                view.add_item(discord.ui.TextDisplay(f"## {title}"))
-                view.add_item(discord.ui.TextDisplay(meta_line))
-                await interaction.followup.send(view=view, ephemeral=True)
-
-            # Send the audio file as a plain ephemeral so it actually appears
-            await interaction.followup.send(
-                file=discord.File(str(p), filename=p.name),
-                ephemeral=True,
-            )
-
-            bot.logger.log(MODULE_NAME, f"Ephemeral delivery succeeded for '{p.name}'")
-            return
-    except discord.HTTPException as e:
-        bot.logger.log(MODULE_NAME,
-            f"Ephemeral upload failed (HTTP {e.status}), falling back to DM cache", "WARNING")
-    except Exception as e:
-        bot.logger.log(MODULE_NAME, f"Ephemeral delivery error ({e}), falling back to DM", "WARNING")
-
-    # ── Fallback: DM via cache ────────────────────────────────────────────────
-    bot.logger.log(MODULE_NAME, f"Falling back to DM cache delivery for '{p.name}'")
     url = await get_cached_url(bot, str(p))
     if url == "FILE_TOO_LARGE":
-        await interaction.followup.send(LARGE_FILE_MSG, ephemeral=True)
+        await msg.edit(content=LARGE_FILE_MSG)
         return
     if not url:
-        await interaction.followup.send("❌ Failed to retrieve song.", ephemeral=True)
+        await msg.edit(content="❌ Failed to retrieve song.")
         return
 
-    art_bytes = extract_artwork(str(p))
-    title = md.get('title', 'Unknown Track')
-    artist = md.get('artist', 'Eminem')
-    album = md.get('album', '')
-    year = md.get('year', '')
-
-    meta_parts = [f"**{artist}**"]
-    if album:
-        meta_parts.append(album)
-    if year:
-        meta_parts.append(year)
-    meta_line = "  ·  ".join(meta_parts)
-
-    try:
-        user = interaction.user
-        if art_bytes:
-            try:
-                fobj = discord.File(BytesIO(art_bytes), filename="cover.jpg")
-                dm_view = discord.ui.LayoutView(timeout=None)
-                section = discord.ui.Section(
-                    discord.ui.TextDisplay(f"## {title}"),
-                    discord.ui.TextDisplay(meta_line),
-                    discord.ui.TextDisplay(f"[Download]({url})"),
-                    accessory=discord.ui.Thumbnail(
-                        "attachment://cover.jpg",
-                        description=f"Cover art for {title}",
-                    ),
-                )
-                dm_view.add_item(section)
-                dm_view.add_item(discord.ui.TextDisplay("-# Link expires when the cache purges"))
-                await user.send(file=fobj, view=dm_view)
-            except Exception:
-                # Fallback DM without artwork
-                dm_view = discord.ui.LayoutView(timeout=None)
-                dm_view.add_item(discord.ui.TextDisplay(f"## {title}"))
-                dm_view.add_item(discord.ui.TextDisplay(meta_line))
-                dm_view.add_item(discord.ui.TextDisplay(f"[Download]({url})"))
-                dm_view.add_item(discord.ui.TextDisplay("-# Link expires when the cache purges"))
-                await user.send(view=dm_view)
-        else:
-            dm_view = discord.ui.LayoutView(timeout=None)
-            dm_view.add_item(discord.ui.TextDisplay(f"## {title}"))
-            dm_view.add_item(discord.ui.TextDisplay(meta_line))
-            dm_view.add_item(discord.ui.TextDisplay(f"[Download]({url})"))
-            dm_view.add_item(discord.ui.TextDisplay("-# Link expires when the cache purges"))
-            await user.send(view=dm_view)
-        await interaction.followup.send("Check your DMs for the song link!", ephemeral=True)
-    except discord.Forbidden:
-        offtopic = discord.utils.get(bot.get_all_channels(), name="off-topic")
-        if offtopic:
-            await offtopic.send(
-                f"{interaction.user.mention} — I couldn't send you a DM! "
-                "Please enable DMs from server members and try again."
-            )
-        await interaction.followup.send(
-            "I couldn't reach your DMs. Please enable DMs and try again — "
-            "I've pinged you in off-topic.",
-            ephemeral=True,
-        )
-
+    await msg.edit(content=f"[{p.name}]({url})")
+    bot.logger.log(MODULE_NAME, f"Delivered '{p.name}' via CDN link")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  FED CHECK

@@ -707,8 +707,9 @@ def _user_can_download(interaction: discord.Interaction) -> bool:
 async def _deliver_remaster(bot: commands.Bot, interaction: discord.Interaction,
                              version_row: dict) -> None:
     """
-    Primary: fetch file from CDN, re-upload as ephemeral Components v2 message.
-    Fallback: send CDN URL via DM if upload fails.
+    Deliver a remaster using its stored CDN URL.
+    Primary: ephemeral card with download link (no re-upload needed).
+    Fallback: DM the CDN URL if the ephemeral fails.
     """
     remaster = _db_get_remaster(version_row["remaster_id"])
     if not remaster:
@@ -722,46 +723,35 @@ async def _deliver_remaster(bot: commands.Bot, interaction: discord.Interaction,
     desc = remaster.get("description", "")
     image_url = version_row.get("image_cdn_url")
 
-    # ── Primary: ephemeral file upload with Components v2 ────────────────────
+    # ── Primary: ephemeral card with CDN download link ────────────────────────
     try:
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.get(cdn_url) as resp:
-                if resp.status == 200:
-                    data = await resp.read()
-                    file_obj = discord.File(
-                        fp=__import__("io").BytesIO(data),
-                        filename=filename,
-                    )
-                    view = discord.ui.LayoutView(timeout=None)
-                    if image_url:
-                        section = discord.ui.Section(
-                            discord.ui.TextDisplay(f"## {title}  ·  {version}"),
-                            discord.ui.TextDisplay(desc) if desc else discord.ui.TextDisplay(
-                                f"`{filename}`"),
-                            accessory=discord.ui.Thumbnail(image_url, description=f"Cover art for {title}"),
-                        )
-                        view.add_item(section)
-                    else:
-                        view.add_item(discord.ui.TextDisplay(f"## {title}  ·  {version}"))
-                        if desc:
-                            view.add_item(discord.ui.TextDisplay(desc))
-                    view.add_item(discord.ui.TextDisplay(
-                        f"-# Version `{version}`  ·  `{filename}`  ·  delivered privately"
-                    ))
-                    await interaction.followup.send(view=view, file=file_obj, ephemeral=True)
-                    bot.logger.log(MODULE_NAME,
-                        f"Ephemeral delivery: '{title}' to {interaction.user}")
-                    return
-    except ImportError:
-        bot.logger.log(MODULE_NAME, "aiohttp not available, falling back to DM", "WARNING")
+        view = discord.ui.LayoutView(timeout=None)
+        if image_url:
+            section = discord.ui.Section(
+                discord.ui.TextDisplay(f"## {title}  ·  {version}"),
+                discord.ui.TextDisplay(desc) if desc else discord.ui.TextDisplay(f"`{filename}`"),
+                discord.ui.TextDisplay(f"[Download `{filename}`]({cdn_url})"),
+                accessory=discord.ui.Thumbnail(image_url, description=f"Cover art for {title}"),
+            )
+            view.add_item(section)
+        else:
+            view.add_item(discord.ui.TextDisplay(f"## {title}  ·  {version}"))
+            if desc:
+                view.add_item(discord.ui.TextDisplay(desc))
+            view.add_item(discord.ui.TextDisplay(f"[Download `{filename}`]({cdn_url})"))
+        view.add_item(discord.ui.TextDisplay(
+            f"-# Version `{version}`  ·  `{filename}`  ·  delivered privately"
+        ))
+        await interaction.followup.send(view=view, ephemeral=True)
+        bot.logger.log(MODULE_NAME, f"Delivered '{title}' to {interaction.user}")
+        return
     except discord.HTTPException as e:
         bot.logger.log(MODULE_NAME,
-            f"Ephemeral upload failed (HTTP {e.status}), falling back to DM", "WARNING")
+            f"Ephemeral delivery failed (HTTP {e.status}), falling back to DM", "WARNING")
     except Exception as e:
         bot.logger.log(MODULE_NAME, f"Ephemeral delivery error ({e}), falling back to DM", "WARNING")
 
-    # ── Fallback: DM the CDN URL with Components v2 ───────────────────────────
+    # ── Fallback: DM the CDN URL ──────────────────────────────────────────────
     bot.logger.log(MODULE_NAME, f"Falling back to DM for '{title}'")
     try:
         dm_view = discord.ui.LayoutView(timeout=None)
@@ -795,7 +785,6 @@ async def _deliver_remaster(bot: commands.Bot, interaction: discord.Interaction,
             "I've pinged you in off-topic.",
             ephemeral=True,
         )
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ANNOUNCEMENT POSTING

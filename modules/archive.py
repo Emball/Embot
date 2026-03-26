@@ -427,7 +427,7 @@ async def get_cached_url(bot, file_path):
 
 async def _deliver_song(bot, interaction: discord.Interaction, candidate: dict) -> None:
     """
-    Primary: upload file as ephemeral reply with inline audio player.
+    Primary: upload file as ephemeral reply with Components v2 layout.
     Fallback: CDN-cached URL sent via DM.
     """
     p = Path(candidate['path'])
@@ -438,20 +438,42 @@ async def _deliver_song(bot, interaction: discord.Interaction, candidate: dict) 
         if p.exists():
             bot.logger.log(MODULE_NAME, f"Delivering '{p.name}' via ephemeral upload")
             art_bytes = extract_artwork(str(p))
-            embed = discord.Embed(
-                title=md.get('title', p.stem),
-                color=0x1abc9c,
-            )
-            embed.add_field(name="Artist", value=md.get('artist', 'Eminem'), inline=True)
-            if md.get('album'):
-                embed.add_field(name="Album", value=md['album'], inline=True)
-            if md.get('year'):
-                embed.add_field(name="Year", value=md['year'], inline=True)
+
+            title = md.get('title', p.stem)
+            artist = md.get('artist', 'Eminem')
+            album = md.get('album', '')
+            year = md.get('year', '')
+
+            # Build metadata line
+            meta_parts = [f"**{artist}**"]
+            if album:
+                meta_parts.append(album)
+            if year:
+                meta_parts.append(year)
+            meta_line = "  ·  ".join(meta_parts)
+
             files = [discord.File(str(p), filename=p.name)]
+
             if art_bytes:
                 files.append(discord.File(BytesIO(art_bytes), filename="cover.jpg"))
-                embed.set_thumbnail(url="attachment://cover.jpg")
-            await interaction.followup.send(embed=embed, files=files, ephemeral=True)
+                # Components v2: Section with cover thumbnail
+                view = discord.ui.LayoutView(timeout=None)
+                section = discord.ui.Section(
+                    discord.ui.TextDisplay(f"## {title}"),
+                    discord.ui.TextDisplay(meta_line),
+                    accessory=discord.ui.Thumbnail(
+                        "attachment://cover.jpg",
+                        description=f"Cover art for {title}",
+                    ),
+                )
+                view.add_item(section)
+                await interaction.followup.send(view=view, files=files, ephemeral=True)
+            else:
+                view = discord.ui.LayoutView(timeout=None)
+                view.add_item(discord.ui.TextDisplay(f"## {title}"))
+                view.add_item(discord.ui.TextDisplay(meta_line))
+                await interaction.followup.send(view=view, files=files, ephemeral=True)
+
             bot.logger.log(MODULE_NAME, f"Ephemeral delivery succeeded for '{p.name}'")
             return
     except discord.HTTPException as e:
@@ -469,30 +491,53 @@ async def _deliver_song(bot, interaction: discord.Interaction, candidate: dict) 
     if not url:
         await interaction.followup.send("❌ Failed to retrieve song.", ephemeral=True)
         return
+
     art_bytes = extract_artwork(str(p))
-    embed = discord.Embed(
-        title=md.get('title', 'Unknown Track'),
-        description=f"**Artist:** {md.get('artist', 'Eminem')}",
-        color=0x1abc9c,
-        url=url,
-    )
-    if md.get('album'):
-        embed.add_field(name="Album", value=md['album'], inline=True)
-    if md.get('year'):
-        embed.add_field(name="Year", value=md['year'], inline=True)
-    embed.add_field(name="Download", value=f"[Click Here]({url})", inline=False)
-    embed.set_footer(text="Link expires when the cache purges")
+    title = md.get('title', 'Unknown Track')
+    artist = md.get('artist', 'Eminem')
+    album = md.get('album', '')
+    year = md.get('year', '')
+
+    meta_parts = [f"**{artist}**"]
+    if album:
+        meta_parts.append(album)
+    if year:
+        meta_parts.append(year)
+    meta_line = "  ·  ".join(meta_parts)
+
     try:
         user = interaction.user
         if art_bytes:
             try:
                 fobj = discord.File(BytesIO(art_bytes), filename="cover.jpg")
-                embed.set_thumbnail(url="attachment://cover.jpg")
-                await user.send(file=fobj, embed=embed)
+                dm_view = discord.ui.LayoutView(timeout=None)
+                section = discord.ui.Section(
+                    discord.ui.TextDisplay(f"## {title}"),
+                    discord.ui.TextDisplay(meta_line),
+                    discord.ui.TextDisplay(f"[Download]({url})"),
+                    accessory=discord.ui.Thumbnail(
+                        "attachment://cover.jpg",
+                        description=f"Cover art for {title}",
+                    ),
+                )
+                dm_view.add_item(section)
+                dm_view.add_item(discord.ui.TextDisplay("-# Link expires when the cache purges"))
+                await user.send(file=fobj, view=dm_view)
             except Exception:
-                await user.send(embed=embed)
+                # Fallback DM without artwork
+                dm_view = discord.ui.LayoutView(timeout=None)
+                dm_view.add_item(discord.ui.TextDisplay(f"## {title}"))
+                dm_view.add_item(discord.ui.TextDisplay(meta_line))
+                dm_view.add_item(discord.ui.TextDisplay(f"[Download]({url})"))
+                dm_view.add_item(discord.ui.TextDisplay("-# Link expires when the cache purges"))
+                await user.send(view=dm_view)
         else:
-            await user.send(embed=embed)
+            dm_view = discord.ui.LayoutView(timeout=None)
+            dm_view.add_item(discord.ui.TextDisplay(f"## {title}"))
+            dm_view.add_item(discord.ui.TextDisplay(meta_line))
+            dm_view.add_item(discord.ui.TextDisplay(f"[Download]({url})"))
+            dm_view.add_item(discord.ui.TextDisplay("-# Link expires when the cache purges"))
+            await user.send(view=dm_view)
         await interaction.followup.send("Check your DMs for the song link!", ephemeral=True)
     except discord.Forbidden:
         offtopic = discord.utils.get(bot.get_all_channels(), name="off-topic")
@@ -523,7 +568,7 @@ def _is_fed(interaction: discord.Interaction) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  NAVIGATOR — per-user ephemeral multi-step view
+#  NAVIGATOR — per-user ephemeral multi-step LayoutView
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _get_folders_for_format(song_index: dict, fmt: str) -> list:
@@ -555,11 +600,11 @@ def _folder_options_for_page(folders: list, page: int):
     has_next = end < total
     opts = []
     if has_prev:
-        opts.append(discord.SelectOption(label="Previous page", value="__prev__"))
+        opts.append(discord.SelectOption(label="◀  Previous page", value="__prev__"))
     for f in folders[start:end]:
         opts.append(discord.SelectOption(label=_clean_folder_name(f)[:100], value=f))
     if has_next:
-        opts.append(discord.SelectOption(label="Next page", value="__next__"))
+        opts.append(discord.SelectOption(label="Next page  ▶", value="__next__"))
     return opts, has_prev, has_next
 
 def _song_options_for_page(songs: list, page: int):
@@ -582,7 +627,7 @@ def _song_options_for_page(songs: list, page: int):
     has_next = end < total
     opts = []
     if has_prev:
-        opts.append(discord.SelectOption(label="Previous page", value="__prev__"))
+        opts.append(discord.SelectOption(label="◀  Previous page", value="__prev__"))
     for s in songs[start:end]:
         opts.append(discord.SelectOption(
             label=s['metadata'].get('title', s['original_title'])[:100],
@@ -590,13 +635,13 @@ def _song_options_for_page(songs: list, page: int):
             description=(s['metadata'].get('year', '') or '')[:50] or None,
         ))
     if has_next:
-        opts.append(discord.SelectOption(label="Next page", value="__next__"))
+        opts.append(discord.SelectOption(label="Next page  ▶", value="__next__"))
     return opts, has_prev, has_next
 
 
-class ArchiveNavigatorView(discord.ui.View):
+class ArchiveNavigatorView(discord.ui.LayoutView):
     """
-    Ephemeral multi-step navigator. One instance per user session.
+    Ephemeral multi-step navigator using Components v2.
     format_select → folder_select (paginated only if >25) → song_select → deliver
     """
 
@@ -616,54 +661,60 @@ class ArchiveNavigatorView(discord.ui.View):
 
     def _render_format_step(self):
         self.clear_items()
+        self.add_item(discord.ui.TextDisplay("## 🗄️  Eminem Archive\nChoose a format to browse:"))
+        row = discord.ui.ActionRow()
         sel = discord.ui.Select(
             placeholder="Choose a format…",
             options=[discord.SelectOption(label=fmt, value=fmt) for fmt in FORMATS],
             custom_id="nav_fmt",
         )
         sel.callback = self._on_format
-        self.add_item(sel)
+        row.add_item(sel)
+        self.add_item(row)
 
     def _render_folder_step(self):
         self.clear_items()
         opts, has_prev, has_next = _folder_options_for_page(self._folders, self._folder_page)
         pages = (len(self._folders) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
-        ph = f"Choose a folder… (page {self._folder_page + 1}/{pages})" if pages > 1 \
-            else "Choose a folder…"
+        page_hint = f"  ·  page {self._folder_page + 1}/{pages}" if pages > 1 else ""
+        self.add_item(discord.ui.TextDisplay(
+            f"## 🗄️  Eminem Archive  ·  {self._fmt}\n"
+            f"{len(self._folders)} folders available{page_hint}"
+        ))
+        row = discord.ui.ActionRow()
+        ph = f"Choose a folder…{page_hint}"
         sel = discord.ui.Select(placeholder=ph[:150], options=opts, custom_id="nav_folder")
         sel.callback = self._on_folder
-        self.add_item(sel)
-        back = discord.ui.Button(label="Back", style=discord.ButtonStyle.secondary,
+        row.add_item(sel)
+        self.add_item(row)
+        back_row = discord.ui.ActionRow()
+        back = discord.ui.Button(label="← Back to Format", style=discord.ButtonStyle.secondary,
                                  custom_id="nav_b_fmt")
         back.callback = self._on_back_to_format
-        self.add_item(back)
+        back_row.add_item(back)
+        self.add_item(back_row)
 
     def _render_song_step(self):
         self.clear_items()
         opts, has_prev, has_next = _song_options_for_page(self._songs, self._song_page)
         pages = (len(self._songs) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
-        ph = f"Choose a song… (page {self._song_page + 1}/{pages})" if pages > 1 \
-            else "Choose a song…"
+        page_hint = f"  ·  page {self._song_page + 1}/{pages}" if pages > 1 else ""
+        self.add_item(discord.ui.TextDisplay(
+            f"## 🗄️  {_clean_folder_name(self._folder)}\n"
+            f"{len(self._songs)} songs{page_hint}"
+        ))
+        row = discord.ui.ActionRow()
+        ph = f"Choose a song…{page_hint}"
         sel = discord.ui.Select(placeholder=ph[:150], options=opts, custom_id="nav_song")
         sel.callback = self._on_song
-        self.add_item(sel)
-        back = discord.ui.Button(label="Back", style=discord.ButtonStyle.secondary,
+        row.add_item(sel)
+        self.add_item(row)
+        back_row = discord.ui.ActionRow()
+        back = discord.ui.Button(label="← Back to Folders", style=discord.ButtonStyle.secondary,
                                  custom_id="nav_b_folder")
         back.callback = self._on_back_to_folder
-        self.add_item(back)
-
-    def _current_embed(self, status: str = "") -> discord.Embed:
-        embed = discord.Embed(title="🗄️  Eminem Archive", color=discord.Color.from_rgb(30, 215, 96))
-        lines = []
-        if self._fmt:
-            lines.append(f"**Format:** {self._fmt}")
-        if self._folder:
-            lines.append(f"**Folder:** {_clean_folder_name(self._folder)}")
-        if lines:
-            embed.description = "\n".join(lines)
-        if status:
-            embed.set_footer(text=status)
-        return embed
+        back_row.add_item(back)
+        self.add_item(back_row)
 
     # ── Callbacks ─────────────────────────────────────────────────────────────
 
@@ -675,8 +726,7 @@ class ArchiveNavigatorView(discord.ui.View):
         self._folders = _get_folders_for_format(self._index, self._fmt)
         self._folder_page = 0
         self._render_folder_step()
-        await interaction.response.edit_message(
-            embed=self._current_embed(f"{len(self._folders)} folders available"), view=self)
+        await interaction.response.edit_message(view=self)
 
     async def _on_folder(self, interaction: discord.Interaction):
         if _is_fed(interaction):
@@ -686,21 +736,18 @@ class ArchiveNavigatorView(discord.ui.View):
         if val == "__prev__":
             self._folder_page = max(0, self._folder_page - 1)
             self._render_folder_step()
-            await interaction.response.edit_message(embed=self._current_embed(), view=self)
+            await interaction.response.edit_message(view=self)
             return
         if val == "__next__":
             self._folder_page += 1
             self._render_folder_step()
-            await interaction.response.edit_message(embed=self._current_embed(), view=self)
+            await interaction.response.edit_message(view=self)
             return
         self._folder = val
         self._songs = _get_songs_in_folder(self._index, self._fmt, self._folder)
         self._song_page = 0
         self._render_song_step()
-        await interaction.response.edit_message(
-            embed=self._current_embed(
-                f"{len(self._songs)} songs in {_clean_folder_name(self._folder)}"),
-            view=self)
+        await interaction.response.edit_message(view=self)
 
     async def _on_song(self, interaction: discord.Interaction):
         if _is_fed(interaction):
@@ -710,12 +757,12 @@ class ArchiveNavigatorView(discord.ui.View):
         if val == "__prev__":
             self._song_page = max(0, self._song_page - 1)
             self._render_song_step()
-            await interaction.response.edit_message(embed=self._current_embed(), view=self)
+            await interaction.response.edit_message(view=self)
             return
         if val == "__next__":
             self._song_page += 1
             self._render_song_step()
-            await interaction.response.edit_message(embed=self._current_embed(), view=self)
+            await interaction.response.edit_message(view=self)
             return
         candidate = next((s for s in self._songs if s['path'] == val), None)
         if not candidate:
@@ -731,51 +778,50 @@ class ArchiveNavigatorView(discord.ui.View):
         self._folders = []
         self._folder_page = 0
         self._render_format_step()
-        await interaction.response.edit_message(embed=self._current_embed(), view=self)
+        await interaction.response.edit_message(view=self)
 
     async def _on_back_to_folder(self, interaction: discord.Interaction):
         self._folder = None
         self._songs = []
         self._song_page = 0
         self._render_folder_step()
-        await interaction.response.edit_message(
-            embed=self._current_embed(f"{len(self._folders)} folders available"), view=self)
+        await interaction.response.edit_message(view=self)
 
     async def on_timeout(self):
         self.clear_items()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  INFO EMBED  (pinned in #info)
+#  INFO MESSAGE  (pinned in #info) — Components v2
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _build_archive_info_embed() -> discord.Embed:
-    embed = discord.Embed(
-        title="Eminem Archive",
-        description=(
-            "Download songs from the full Eminem archive in FLAC or MP3.\n\n"
-            "`/archive [flac/mp3] [song title] [version (like 'instrumental' or 'live', optional)]`\n"
-            "Example: `/archive flac antichrist 2005 version`\n\n"
-            "You can also use the menus below to select your desired file:"
-        ),
-        color=discord.Color.from_rgb(30, 215, 96),
-    )
-    return embed
-
-
-class _ArchiveInfoView(discord.ui.View):
-    """Persistent view pinned in #info. Format select is public; file delivery is ephemeral."""
+class _ArchiveInfoView(discord.ui.LayoutView):
+    """Persistent Components v2 view pinned in #info."""
 
     def __init__(self, bot):
         super().__init__(timeout=None)
         self._bot = bot
+        self._build()
+
+    def _build(self):
+        self.clear_items()
+        self.add_item(discord.ui.TextDisplay(
+            "## 🗄️  Eminem Archive\n"
+            "Download songs from the full Eminem archive in FLAC or MP3.\n\n"
+            "`/archive [flac/mp3] [song title] [version (optional)]`\n"
+            "Example: `/archive flac antichrist 2005 version`\n\n"
+            "Or use the menu below to browse and select a file:"
+        ))
+        self.add_item(discord.ui.Separator())
+        row = discord.ui.ActionRow()
         sel = discord.ui.Select(
-            placeholder="Choose a format…",
+            placeholder="Choose a format to start browsing…",
             options=[discord.SelectOption(label=fmt, value=fmt) for fmt in FORMATS],
             custom_id="archive_info_fmt",
         )
         sel.callback = self._on_format
-        self.add_item(sel)
+        row.add_item(sel)
+        self.add_item(row)
 
     async def _on_format(self, interaction: discord.Interaction):
         if _is_fed(interaction):
@@ -792,11 +838,7 @@ class _ArchiveInfoView(discord.ui.View):
         nav._fmt = fmt
         nav._folders = _get_folders_for_format(manager.song_index, fmt)
         nav._render_folder_step()
-        await interaction.response.send_message(
-            embed=nav._current_embed(f"{len(nav._folders)} folders available"),
-            view=nav,
-            ephemeral=True,
-        )
+        await interaction.response.send_message(view=nav, ephemeral=True)
 
 
 async def _get_info_channel(bot) -> Optional[discord.TextChannel]:
@@ -810,13 +852,12 @@ async def _get_info_channel(bot) -> Optional[discord.TextChannel]:
 
 
 async def post_or_refresh_info_embed(bot, force: bool = False) -> None:
-    """Post the archive info embed to #info. Skips if it already exists unless force=True."""
+    """Post the archive info message to #info. Skips if it already exists unless force=True."""
     cfg = _load_archive_config()
     info_ch = await _get_info_channel(bot)
     if not info_ch:
         bot.logger.log(MODULE_NAME, "info channel not found — skipping archive embed post", "WARNING")
         return
-    embed = _build_archive_info_embed()
     view = _ArchiveInfoView(bot)
     existing_id = cfg.get("info_embed_msg_id")
     if existing_id and not force:
@@ -827,7 +868,7 @@ async def post_or_refresh_info_embed(bot, force: bool = False) -> None:
         except (discord.NotFound, discord.Forbidden):
             pass
     try:
-        msg = await info_ch.send(embed=embed, view=view)
+        msg = await info_ch.send(view=view)
         _save_archive_config({"info_embed_msg_id": str(msg.id)})
         bot.logger.log(MODULE_NAME, f"Archive info embed posted (msg {msg.id})")
     except discord.Forbidden:

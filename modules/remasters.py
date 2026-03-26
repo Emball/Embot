@@ -1085,15 +1085,24 @@ class RemasterNavigatorView(discord.ui.LayoutView):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _RemastersInfoView(discord.ui.LayoutView):
-    """Persistent Components v2 view pinned in #info."""
+    """
+    Persistent Components v2 view pinned in #info.
+    All navigation (list → detail) happens by editing THIS message in-place.
+    Only the final file delivery is ephemeral.
+    """
 
     def __init__(self, bot: commands.Bot):
         super().__init__(timeout=None)
         self._bot = bot
-        self._rebuild()
+        self._selected_rid: Optional[str] = None
+        self._page = 0
+        self._render_list()
 
-    def _rebuild(self):
+    # ── Renderers ─────────────────────────────────────────────────────────────
+
+    def _render_list(self):
         self.clear_items()
+        self._selected_rid = None
         remasters = _db_all_remasters()
         count = len(remasters)
 
@@ -1110,17 +1119,30 @@ class _RemastersInfoView(discord.ui.LayoutView):
         self.add_item(discord.ui.Separator())
 
         page_size = 25
-        opts = [
-            discord.SelectOption(
+        total = len(remasters)
+        start = self._page * page_size
+        end = min(start + page_size, total)
+        has_prev = self._page > 0
+        has_next = end < total
+        pages = (total + page_size - 1) // page_size
+        page_hint = f"  ·  page {self._page + 1}/{pages}" if pages > 1 else ""
+
+        opts = []
+        if has_prev:
+            opts.append(discord.SelectOption(label="◀  Previous page", value="__prev__"))
+        for r in remasters[start:end]:
+            opts.append(discord.SelectOption(
                 label=r["title"][:100],
                 value=r["id"],
                 description=f"v{r['latest_version']}"[:100],
-            )
-            for r in remasters[:page_size]
-        ]
+            ))
+        if has_next:
+            opts.append(discord.SelectOption(label="Next page  ▶", value="__next__"))
+
         row = discord.ui.ActionRow()
+        ph = f"Choose a release…{page_hint}"
         sel = discord.ui.Select(
-            placeholder="Choose a release…",
+            placeholder=ph[:150],
             options=opts,
             custom_id="remasters_info_select",
         )
@@ -1128,24 +1150,110 @@ class _RemastersInfoView(discord.ui.LayoutView):
         row.add_item(sel)
         self.add_item(row)
 
+    def _render_detail(self, remaster: dict, version_row: dict):
+        self.clear_items()
+        title = remaster["title"]
+        desc = remaster.get("description", "")
+        version = remaster["latest_version"]
+        filename = version_row["filename"]
+        released = version_row["created_at"][:10]
+        image_url = version_row.get("image_cdn_url")
+
+        if image_url:
+            section = discord.ui.Section(
+                discord.ui.TextDisplay(f"## ✦  {title}"),
+                discord.ui.TextDisplay(desc) if desc else discord.ui.TextDisplay(
+                    f"Version `{version}`"),
+                accessory=discord.ui.Thumbnail(image_url, description=f"Cover art for {title}"),
+            )
+            self.add_item(section)
+        else:
+            self.add_item(discord.ui.TextDisplay(f"## ✦  {title}"))
+            if desc:
+                self.add_item(discord.ui.TextDisplay(desc))
+
+        self.add_item(discord.ui.TextDisplay(
+            f"`{version}`  ·  `{filename}`  ·  released {released}"
+        ))
+        self.add_item(discord.ui.Separator())
+
+        btn_row = discord.ui.ActionRow()
+        dl_btn = discord.ui.Button(
+            label="Download",
+            style=discord.ButtonStyle.success,
+            custom_id=f"rminfo_dl:{version_row['id']}",
+        )
+        dl_btn.callback = self._on_download
+        btn_row.add_item(dl_btn)
+        back = discord.ui.Button(
+            label="← Back",
+            style=discord.ButtonStyle.secondary,
+            custom_id="rminfo_back",
+        )
+        back.callback = self._on_back
+        btn_row.add_item(back)
+        self.add_item(btn_row)
+        self.add_item(discord.ui.TextDisplay(
+            "-# Click Download to listen — delivered privately, only you can see it"
+        ))
+
+    # ── Callbacks ─────────────────────────────────────────────────────────────
+
     async def _on_select(self, interaction: discord.Interaction):
         if not _user_can_download(interaction):
             await interaction.response.send_message(
                 "This didn't work. Please try again later.", ephemeral=True)
             return
-        rid = interaction.data["values"][0]
-        remaster = _db_get_remaster(rid)
+        val = interaction.data["values"][0]
+        if val == "__prev__":
+            self._page = max(0, self._page - 1)
+            self._render_list()
+            await interaction.response.edit_message(view=self)
+            return
+        if val == "__next__":
+            self._page += 1
+            self._render_list()
+            await interaction.response.edit_message(view=self)
+            return
+        self._selected_rid = val
+        remaster = _db_get_remaster(val)
         if not remaster:
             await interaction.response.send_message("Release not found.", ephemeral=True)
             return
-        version_row = _db_latest_version(rid)
+        version_row = _db_latest_version(val)
         if not version_row:
             await interaction.response.send_message("No version available.", ephemeral=True)
             return
-        nav = RemasterNavigatorView(self._bot)
-        nav._selected_rid = rid
-        nav._render_detail(remaster, version_row)
-        await interaction.response.send_message(view=nav, ephemeral=True)
+        self._render_detail(remaster, version_row)
+        await interaction.response.edit_message(view=self)
+
+    async def _on_download(self, interaction: discord.Interaction):
+        if not _user_can_download(interaction):
+            await interaction.response.send_message(
+                "This didn't work. Please try again later.", ephemeral=True)
+            return
+        cid = interaction.data.get("custom_id", "")
+        vid = cid.split(":", 1)[1] if ":" in cid else None
+        if not vid:
+            await interaction.response.send_message("Release not found.", ephemeral=True)
+            return
+        version_row = _db_get_version(vid)
+        if not version_row:
+            await interaction.response.send_message("Release not found.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await _deliver_remaster(self._bot, interaction, version_row)
+        # Reset info embed back to list after delivery
+        self._render_list()
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+
+    async def _on_back(self, interaction: discord.Interaction):
+        self._selected_rid = None
+        self._render_list()
+        await interaction.response.edit_message(view=self)
 
 
 async def post_or_refresh_info_embed(bot: commands.Bot, force: bool = False) -> None:

@@ -452,11 +452,7 @@ async def _deliver_song(bot, interaction: discord.Interaction, candidate: dict) 
                 meta_parts.append(year)
             meta_line = "  ·  ".join(meta_parts)
 
-            files = [discord.File(str(p), filename=p.name)]
-
             if art_bytes:
-                files.append(discord.File(BytesIO(art_bytes), filename="cover.jpg"))
-                # Components v2: Section with cover thumbnail
                 view = discord.ui.LayoutView(timeout=None)
                 section = discord.ui.Section(
                     discord.ui.TextDisplay(f"## {title}"),
@@ -467,12 +463,22 @@ async def _deliver_song(bot, interaction: discord.Interaction, candidate: dict) 
                     ),
                 )
                 view.add_item(section)
-                await interaction.followup.send(view=view, files=files, ephemeral=True)
+                await interaction.followup.send(
+                    view=view,
+                    file=discord.File(BytesIO(art_bytes), filename="cover.jpg"),
+                    ephemeral=True,
+                )
             else:
                 view = discord.ui.LayoutView(timeout=None)
                 view.add_item(discord.ui.TextDisplay(f"## {title}"))
                 view.add_item(discord.ui.TextDisplay(meta_line))
-                await interaction.followup.send(view=view, files=files, ephemeral=True)
+                await interaction.followup.send(view=view, ephemeral=True)
+
+            # Send the audio file as a plain ephemeral so it actually appears
+            await interaction.followup.send(
+                file=discord.File(str(p), filename=p.name),
+                ephemeral=True,
+            )
 
             bot.logger.log(MODULE_NAME, f"Ephemeral delivery succeeded for '{p.name}'")
             return
@@ -664,7 +670,7 @@ class ArchiveNavigatorView(discord.ui.LayoutView):
 
     def _render_format_step(self):
         self.clear_items()
-        self.add_item(discord.ui.TextDisplay("## 🗄️  Eminem Archive\nChoose a format to browse:"))
+        self.add_item(discord.ui.TextDisplay("## Eminem Archive\nChoose a format to browse:"))
         row = discord.ui.ActionRow()
         sel = discord.ui.Select(
             placeholder="Choose a format…",
@@ -681,7 +687,7 @@ class ArchiveNavigatorView(discord.ui.LayoutView):
         pages = (len(self._folders) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
         page_hint = f"  ·  page {self._folder_page + 1}/{pages}" if pages > 1 else ""
         self.add_item(discord.ui.TextDisplay(
-            f"## 🗄️  Eminem Archive  ·  {self._fmt}\n"
+            f"## Eminem Archive  ·  {self._fmt}\n"
             f"{len(self._folders)} folders available{page_hint}"
         ))
         row = discord.ui.ActionRow()
@@ -703,7 +709,7 @@ class ArchiveNavigatorView(discord.ui.LayoutView):
         pages = (len(self._songs) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
         page_hint = f"  ·  page {self._song_page + 1}/{pages}" if pages > 1 else ""
         self.add_item(discord.ui.TextDisplay(
-            f"## 🗄️  {_clean_folder_name(self._folder)}\n"
+            f"## {_clean_folder_name(self._folder)}\n"
             f"{len(self._songs)} songs{page_hint}"
         ))
         row = discord.ui.ActionRow()
@@ -828,7 +834,7 @@ class _ArchiveInfoView(discord.ui.LayoutView):
         self._folder_page = 0
         self._song_page = 0
         self.add_item(discord.ui.TextDisplay(
-            "## 🗄️  Eminem Archive\n"
+            "## Eminem Archive\n"
             "Download songs from the full Eminem archive in FLAC or MP3.\n\n"
             "`/archive [flac/mp3] [song title] [version (optional)]`\n"
             "Example: `/archive flac antichrist 2005 version`\n\n"
@@ -851,7 +857,7 @@ class _ArchiveInfoView(discord.ui.LayoutView):
         pages = (len(self._folders) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
         page_hint = f"  ·  page {self._folder_page + 1}/{pages}" if pages > 1 else ""
         self.add_item(discord.ui.TextDisplay(
-            f"## 🗄️  Eminem Archive  ·  {self._fmt}\n"
+            f"## Eminem Archive  ·  {self._fmt}\n"
             f"{len(self._folders)} folders available{page_hint}"
         ))
         row = discord.ui.ActionRow()
@@ -873,7 +879,7 @@ class _ArchiveInfoView(discord.ui.LayoutView):
         pages = (len(self._songs) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
         page_hint = f"  ·  page {self._song_page + 1}/{pages}" if pages > 1 else ""
         self.add_item(discord.ui.TextDisplay(
-            f"## 🗄️  {_clean_folder_name(self._folder)}\n"
+            f"## {_clean_folder_name(self._folder)}\n"
             f"{len(self._songs)} songs{page_hint}"
         ))
         row = discord.ui.ActionRow()

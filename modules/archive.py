@@ -591,7 +591,10 @@ def _folder_options_for_page(folders: list, page: int):
     total = len(folders)
     if total <= 25:
         return (
-            [discord.SelectOption(label=_clean_folder_name(f)[:100], value=f) for f in folders],
+            [
+                discord.SelectOption(label=_clean_folder_name(f)[:100], value=str(i))
+                for i, f in enumerate(folders)
+            ],
             False, False,
         )
     start = page * NAV_PAGE_SIZE
@@ -601,8 +604,8 @@ def _folder_options_for_page(folders: list, page: int):
     opts = []
     if has_prev:
         opts.append(discord.SelectOption(label="◀  Previous page", value="__prev__"))
-    for f in folders[start:end]:
-        opts.append(discord.SelectOption(label=_clean_folder_name(f)[:100], value=f))
+    for i, f in enumerate(folders[start:end], start=start):
+        opts.append(discord.SelectOption(label=_clean_folder_name(f)[:100], value=str(i)))
     if has_next:
         opts.append(discord.SelectOption(label="Next page  ▶", value="__next__"))
     return opts, has_prev, has_next
@@ -614,10 +617,10 @@ def _song_options_for_page(songs: list, page: int):
             [
                 discord.SelectOption(
                     label=s['metadata'].get('title', s['original_title'])[:100],
-                    value=s['path'],
+                    value=str(i),
                     description=(s['metadata'].get('year', '') or '')[:50] or None,
                 )
-                for s in songs
+                for i, s in enumerate(songs)
             ],
             False, False,
         )
@@ -628,10 +631,10 @@ def _song_options_for_page(songs: list, page: int):
     opts = []
     if has_prev:
         opts.append(discord.SelectOption(label="◀  Previous page", value="__prev__"))
-    for s in songs[start:end]:
+    for i, s in enumerate(songs[start:end], start=start):
         opts.append(discord.SelectOption(
             label=s['metadata'].get('title', s['original_title'])[:100],
-            value=s['path'],
+            value=str(i),
             description=(s['metadata'].get('year', '') or '')[:50] or None,
         ))
     if has_next:
@@ -743,7 +746,7 @@ class ArchiveNavigatorView(discord.ui.LayoutView):
             self._render_folder_step()
             await interaction.response.edit_message(view=self)
             return
-        self._folder = val
+        self._folder = self._folders[int(val)]
         self._songs = _get_songs_in_folder(self._index, self._fmt, self._folder)
         self._song_page = 0
         self._render_song_step()
@@ -764,7 +767,7 @@ class ArchiveNavigatorView(discord.ui.LayoutView):
             self._render_song_step()
             await interaction.response.edit_message(view=self)
             return
-        candidate = next((s for s in self._songs if s['path'] == val), None)
+        candidate = self._songs[int(val)] if val.isdigit() else None
         if not candidate:
             await interaction.response.send_message("Song not found.", ephemeral=True)
             return
@@ -796,15 +799,34 @@ class ArchiveNavigatorView(discord.ui.LayoutView):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _ArchiveInfoView(discord.ui.LayoutView):
-    """Persistent Components v2 view pinned in #info."""
+    """
+    Persistent Components v2 view pinned in #info.
+    All navigation (format → folder → song) happens by editing THIS message in-place.
+    Only the final file delivery is ephemeral.
+    """
 
     def __init__(self, bot):
         super().__init__(timeout=None)
         self._bot = bot
-        self._build()
+        # Navigator state (reset to home after each delivery)
+        self._fmt: Optional[str] = None
+        self._folder: Optional[str] = None
+        self._folders: list = []
+        self._songs: list = []
+        self._folder_page = 0
+        self._song_page = 0
+        self._render_home()
 
-    def _build(self):
+    # ── Step renderers ────────────────────────────────────────────────────────
+
+    def _render_home(self):
         self.clear_items()
+        self._fmt = None
+        self._folder = None
+        self._folders = []
+        self._songs = []
+        self._folder_page = 0
+        self._song_page = 0
         self.add_item(discord.ui.TextDisplay(
             "## 🗄️  Eminem Archive\n"
             "Download songs from the full Eminem archive in FLAC or MP3.\n\n"
@@ -823,6 +845,52 @@ class _ArchiveInfoView(discord.ui.LayoutView):
         row.add_item(sel)
         self.add_item(row)
 
+    def _render_folder_step(self):
+        self.clear_items()
+        opts, has_prev, has_next = _folder_options_for_page(self._folders, self._folder_page)
+        pages = (len(self._folders) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
+        page_hint = f"  ·  page {self._folder_page + 1}/{pages}" if pages > 1 else ""
+        self.add_item(discord.ui.TextDisplay(
+            f"## 🗄️  Eminem Archive  ·  {self._fmt}\n"
+            f"{len(self._folders)} folders available{page_hint}"
+        ))
+        row = discord.ui.ActionRow()
+        ph = f"Choose a folder…{page_hint}"
+        sel = discord.ui.Select(placeholder=ph[:150], options=opts, custom_id="archive_info_folder")
+        sel.callback = self._on_folder
+        row.add_item(sel)
+        self.add_item(row)
+        back_row = discord.ui.ActionRow()
+        back = discord.ui.Button(label="← Back to Format", style=discord.ButtonStyle.secondary,
+                                 custom_id="archive_info_b_fmt")
+        back.callback = self._on_back_to_home
+        back_row.add_item(back)
+        self.add_item(back_row)
+
+    def _render_song_step(self):
+        self.clear_items()
+        opts, has_prev, has_next = _song_options_for_page(self._songs, self._song_page)
+        pages = (len(self._songs) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
+        page_hint = f"  ·  page {self._song_page + 1}/{pages}" if pages > 1 else ""
+        self.add_item(discord.ui.TextDisplay(
+            f"## 🗄️  {_clean_folder_name(self._folder)}\n"
+            f"{len(self._songs)} songs{page_hint}"
+        ))
+        row = discord.ui.ActionRow()
+        ph = f"Choose a song…{page_hint}"
+        sel = discord.ui.Select(placeholder=ph[:150], options=opts, custom_id="archive_info_song")
+        sel.callback = self._on_song
+        row.add_item(sel)
+        self.add_item(row)
+        back_row = discord.ui.ActionRow()
+        back = discord.ui.Button(label="← Back to Folders", style=discord.ButtonStyle.secondary,
+                                 custom_id="archive_info_b_folder")
+        back.callback = self._on_back_to_folder
+        back_row.add_item(back)
+        self.add_item(back_row)
+
+    # ── Callbacks ─────────────────────────────────────────────────────────────
+
     async def _on_format(self, interaction: discord.Interaction):
         if _is_fed(interaction):
             await interaction.response.send_message(
@@ -833,12 +901,76 @@ class _ArchiveInfoView(discord.ui.LayoutView):
             await interaction.response.send_message(
                 "Archive is still initialising — please try again in a moment.", ephemeral=True)
             return
-        fmt = interaction.data["values"][0]
-        nav = ArchiveNavigatorView(self._bot, manager.song_index)
-        nav._fmt = fmt
-        nav._folders = _get_folders_for_format(manager.song_index, fmt)
-        nav._render_folder_step()
-        await interaction.response.send_message(view=nav, ephemeral=True)
+        self._fmt = interaction.data["values"][0]
+        self._folders = _get_folders_for_format(manager.song_index, self._fmt)
+        self._folder_page = 0
+        self._render_folder_step()
+        await interaction.response.edit_message(view=self)
+
+    async def _on_folder(self, interaction: discord.Interaction):
+        if _is_fed(interaction):
+            await interaction.response.send_message(
+                "This didn't work. Please try again later.", ephemeral=True)
+            return
+        manager = getattr(self._bot, "ARCHIVE_manager", None)
+        val = interaction.data["values"][0]
+        if val == "__prev__":
+            self._folder_page = max(0, self._folder_page - 1)
+            self._render_folder_step()
+            await interaction.response.edit_message(view=self)
+            return
+        if val == "__next__":
+            self._folder_page += 1
+            self._render_folder_step()
+            await interaction.response.edit_message(view=self)
+            return
+        self._folder = self._folders[int(val)]
+        self._songs = _get_songs_in_folder(manager.song_index, self._fmt, self._folder)
+        self._song_page = 0
+        self._render_song_step()
+        await interaction.response.edit_message(view=self)
+
+    async def _on_song(self, interaction: discord.Interaction):
+        if _is_fed(interaction):
+            await interaction.response.send_message(
+                "This didn't work. Please try again later.", ephemeral=True)
+            return
+        val = interaction.data["values"][0]
+        if val == "__prev__":
+            self._song_page = max(0, self._song_page - 1)
+            self._render_song_step()
+            await interaction.response.edit_message(view=self)
+            return
+        if val == "__next__":
+            self._song_page += 1
+            self._render_song_step()
+            await interaction.response.edit_message(view=self)
+            return
+        candidate = self._songs[int(val)] if val.isdigit() else None
+        if not candidate:
+            await interaction.response.send_message("Song not found.", ephemeral=True)
+            return
+        # Defer the ephemeral delivery, then restore the info embed to home
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await _deliver_song(self._bot, interaction, candidate)
+        await _log_delivery(self._bot, interaction.user, candidate, source="navigator")
+        # Reset navigator back to home state via followup edit
+        self._render_home()
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+
+    async def _on_back_to_home(self, interaction: discord.Interaction):
+        self._render_home()
+        await interaction.response.edit_message(view=self)
+
+    async def _on_back_to_folder(self, interaction: discord.Interaction):
+        self._folder = None
+        self._songs = []
+        self._song_page = 0
+        self._render_folder_step()
+        await interaction.response.edit_message(view=self)
 
 
 async def _get_info_channel(bot) -> Optional[discord.TextChannel]:

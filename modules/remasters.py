@@ -201,7 +201,8 @@ def _db_update_remaster_meta(rid: str, title: str, desc: str) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  EMBED BUILDERS
+#  ANNOUNCEMENT EMBED BUILDERS  (these stay as regular embeds — they go in
+#  announcements channel which doesn't need IS_COMPONENTS_V2)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _release_embed(remaster: dict, version_row: dict, role_mention: str = "",
@@ -239,7 +240,7 @@ def _outdated_embed(old_embed: discord.Embed, latest_version: str) -> discord.Em
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CONSOLE TUI  (unchanged from original)
+#  CONSOLE TUI  (unchanged)
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _RemasterTUI:
@@ -700,13 +701,13 @@ def _user_can_download(interaction: discord.Interaction) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  DELIVERY — ephemeral inline audio player → DM fallback
+#  DELIVERY — ephemeral Components v2 inline audio player → DM fallback
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def _deliver_remaster(bot: commands.Bot, interaction: discord.Interaction,
                              version_row: dict) -> None:
     """
-    Primary: fetch file from CDN, re-upload as ephemeral attachment (inline audio player).
+    Primary: fetch file from CDN, re-upload as ephemeral Components v2 message.
     Fallback: send CDN URL via DM if upload fails.
     """
     remaster = _db_get_remaster(version_row["remaster_id"])
@@ -716,8 +717,12 @@ async def _deliver_remaster(bot: commands.Bot, interaction: discord.Interaction,
 
     cdn_url = version_row["cdn_url"]
     filename = version_row["filename"]
+    title = remaster["title"]
+    version = version_row["version"]
+    desc = remaster.get("description", "")
+    image_url = version_row.get("image_cdn_url")
 
-    # ── Primary: ephemeral file upload ───────────────────────────────────────
+    # ── Primary: ephemeral file upload with Components v2 ────────────────────
     try:
         import aiohttp
         async with aiohttp.ClientSession() as session:
@@ -728,18 +733,25 @@ async def _deliver_remaster(bot: commands.Bot, interaction: discord.Interaction,
                         fp=__import__("io").BytesIO(data),
                         filename=filename,
                     )
-                    embed = discord.Embed(
-                        title=f"⬇  {remaster['title']}  ·  {version_row['version']}",
-                        description=remaster.get("description", ""),
-                        color=discord.Color.from_rgb(80, 220, 140),
-                    )
-                    embed.add_field(name="Version", value=f"`{version_row['version']}`", inline=True)
-                    embed.add_field(name="File", value=f"`{filename}`", inline=True)
-                    if version_row.get("image_cdn_url"):
-                        embed.set_thumbnail(url=version_row["image_cdn_url"])
-                    await interaction.followup.send(embed=embed, file=file_obj, ephemeral=True)
+                    view = discord.ui.LayoutView(timeout=None)
+                    if image_url:
+                        section = discord.ui.Section(
+                            discord.ui.TextDisplay(f"## ⬇  {title}  ·  {version}"),
+                            discord.ui.TextDisplay(desc) if desc else discord.ui.TextDisplay(
+                                f"`{filename}`"),
+                            accessory=discord.ui.Thumbnail(image_url, description=f"Cover art for {title}"),
+                        )
+                        view.add_item(section)
+                    else:
+                        view.add_item(discord.ui.TextDisplay(f"## ⬇  {title}  ·  {version}"))
+                        if desc:
+                            view.add_item(discord.ui.TextDisplay(desc))
+                    view.add_item(discord.ui.TextDisplay(
+                        f"-# Version `{version}`  ·  `{filename}`  ·  delivered privately"
+                    ))
+                    await interaction.followup.send(view=view, file=file_obj, ephemeral=True)
                     bot.logger.log(MODULE_NAME,
-                        f"Ephemeral delivery: '{remaster['title']}' to {interaction.user}")
+                        f"Ephemeral delivery: '{title}' to {interaction.user}")
                     return
     except ImportError:
         bot.logger.log(MODULE_NAME, "aiohttp not available, falling back to DM", "WARNING")
@@ -749,23 +761,25 @@ async def _deliver_remaster(bot: commands.Bot, interaction: discord.Interaction,
     except Exception as e:
         bot.logger.log(MODULE_NAME, f"Ephemeral delivery error ({e}), falling back to DM", "WARNING")
 
-    # ── Fallback: DM the CDN URL directly ────────────────────────────────────
-    bot.logger.log(MODULE_NAME, f"Falling back to DM for '{remaster['title']}'")
-    embed = discord.Embed(
-        title=f"⬇  {remaster['title']}  ·  {version_row['version']}",
-        description=(
-            f"Here's your download link for **{remaster['title']}** "
-            f"`{version_row['version']}`.\n\n"
-            f"[**Click here to download**]({cdn_url})"
-        ),
-        color=discord.Color.from_rgb(80, 220, 140),
-    )
-    embed.add_field(name="File", value=f"`{filename}`", inline=True)
-    embed.add_field(name="Version", value=f"`{version_row['version']}`", inline=True)
-    embed.timestamp = datetime.now(timezone.utc)
+    # ── Fallback: DM the CDN URL with Components v2 ───────────────────────────
+    bot.logger.log(MODULE_NAME, f"Falling back to DM for '{title}'")
     try:
+        dm_view = discord.ui.LayoutView(timeout=None)
+        if image_url:
+            section = discord.ui.Section(
+                discord.ui.TextDisplay(f"## ⬇  {title}  ·  {version}"),
+                discord.ui.TextDisplay(f"[Download `{filename}`]({cdn_url})"),
+                accessory=discord.ui.Thumbnail(image_url, description=f"Cover art for {title}"),
+            )
+            dm_view.add_item(section)
+        else:
+            dm_view.add_item(discord.ui.TextDisplay(f"## ⬇  {title}  ·  {version}"))
+            dm_view.add_item(discord.ui.TextDisplay(f"[Download `{filename}`]({cdn_url})"))
+        dm_view.add_item(discord.ui.TextDisplay(
+            f"-# Version `{version}`  ·  {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+        ))
         dm_ch = await interaction.user.create_dm()
-        await dm_ch.send(embed=embed)
+        await dm_ch.send(view=dm_view)
         await interaction.followup.send("Check your DMs for the download link!", ephemeral=True)
     except discord.Forbidden:
         bot.logger.log(MODULE_NAME, f"Could not DM {interaction.user} — notifying in off-topic",
@@ -822,6 +836,8 @@ async def _post_release(bot: commands.Bot, result: dict) -> None:
             logger.log(MODULE_NAME, f"Thread creation failed: {te}", "WARNING")
         logger.log(MODULE_NAME,
             f"Release posted: '{result['title']}' {result['version']} (msg {msg.id})")
+        # Refresh info embed
+        await post_or_refresh_info_embed(bot, force=True)
     except Exception as e:
         logger.error(MODULE_NAME, "Failed to post release", e)
 
@@ -860,16 +876,20 @@ async def _post_new_version(bot: commands.Bot, result: dict) -> None:
                         f"Couldn't update old embed for version {old_ver['version']}: {edit_err}",
                         "WARNING")
         logger.log(MODULE_NAME, f"Version {result['version']} posted for {remaster['title']}")
+        # Refresh info embed
+        await post_or_refresh_info_embed(bot, force=True)
     except Exception as e:
         logger.error(MODULE_NAME, "Failed to post new version", e)
 
 async def _apply_meta_edit(bot: commands.Bot, result: dict) -> None:
     _db_update_remaster_meta(result["remaster_id"], result["title"], result["description"])
     bot.logger.log(MODULE_NAME, f"Metadata updated for remaster {result['remaster_id']}")
+    # Refresh info embed so title/desc changes are reflected
+    await post_or_refresh_info_embed(bot, force=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  DOWNLOAD BUTTON  (on announcement embeds)
+#  DOWNLOAD BUTTON  (on announcement embeds — stays as legacy View)
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _DownloadView(discord.ui.View):
@@ -898,19 +918,20 @@ class _DownloadView(discord.ui.View):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  REMASTER NAVIGATOR  (pinned in #info)
+#  REMASTER NAVIGATOR  (ephemeral) — Components v2 LayoutView
 # ══════════════════════════════════════════════════════════════════════════════
 
-class RemasterNavigatorView(discord.ui.View):
+class RemasterNavigatorView(discord.ui.LayoutView):
     """
-    Ephemeral per-user navigator. Shows all releases newest-first in a select menu.
+    Ephemeral per-user navigator using Components v2.
+    Shows all releases newest-first in a select menu.
     Selecting a release shows its details and a Download button.
     """
 
     def __init__(self, bot: commands.Bot):
         super().__init__(timeout=300)
         self._bot = bot
-        self._remasters = _db_all_remasters()  # newest first
+        self._remasters = _db_all_remasters()
         self._selected_rid: Optional[str] = None
         self._page = 0
         self._render_list()
@@ -921,15 +942,25 @@ class RemasterNavigatorView(discord.ui.View):
         self.clear_items()
         total = len(self._remasters)
         if total == 0:
+            self.add_item(discord.ui.TextDisplay("No releases available yet."))
             return
         page_size = 25
         start = self._page * page_size
         end = min(start + page_size, total)
         has_prev = self._page > 0
         has_next = end < total
+        pages = (total + page_size - 1) // page_size
+        page_hint = f"  ·  page {self._page + 1}/{pages}" if pages > 1 else ""
+
+        self.add_item(discord.ui.TextDisplay(
+            f"## 🎛️  Emball Remaster Archive\n"
+            f"**{total} release{'s' if total != 1 else ''}** available{page_hint}. "
+            f"Select a title from the menu below."
+        ))
+
         opts = []
         if has_prev:
-            opts.append(discord.SelectOption(label="Previous page", value="__prev__"))
+            opts.append(discord.SelectOption(label="◀  Previous page", value="__prev__"))
         for rem in self._remasters[start:end]:
             opts.append(discord.SelectOption(
                 label=rem["title"][:100],
@@ -937,59 +968,61 @@ class RemasterNavigatorView(discord.ui.View):
                 description=f"v{rem['latest_version']}  ·  {rem['updated_at'][:10]}",
             ))
         if has_next:
-            opts.append(discord.SelectOption(label="Next page", value="__next__"))
-        pages = (total + page_size - 1) // page_size
-        ph = f"Choose a release… (page {self._page + 1}/{pages})" if pages > 1 \
-            else "Choose a release…"
+            opts.append(discord.SelectOption(label="Next page  ▶", value="__next__"))
+
+        row = discord.ui.ActionRow()
+        ph = f"Choose a release…{page_hint}"
         sel = discord.ui.Select(placeholder=ph[:150], options=opts, custom_id="rmnav_list")
         sel.callback = self._on_select
-        self.add_item(sel)
+        row.add_item(sel)
+        self.add_item(row)
 
     def _render_detail(self, remaster: dict, version_row: dict):
         self.clear_items()
-        # Download button
+        title = remaster["title"]
+        desc = remaster.get("description", "")
+        version = remaster["latest_version"]
+        filename = version_row["filename"]
+        released = version_row["created_at"][:10]
+        image_url = version_row.get("image_cdn_url")
+
+        if image_url:
+            section = discord.ui.Section(
+                discord.ui.TextDisplay(f"## ✦  {title}"),
+                discord.ui.TextDisplay(desc) if desc else discord.ui.TextDisplay(
+                    f"Version `{version}`"),
+                accessory=discord.ui.Thumbnail(image_url, description=f"Cover art for {title}"),
+            )
+            self.add_item(section)
+        else:
+            self.add_item(discord.ui.TextDisplay(f"## ✦  {title}"))
+            if desc:
+                self.add_item(discord.ui.TextDisplay(desc))
+
+        self.add_item(discord.ui.TextDisplay(
+            f"`{version}`  ·  `{filename}`  ·  released {released}"
+        ))
+        self.add_item(discord.ui.Separator())
+
+        btn_row = discord.ui.ActionRow()
         dl_btn = discord.ui.Button(
             label="Download",
             style=discord.ButtonStyle.success,
             custom_id=f"rmnav_dl:{version_row['id']}",
         )
         dl_btn.callback = self._on_download
-        self.add_item(dl_btn)
-        # Back button
+        btn_row.add_item(dl_btn)
         back = discord.ui.Button(
-            label="Back",
+            label="← Back",
             style=discord.ButtonStyle.secondary,
             custom_id="rmnav_back",
         )
         back.callback = self._on_back
-        self.add_item(back)
-
-    def _list_embed(self) -> discord.Embed:
-        embed = discord.Embed(
-            title="🎛️  Emball Remaster Archive",
-            color=discord.Color.from_rgb(255, 215, 80),
-        )
-        embed.description = (
-            f"**{len(self._remasters)} release{'s' if len(self._remasters) != 1 else ''}** available.\n"
-            "Select a title from the menu below."
-        )
-        embed.set_footer(text="Emball Remasters  ·  Files delivered as inline audio")
-        return embed
-
-    def _detail_embed(self, remaster: dict, version_row: dict) -> discord.Embed:
-        embed = discord.Embed(
-            title=f"✦  {remaster['title']}",
-            description=remaster.get("description", ""),
-            color=discord.Color.from_rgb(255, 215, 80),
-        )
-        embed.add_field(name="Latest Version", value=f"`{remaster['latest_version']}`", inline=True)
-        embed.add_field(name="File", value=f"`{version_row['filename']}`", inline=True)
-        embed.add_field(name="Released", value=version_row["created_at"][:10], inline=True)
-        if version_row.get("image_cdn_url"):
-            embed.set_image(url=version_row["image_cdn_url"])
-        embed.set_footer(text="Click Download to listen — delivered privately, only you can see it")
-        embed.timestamp = datetime.now(timezone.utc)
-        return embed
+        btn_row.add_item(back)
+        self.add_item(btn_row)
+        self.add_item(discord.ui.TextDisplay(
+            "-# Click Download to listen — delivered privately, only you can see it"
+        ))
 
     # ── Callbacks ─────────────────────────────────────────────────────────────
 
@@ -1002,12 +1035,12 @@ class RemasterNavigatorView(discord.ui.View):
         if val == "__prev__":
             self._page = max(0, self._page - 1)
             self._render_list()
-            await interaction.response.edit_message(embed=self._list_embed(), view=self)
+            await interaction.response.edit_message(view=self)
             return
         if val == "__next__":
             self._page += 1
             self._render_list()
-            await interaction.response.edit_message(embed=self._list_embed(), view=self)
+            await interaction.response.edit_message(view=self)
             return
         self._selected_rid = val
         remaster = _db_get_remaster(val)
@@ -1019,15 +1052,13 @@ class RemasterNavigatorView(discord.ui.View):
             await interaction.response.send_message("No version available.", ephemeral=True)
             return
         self._render_detail(remaster, version_row)
-        await interaction.response.edit_message(
-            embed=self._detail_embed(remaster, version_row), view=self)
+        await interaction.response.edit_message(view=self)
 
     async def _on_download(self, interaction: discord.Interaction):
         if not _user_can_download(interaction):
             await interaction.response.send_message(
                 "This didn't work. Please try again later.", ephemeral=True)
             return
-        # Extract version_id from custom_id
         cid = interaction.data.get("custom_id", "")
         vid = cid.split(":", 1)[1] if ":" in cid else None
         if not vid:
@@ -1043,43 +1074,41 @@ class RemasterNavigatorView(discord.ui.View):
     async def _on_back(self, interaction: discord.Interaction):
         self._selected_rid = None
         self._render_list()
-        await interaction.response.edit_message(embed=self._list_embed(), view=self)
+        await interaction.response.edit_message(view=self)
 
     async def on_timeout(self):
         self.clear_items()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  INFO EMBED  (pinned in #info)
+#  INFO MESSAGE  (pinned in #info) — Components v2
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _build_remaster_info_embed() -> discord.Embed:
-    remasters = _db_all_remasters()
-    count = len(remasters)
-    embed = discord.Embed(
-        title="Emball Remaster Archive",
-        description=(
-            f"Browse and download Emball's remaster releases — **{count}** available.\n\n"
-            "Use the menu below to select a release. Files are delivered privately."
-        ),
-        color=discord.Color.from_rgb(255, 215, 80),
-    )
-    return embed
-
-
-class _RemastersInfoView(discord.ui.View):
-    """Persistent view pinned in #info. Select is public; file delivery is ephemeral."""
+class _RemastersInfoView(discord.ui.LayoutView):
+    """Persistent Components v2 view pinned in #info."""
 
     def __init__(self, bot: commands.Bot):
         super().__init__(timeout=None)
         self._bot = bot
-        self._rebuild_select()
+        self._rebuild()
 
-    def _rebuild_select(self):
+    def _rebuild(self):
         self.clear_items()
         remasters = _db_all_remasters()
+        count = len(remasters)
+
+        self.add_item(discord.ui.TextDisplay(
+            f"## 🎛️  Emball Remaster Archive\n"
+            f"Browse and download Emball's remaster releases — **{count}** available.\n\n"
+            "Use the menu below to select a release. Files are delivered privately."
+        ))
+
         if not remasters:
+            self.add_item(discord.ui.TextDisplay("-# No releases yet — check back soon!"))
             return
+
+        self.add_item(discord.ui.Separator())
+
         page_size = 25
         opts = [
             discord.SelectOption(
@@ -1089,13 +1118,15 @@ class _RemastersInfoView(discord.ui.View):
             )
             for r in remasters[:page_size]
         ]
+        row = discord.ui.ActionRow()
         sel = discord.ui.Select(
             placeholder="Choose a release…",
             options=opts,
             custom_id="remasters_info_select",
         )
         sel.callback = self._on_select
-        self.add_item(sel)
+        row.add_item(sel)
+        self.add_item(row)
 
     async def _on_select(self, interaction: discord.Interaction):
         if not _user_can_download(interaction):
@@ -1114,20 +1145,15 @@ class _RemastersInfoView(discord.ui.View):
         nav = RemasterNavigatorView(self._bot)
         nav._selected_rid = rid
         nav._render_detail(remaster, version_row)
-        await interaction.response.send_message(
-            embed=nav._detail_embed(remaster, version_row),
-            view=nav,
-            ephemeral=True,
-        )
+        await interaction.response.send_message(view=nav, ephemeral=True)
 
 
 async def post_or_refresh_info_embed(bot: commands.Bot, force: bool = False) -> None:
-    """Post (or refresh) the remaster info embed in #info."""
+    """Post (or refresh) the remaster info message in #info."""
     info_ch = await _get_info_channel(bot)
     if not info_ch:
         bot.logger.log(MODULE_NAME, "info channel not found — skipping remaster embed post", "WARNING")
         return
-    embed = _build_remaster_info_embed()
     view = _RemastersInfoView(bot)
     existing_id = CONFIG.get("info_embed_msg_id")
     if existing_id and not force:
@@ -1138,7 +1164,7 @@ async def post_or_refresh_info_embed(bot: commands.Bot, force: bool = False) -> 
         except (discord.NotFound, discord.Forbidden):
             pass
     try:
-        msg = await info_ch.send(embed=embed, view=view)
+        msg = await info_ch.send(view=view)
         _save_config({"info_embed_msg_id": str(msg.id)})
         bot.logger.log(MODULE_NAME, f"Remaster info embed posted (msg {msg.id})")
     except discord.Forbidden:

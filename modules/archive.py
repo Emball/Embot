@@ -542,18 +542,11 @@ def _get_songs_in_folder(song_index: dict, fmt: str, folder: str) -> list:
     songs.sort(key=lambda s: s['metadata'].get('title', s['original_title']).lower())
     return songs
 
-def _make_key(value: str, value_map: dict) -> str:
-    """Return a stable <=100-char key for a full path/folder, storing it in value_map."""
-    import hashlib
-    key = hashlib.md5(value.encode()).hexdigest()[:16]
-    value_map[key] = value
-    return key
-
-def _folder_options_for_page(folders: list, page: int, value_map: dict):
+def _folder_options_for_page(folders: list, page: int):
     total = len(folders)
     if total <= 25:
         return (
-            [discord.SelectOption(label=_clean_folder_name(f)[:100], value=_make_key(f, value_map)) for f in folders],
+            [discord.SelectOption(label=_clean_folder_name(f)[:100], value=f) for f in folders],
             False, False,
         )
     start = page * NAV_PAGE_SIZE
@@ -564,19 +557,19 @@ def _folder_options_for_page(folders: list, page: int, value_map: dict):
     if has_prev:
         opts.append(discord.SelectOption(label="Previous page", value="__prev__"))
     for f in folders[start:end]:
-        opts.append(discord.SelectOption(label=_clean_folder_name(f)[:100], value=_make_key(f, value_map)))
+        opts.append(discord.SelectOption(label=_clean_folder_name(f)[:100], value=f))
     if has_next:
         opts.append(discord.SelectOption(label="Next page", value="__next__"))
     return opts, has_prev, has_next
 
-def _song_options_for_page(songs: list, page: int, value_map: dict):
+def _song_options_for_page(songs: list, page: int):
     total = len(songs)
     if total <= 25:
         return (
             [
                 discord.SelectOption(
                     label=s['metadata'].get('title', s['original_title'])[:100],
-                    value=_make_key(s['path'], value_map),
+                    value=s['path'],
                     description=(s['metadata'].get('year', '') or '')[:50] or None,
                 )
                 for s in songs
@@ -593,7 +586,7 @@ def _song_options_for_page(songs: list, page: int, value_map: dict):
     for s in songs[start:end]:
         opts.append(discord.SelectOption(
             label=s['metadata'].get('title', s['original_title'])[:100],
-            value=_make_key(s['path'], value_map),
+            value=s['path'],
             description=(s['metadata'].get('year', '') or '')[:50] or None,
         ))
     if has_next:
@@ -617,7 +610,6 @@ class ArchiveNavigatorView(discord.ui.View):
         self._songs: list = []
         self._folder_page = 0
         self._song_page = 0
-        self._value_map: dict = {}   # short key -> full path/folder string
         self._render_format_step()
 
     # ── Step renderers ────────────────────────────────────────────────────────
@@ -634,7 +626,7 @@ class ArchiveNavigatorView(discord.ui.View):
 
     def _render_folder_step(self):
         self.clear_items()
-        opts, has_prev, has_next = _folder_options_for_page(self._folders, self._folder_page, self._value_map)
+        opts, has_prev, has_next = _folder_options_for_page(self._folders, self._folder_page)
         pages = (len(self._folders) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
         ph = f"Choose a folder… (page {self._folder_page + 1}/{pages})" if pages > 1 \
             else "Choose a folder…"
@@ -648,7 +640,7 @@ class ArchiveNavigatorView(discord.ui.View):
 
     def _render_song_step(self):
         self.clear_items()
-        opts, has_prev, has_next = _song_options_for_page(self._songs, self._song_page, self._value_map)
+        opts, has_prev, has_next = _song_options_for_page(self._songs, self._song_page)
         pages = (len(self._songs) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
         ph = f"Choose a song… (page {self._song_page + 1}/{pages})" if pages > 1 \
             else "Choose a song…"
@@ -691,7 +683,6 @@ class ArchiveNavigatorView(discord.ui.View):
             await interaction.response.send_message(
                 "This didn't work. Please try again later.", ephemeral=True); return
         val = interaction.data["values"][0]
-        val = self._value_map.get(val, val)  # resolve hash key -> real folder path
         if val == "__prev__":
             self._folder_page = max(0, self._folder_page - 1)
             self._render_folder_step()
@@ -716,7 +707,6 @@ class ArchiveNavigatorView(discord.ui.View):
             await interaction.response.send_message(
                 "This didn't work. Please try again later.", ephemeral=True); return
         val = interaction.data["values"][0]
-        val = self._value_map.get(val, val)  # resolve hash key -> real file path
         if val == "__prev__":
             self._song_page = max(0, self._song_page - 1)
             self._render_song_step()
@@ -761,36 +751,33 @@ class ArchiveNavigatorView(discord.ui.View):
 
 def _build_archive_info_embed() -> discord.Embed:
     embed = discord.Embed(
-        title="🗄️  Eminem Archive",
+        title="Eminem Archive",
         description=(
-            "Browse and download songs from the full Eminem archive.\n\n"
-            "Use the **Browse Archive** button below to navigate by "
-            "**format → folder → song**. Your file is delivered privately — "
-            "only you can see it.\n\n"
-            "You can also search directly with the `/archive` slash command."
+            "Download songs from the full Eminem archive in FLAC or MP3.\n\n"
+            "`/archive [flac/mp3] [song title] [version (like 'instrumental' or 'live', optional)]`\n"
+            "Example: `/archive flac antichrist 2005 version`\n\n"
+            "You can also use the menus below to select your desired file:"
         ),
         color=discord.Color.from_rgb(30, 215, 96),
     )
-    embed.add_field(name="Formats", value="**FLAC** — lossless  ·  **MP3** — compressed", inline=False)
-    embed.set_footer(text="Emball Archive  ·  Files are delivered as inline audio — no downloads needed")
     return embed
 
 
 class _ArchiveInfoView(discord.ui.View):
-    """Persistent launcher pinned in #info. Opens a fresh per-user navigator."""
+    """Persistent view pinned in #info. Format select is public; file delivery is ephemeral."""
 
     def __init__(self, bot):
         super().__init__(timeout=None)
         self._bot = bot
-        btn = discord.ui.Button(
-            label="Browse Archive",
-            style=discord.ButtonStyle.success,
-            custom_id="archive_browse_v1",
+        sel = discord.ui.Select(
+            placeholder="Choose a format…",
+            options=[discord.SelectOption(label=fmt, value=fmt) for fmt in FORMATS],
+            custom_id="archive_info_fmt",
         )
-        btn.callback = self._on_browse
-        self.add_item(btn)
+        sel.callback = self._on_format
+        self.add_item(sel)
 
-    async def _on_browse(self, interaction: discord.Interaction):
+    async def _on_format(self, interaction: discord.Interaction):
         if _is_fed(interaction):
             await interaction.response.send_message(
                 "This didn't work. Please try again later.", ephemeral=True)
@@ -800,9 +787,13 @@ class _ArchiveInfoView(discord.ui.View):
             await interaction.response.send_message(
                 "Archive is still initialising — please try again in a moment.", ephemeral=True)
             return
+        fmt = interaction.data["values"][0]
         nav = ArchiveNavigatorView(self._bot, manager.song_index)
+        nav._fmt = fmt
+        nav._folders = _get_folders_for_format(manager.song_index, fmt)
+        nav._render_folder_step()
         await interaction.response.send_message(
-            embed=nav._current_embed("Select a format to begin"),
+            embed=nav._current_embed(f"{len(nav._folders)} folders available"),
             view=nav,
             ephemeral=True,
         )

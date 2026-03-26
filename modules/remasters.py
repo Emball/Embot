@@ -879,7 +879,6 @@ class _DownloadView(discord.ui.View):
         btn = discord.ui.Button(
             label="Download",
             style=discord.ButtonStyle.primary,
-            emoji="⬇",
             custom_id=f"remaster_dl:{version_id}",
         )
         btn.callback = self._on_download
@@ -930,7 +929,7 @@ class RemasterNavigatorView(discord.ui.View):
         has_next = end < total
         opts = []
         if has_prev:
-            opts.append(discord.SelectOption(label="Previous page", value="__prev__", emoji="◀"))
+            opts.append(discord.SelectOption(label="Previous page", value="__prev__"))
         for rem in self._remasters[start:end]:
             opts.append(discord.SelectOption(
                 label=rem["title"][:100],
@@ -938,7 +937,7 @@ class RemasterNavigatorView(discord.ui.View):
                 description=f"v{rem['latest_version']}  ·  {rem['updated_at'][:10]}",
             ))
         if has_next:
-            opts.append(discord.SelectOption(label="Next page", value="__next__", emoji="▶"))
+            opts.append(discord.SelectOption(label="Next page", value="__next__"))
         pages = (total + page_size - 1) // page_size
         ph = f"Choose a release… (page {self._page + 1}/{pages})" if pages > 1 \
             else "Choose a release…"
@@ -952,7 +951,6 @@ class RemasterNavigatorView(discord.ui.View):
         dl_btn = discord.ui.Button(
             label="Download",
             style=discord.ButtonStyle.success,
-            emoji="⬇",
             custom_id=f"rmnav_dl:{version_row['id']}",
         )
         dl_btn.callback = self._on_download
@@ -962,7 +960,6 @@ class RemasterNavigatorView(discord.ui.View):
             label="Back",
             style=discord.ButtonStyle.secondary,
             custom_id="rmnav_back",
-            emoji="←",
         )
         back.callback = self._on_back
         self.add_item(back)
@@ -1059,53 +1056,69 @@ class RemasterNavigatorView(discord.ui.View):
 def _build_remaster_info_embed() -> discord.Embed:
     remasters = _db_all_remasters()
     count = len(remasters)
-    latest = remasters[0] if remasters else None
     embed = discord.Embed(
-        title="🎛️  Emball Remaster Archive",
+        title="Emball Remaster Archive",
         description=(
-            "Browse and download Emball's remaster releases.\n\n"
-            "Use the **Browse Remasters** button below to pick a release and listen "
-            "privately — only you can see the file.\n\n"
-            "New releases are announced in #announcements with a Download button."
+            f"Browse and download Emball's remaster releases — **{count}** available.\n\n"
+            "Use the menu below to select a release. Files are delivered privately."
         ),
         color=discord.Color.from_rgb(255, 215, 80),
     )
-    embed.add_field(name="Total Releases", value=str(count), inline=True)
-    if latest:
-        embed.add_field(name="Latest", value=latest["title"], inline=True)
-        embed.add_field(name="Version", value=f"`{latest['latest_version']}`", inline=True)
-    embed.set_footer(text="Emball Remasters  ·  Requires Emball Releases role")
     return embed
 
 
 class _RemastersInfoView(discord.ui.View):
-    """Persistent launcher pinned in #info."""
+    """Persistent view pinned in #info. Select is public; file delivery is ephemeral."""
 
     def __init__(self, bot: commands.Bot):
         super().__init__(timeout=None)
         self._bot = bot
-        btn = discord.ui.Button(
-            label="Browse Remasters",
-            style=discord.ButtonStyle.primary,
-            emoji="🎛️",
-            custom_id="remasters_browse_v1",
-        )
-        btn.callback = self._on_browse
-        self.add_item(btn)
+        self._rebuild_select()
 
-    async def _on_browse(self, interaction: discord.Interaction):
+    def _rebuild_select(self):
+        self.clear_items()
+        remasters = _db_all_remasters()
+        if not remasters:
+            return
+        page_size = 25
+        opts = [
+            discord.SelectOption(
+                label=r["title"][:100],
+                value=r["id"],
+                description=f"v{r['latest_version']}"[:100],
+            )
+            for r in remasters[:page_size]
+        ]
+        sel = discord.ui.Select(
+            placeholder="Choose a release…",
+            options=opts,
+            custom_id="remasters_info_select",
+        )
+        sel.callback = self._on_select
+        self.add_item(sel)
+
+    async def _on_select(self, interaction: discord.Interaction):
         if not _user_can_download(interaction):
             await interaction.response.send_message(
                 "This didn't work. Please try again later.", ephemeral=True)
             return
-        remasters = _db_all_remasters()
-        if not remasters:
-            await interaction.response.send_message(
-                "No releases yet — check back soon!", ephemeral=True)
+        rid = interaction.data["values"][0]
+        remaster = _db_get_remaster(rid)
+        if not remaster:
+            await interaction.response.send_message("Release not found.", ephemeral=True)
+            return
+        version_row = _db_latest_version(rid)
+        if not version_row:
+            await interaction.response.send_message("No version available.", ephemeral=True)
             return
         nav = RemasterNavigatorView(self._bot)
+        nav._selected_rid = rid
+        nav._render_detail(remaster, version_row)
         await interaction.response.send_message(
-            embed=nav._list_embed(), view=nav, ephemeral=True)
+            embed=nav._detail_embed(remaster, version_row),
+            view=nav,
+            ephemeral=True,
+        )
 
 
 async def post_or_refresh_info_embed(bot: commands.Bot, force: bool = False) -> None:

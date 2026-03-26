@@ -736,14 +736,14 @@ async def _deliver_remaster(bot: commands.Bot, interaction: discord.Interaction,
                     view = discord.ui.LayoutView(timeout=None)
                     if image_url:
                         section = discord.ui.Section(
-                            discord.ui.TextDisplay(f"## ⬇  {title}  ·  {version}"),
+                            discord.ui.TextDisplay(f"## {title}  ·  {version}"),
                             discord.ui.TextDisplay(desc) if desc else discord.ui.TextDisplay(
                                 f"`{filename}`"),
                             accessory=discord.ui.Thumbnail(image_url, description=f"Cover art for {title}"),
                         )
                         view.add_item(section)
                     else:
-                        view.add_item(discord.ui.TextDisplay(f"## ⬇  {title}  ·  {version}"))
+                        view.add_item(discord.ui.TextDisplay(f"## {title}  ·  {version}"))
                         if desc:
                             view.add_item(discord.ui.TextDisplay(desc))
                     view.add_item(discord.ui.TextDisplay(
@@ -767,13 +767,13 @@ async def _deliver_remaster(bot: commands.Bot, interaction: discord.Interaction,
         dm_view = discord.ui.LayoutView(timeout=None)
         if image_url:
             section = discord.ui.Section(
-                discord.ui.TextDisplay(f"## ⬇  {title}  ·  {version}"),
+                discord.ui.TextDisplay(f"## {title}  ·  {version}"),
                 discord.ui.TextDisplay(f"[Download `{filename}`]({cdn_url})"),
                 accessory=discord.ui.Thumbnail(image_url, description=f"Cover art for {title}"),
             )
             dm_view.add_item(section)
         else:
-            dm_view.add_item(discord.ui.TextDisplay(f"## ⬇  {title}  ·  {version}"))
+            dm_view.add_item(discord.ui.TextDisplay(f"## {title}  ·  {version}"))
             dm_view.add_item(discord.ui.TextDisplay(f"[Download `{filename}`]({cdn_url})"))
         dm_view.add_item(discord.ui.TextDisplay(
             f"-# Version `{version}`  ·  {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
@@ -953,7 +953,7 @@ class RemasterNavigatorView(discord.ui.LayoutView):
         page_hint = f"  ·  page {self._page + 1}/{pages}" if pages > 1 else ""
 
         self.add_item(discord.ui.TextDisplay(
-            f"## 🎛️  Emball Remaster Archive\n"
+            f"## Emball Remaster Archive\n"
             f"**{total} release{'s' if total != 1 else ''}** available{page_hint}. "
             f"Select a title from the menu below."
         ))
@@ -988,14 +988,14 @@ class RemasterNavigatorView(discord.ui.LayoutView):
 
         if image_url:
             section = discord.ui.Section(
-                discord.ui.TextDisplay(f"## ✦  {title}"),
+                discord.ui.TextDisplay(f"## {title}"),
                 discord.ui.TextDisplay(desc) if desc else discord.ui.TextDisplay(
                     f"Version `{version}`"),
                 accessory=discord.ui.Thumbnail(image_url, description=f"Cover art for {title}"),
             )
             self.add_item(section)
         else:
-            self.add_item(discord.ui.TextDisplay(f"## ✦  {title}"))
+            self.add_item(discord.ui.TextDisplay(f"## {title}"))
             if desc:
                 self.add_item(discord.ui.TextDisplay(desc))
 
@@ -1107,7 +1107,7 @@ class _RemastersInfoView(discord.ui.LayoutView):
         count = len(remasters)
 
         self.add_item(discord.ui.TextDisplay(
-            f"## 🎛️  Emball Remaster Archive\n"
+            f"## Emball Remaster Archive\n"
             f"Browse and download Emball's remaster releases — **{count}** available.\n\n"
             "Use the menu below to select a release. Files are delivered privately."
         ))
@@ -1161,14 +1161,14 @@ class _RemastersInfoView(discord.ui.LayoutView):
 
         if image_url:
             section = discord.ui.Section(
-                discord.ui.TextDisplay(f"## ✦  {title}"),
+                discord.ui.TextDisplay(f"## {title}"),
                 discord.ui.TextDisplay(desc) if desc else discord.ui.TextDisplay(
                     f"Version `{version}`"),
                 accessory=discord.ui.Thumbnail(image_url, description=f"Cover art for {title}"),
             )
             self.add_item(section)
         else:
-            self.add_item(discord.ui.TextDisplay(f"## ✦  {title}"))
+            self.add_item(discord.ui.TextDisplay(f"## {title}"))
             if desc:
                 self.add_item(discord.ui.TextDisplay(desc))
 

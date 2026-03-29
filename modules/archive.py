@@ -265,18 +265,24 @@ async def build_song_index(bot):
         bot.logger.log(MODULE_NAME, f"Scanning {fmt} directory...")
         all_files = []
         for root, _, files in os.walk(fmt_path):
-            folder = Path(root).name
+            root_path = Path(root)
+            folder = root_path.name
+            # category = immediate child of fmt_path (e.g. "1 - Solo")
+            try:
+                category = root_path.relative_to(fmt_path).parts[0]
+            except (ValueError, IndexError):
+                category = folder
             for fn in files:
                 if not fn.lower().endswith(('.flac', '.mp3')):
                     continue
-                full_path = Path(root) / fn
-                all_files.append((full_path, folder))
+                full_path = root_path / fn
+                all_files.append((full_path, folder, category))
         batch_size = 50
         for i in range(0, len(all_files), batch_size):
             batch = all_files[i:i + batch_size]
             batch_tasks = [
-                process_single_file(bot, full_path, folder, song_index, fmt)
-                for full_path, folder in batch
+                process_single_file(bot, full_path, folder, category, song_index, fmt)
+                for full_path, folder, category in batch
             ]
             results = await asyncio.gather(*batch_tasks, return_exceptions=True)
             total += len([r for r in results if r is not None])
@@ -288,7 +294,7 @@ async def build_song_index(bot):
     try:
         with open(tmp, 'w', encoding='utf-8') as f:
             json.dump({
-                'version': 5,
+                'version': 6,
                 'created_at': datetime.utcnow().isoformat(),
                 'songs': {k: dict(v) for k, v in song_index.items()}
             }, f, ensure_ascii=False, indent=2)
@@ -300,7 +306,7 @@ async def build_song_index(bot):
             os.remove(tmp)
     return song_index
 
-async def process_single_file(bot, full_path, folder, song_index, fmt):
+async def process_single_file(bot, full_path, folder, category, song_index, fmt):
     try:
         md = await extract_metadata_async(str(full_path))
         if any(k in folder for k in SPECIAL_FOLDERS):
@@ -312,6 +318,7 @@ async def process_single_file(bot, full_path, folder, song_index, fmt):
             'path': str(full_path),
             'original_title': full_path.stem,
             'folder': folder,
+            'category': category,
             'metadata': md
         })
         return True
@@ -326,7 +333,7 @@ def load_song_index(bot):
     try:
         with open(INDEX_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        if data.get('version', 0) < 5:
+        if data.get('version', 0) < 6:
             bot.logger.log(MODULE_NAME, "Outdated index version", "WARNING")
             return None
         created = datetime.fromisoformat(data['created_at'])
@@ -465,11 +472,19 @@ def _is_fed(interaction: discord.Interaction) -> bool:
 #  NAVIGATOR — per-user ephemeral multi-step LayoutView
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _get_folders_for_format(song_index: dict, fmt: str) -> list:
+def _get_categories_for_format(song_index: dict, fmt: str) -> list:
+    cats = set()
+    for entries in song_index.get(fmt, {}).values():
+        for e in entries:
+            cats.add(e.get('category', e['folder']))
+    return sorted(cats)
+
+def _get_folders_for_category(song_index: dict, fmt: str, category: str) -> list:
     folders = set()
     for entries in song_index.get(fmt, {}).values():
         for e in entries:
-            folders.add(e['folder'])
+            if e.get('category', e['folder']) == category:
+                folders.add(e['folder'])
     return sorted(folders)
 
 def _get_songs_in_folder(song_index: dict, fmt: str, folder: str) -> list:
@@ -539,7 +554,7 @@ def _song_options_for_page(songs: list, page: int):
 class ArchiveNavigatorView(discord.ui.LayoutView):
     """
     Ephemeral multi-step navigator using Components v2.
-    format_select → folder_select (paginated only if >25) → song_select → deliver
+    format → category → folder → song → deliver
     """
 
     def __init__(self, bot, song_index: dict):
@@ -547,14 +562,15 @@ class ArchiveNavigatorView(discord.ui.LayoutView):
         self._bot = bot
         self._index = song_index
         self._fmt: Optional[str] = None
+        self._category: Optional[str] = None
+        self._categories: list = []
         self._folder: Optional[str] = None
         self._folders: list = []
         self._songs: list = []
+        self._category_page = 0
         self._folder_page = 0
         self._song_page = 0
         self._render_format_step()
-
-    # ── Step renderers ────────────────────────────────────────────────────────
 
     def _render_format_step(self):
         self.clear_items()
@@ -569,19 +585,19 @@ class ArchiveNavigatorView(discord.ui.LayoutView):
         row.add_item(sel)
         self.add_item(row)
 
-    def _render_folder_step(self):
+    def _render_category_step(self):
         self.clear_items()
-        opts, has_prev, has_next = _folder_options_for_page(self._folders, self._folder_page)
-        pages = (len(self._folders) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
-        page_hint = f"  ·  page {self._folder_page + 1}/{pages}" if pages > 1 else ""
+        opts, _, _ = _folder_options_for_page(self._categories, self._category_page)
+        pages = (len(self._categories) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
+        page_hint = f"  ·  page {self._category_page + 1}/{pages}" if pages > 1 else ""
         self.add_item(discord.ui.TextDisplay(
             f"## Eminem Archive  ·  {self._fmt}\n"
-            f"{len(self._folders)} folders available{page_hint}"
+            f"{len(self._categories)} categories{page_hint}"
         ))
         row = discord.ui.ActionRow()
-        ph = f"Choose a folder…{page_hint}"
-        sel = discord.ui.Select(placeholder=ph[:150], options=opts, custom_id="nav_folder")
-        sel.callback = self._on_folder
+        sel = discord.ui.Select(placeholder=f"Choose a category…{page_hint}"[:150],
+                                options=opts, custom_id="nav_category")
+        sel.callback = self._on_category
         row.add_item(sel)
         self.add_item(row)
         back_row = discord.ui.ActionRow()
@@ -591,36 +607,77 @@ class ArchiveNavigatorView(discord.ui.LayoutView):
         back_row.add_item(back)
         self.add_item(back_row)
 
+    def _render_folder_step(self):
+        self.clear_items()
+        opts, _, _ = _folder_options_for_page(self._folders, self._folder_page)
+        pages = (len(self._folders) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
+        page_hint = f"  ·  page {self._folder_page + 1}/{pages}" if pages > 1 else ""
+        self.add_item(discord.ui.TextDisplay(
+            f"## {self._category}\n"
+            f"{len(self._folders)} albums{page_hint}"
+        ))
+        row = discord.ui.ActionRow()
+        sel = discord.ui.Select(placeholder=f"Choose an album…{page_hint}"[:150],
+                                options=opts, custom_id="nav_folder")
+        sel.callback = self._on_folder
+        row.add_item(sel)
+        self.add_item(row)
+        back_row = discord.ui.ActionRow()
+        back = discord.ui.Button(label="← Back to Categories", style=discord.ButtonStyle.secondary,
+                                 custom_id="nav_b_category")
+        back.callback = self._on_back_to_category
+        back_row.add_item(back)
+        self.add_item(back_row)
+
     def _render_song_step(self):
         self.clear_items()
-        opts, has_prev, has_next = _song_options_for_page(self._songs, self._song_page)
+        opts, _, _ = _song_options_for_page(self._songs, self._song_page)
         pages = (len(self._songs) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
         page_hint = f"  ·  page {self._song_page + 1}/{pages}" if pages > 1 else ""
         self.add_item(discord.ui.TextDisplay(
-            f"## {_clean_folder_name(self._folder)}\n"
+            f"## {self._folder}\n"
             f"{len(self._songs)} songs{page_hint}"
         ))
         row = discord.ui.ActionRow()
-        ph = f"Choose a song…{page_hint}"
-        sel = discord.ui.Select(placeholder=ph[:150], options=opts, custom_id="nav_song")
+        sel = discord.ui.Select(placeholder=f"Choose a song…{page_hint}"[:150],
+                                options=opts, custom_id="nav_song")
         sel.callback = self._on_song
         row.add_item(sel)
         self.add_item(row)
         back_row = discord.ui.ActionRow()
-        back = discord.ui.Button(label="← Back to Folders", style=discord.ButtonStyle.secondary,
+        back = discord.ui.Button(label="← Back to Albums", style=discord.ButtonStyle.secondary,
                                  custom_id="nav_b_folder")
         back.callback = self._on_back_to_folder
         back_row.add_item(back)
         self.add_item(back_row)
-
-    # ── Callbacks ─────────────────────────────────────────────────────────────
 
     async def _on_format(self, interaction: discord.Interaction):
         if _is_fed(interaction):
             await interaction.response.send_message(
                 "This didn't work. Please try again later.", ephemeral=True); return
         self._fmt = interaction.data["values"][0]
-        self._folders = _get_folders_for_format(self._index, self._fmt)
+        self._categories = _get_categories_for_format(self._index, self._fmt)
+        self._category_page = 0
+        self._render_category_step()
+        await interaction.response.edit_message(view=self)
+
+    async def _on_category(self, interaction: discord.Interaction):
+        if _is_fed(interaction):
+            await interaction.response.send_message(
+                "This didn't work. Please try again later.", ephemeral=True); return
+        val = interaction.data["values"][0]
+        if val == "__prev__":
+            self._category_page = max(0, self._category_page - 1)
+            self._render_category_step()
+            await interaction.response.edit_message(view=self)
+            return
+        if val == "__next__":
+            self._category_page += 1
+            self._render_category_step()
+            await interaction.response.edit_message(view=self)
+            return
+        self._category = self._categories[int(val)]
+        self._folders = _get_folders_for_category(self._index, self._fmt, self._category)
         self._folder_page = 0
         self._render_folder_step()
         await interaction.response.edit_message(view=self)
@@ -671,10 +728,17 @@ class ArchiveNavigatorView(discord.ui.LayoutView):
 
     async def _on_back_to_format(self, interaction: discord.Interaction):
         self._fmt = None
+        self._category = None
+        self._categories = []
+        self._category_page = 0
+        self._render_format_step()
+        await interaction.response.edit_message(view=self)
+
+    async def _on_back_to_category(self, interaction: discord.Interaction):
         self._folder = None
         self._folders = []
         self._folder_page = 0
-        self._render_format_step()
+        self._render_category_step()
         await interaction.response.edit_message(view=self)
 
     async def _on_back_to_folder(self, interaction: discord.Interaction):
@@ -702,11 +766,13 @@ class _ArchiveInfoView(discord.ui.LayoutView):
     def __init__(self, bot):
         super().__init__(timeout=None)
         self._bot = bot
-        # Navigator state (reset to home after each delivery)
         self._fmt: Optional[str] = None
+        self._category: Optional[str] = None
+        self._categories: list = []
         self._folder: Optional[str] = None
         self._folders: list = []
         self._songs: list = []
+        self._category_page = 0
         self._folder_page = 0
         self._song_page = 0
         self._render_home()
@@ -716,9 +782,12 @@ class _ArchiveInfoView(discord.ui.LayoutView):
     def _render_home(self):
         self.clear_items()
         self._fmt = None
+        self._category = None
+        self._categories = []
         self._folder = None
         self._folders = []
         self._songs = []
+        self._category_page = 0
         self._folder_page = 0
         self._song_page = 0
         self.add_item(discord.ui.TextDisplay(
@@ -739,25 +808,47 @@ class _ArchiveInfoView(discord.ui.LayoutView):
         row.add_item(sel)
         self.add_item(row)
 
-    def _render_folder_step(self):
+    def _render_category_step(self):
         self.clear_items()
-        opts, has_prev, has_next = _folder_options_for_page(self._folders, self._folder_page)
-        pages = (len(self._folders) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
-        page_hint = f"  ·  page {self._folder_page + 1}/{pages}" if pages > 1 else ""
+        opts, _, _ = _folder_options_for_page(self._categories, self._category_page)
+        pages = (len(self._categories) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
+        page_hint = f"  ·  page {self._category_page + 1}/{pages}" if pages > 1 else ""
         self.add_item(discord.ui.TextDisplay(
             f"## Eminem Archive  ·  {self._fmt}\n"
-            f"{len(self._folders)} folders available{page_hint}"
+            f"{len(self._categories)} categories{page_hint}"
         ))
         row = discord.ui.ActionRow()
-        ph = f"Choose a folder…{page_hint}"
-        sel = discord.ui.Select(placeholder=ph[:150], options=opts, custom_id="archive_info_folder")
-        sel.callback = self._on_folder
+        sel = discord.ui.Select(placeholder=f"Choose a category…{page_hint}"[:150],
+                                options=opts, custom_id="archive_info_category")
+        sel.callback = self._on_category
         row.add_item(sel)
         self.add_item(row)
         back_row = discord.ui.ActionRow()
         back = discord.ui.Button(label="← Back to Format", style=discord.ButtonStyle.secondary,
                                  custom_id="archive_info_b_fmt")
         back.callback = self._on_back_to_home
+        back_row.add_item(back)
+        self.add_item(back_row)
+
+    def _render_folder_step(self):
+        self.clear_items()
+        opts, has_prev, has_next = _folder_options_for_page(self._folders, self._folder_page)
+        pages = (len(self._folders) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
+        page_hint = f"  ·  page {self._folder_page + 1}/{pages}" if pages > 1 else ""
+        self.add_item(discord.ui.TextDisplay(
+            f"## {self._category}\n"
+            f"{len(self._folders)} albums{page_hint}"
+        ))
+        row = discord.ui.ActionRow()
+        ph = f"Choose an album…{page_hint}"
+        sel = discord.ui.Select(placeholder=ph[:150], options=opts, custom_id="archive_info_folder")
+        sel.callback = self._on_folder
+        row.add_item(sel)
+        self.add_item(row)
+        back_row = discord.ui.ActionRow()
+        back = discord.ui.Button(label="← Back to Categories", style=discord.ButtonStyle.secondary,
+                                 custom_id="archive_info_b_category")
+        back.callback = self._on_back_to_category
         back_row.add_item(back)
         self.add_item(back_row)
 
@@ -796,7 +887,30 @@ class _ArchiveInfoView(discord.ui.LayoutView):
                 "Archive is still initialising — please try again in a moment.", ephemeral=True)
             return
         self._fmt = interaction.data["values"][0]
-        self._folders = _get_folders_for_format(manager.song_index, self._fmt)
+        self._categories = _get_categories_for_format(manager.song_index, self._fmt)
+        self._category_page = 0
+        self._render_category_step()
+        await interaction.response.edit_message(view=self)
+
+    async def _on_category(self, interaction: discord.Interaction):
+        if _is_fed(interaction):
+            await interaction.response.send_message(
+                "This didn't work. Please try again later.", ephemeral=True)
+            return
+        manager = getattr(self._bot, "ARCHIVE_manager", None)
+        val = interaction.data["values"][0]
+        if val == "__prev__":
+            self._category_page = max(0, self._category_page - 1)
+            self._render_category_step()
+            await interaction.response.edit_message(view=self)
+            return
+        if val == "__next__":
+            self._category_page += 1
+            self._render_category_step()
+            await interaction.response.edit_message(view=self)
+            return
+        self._category = self._categories[int(val)]
+        self._folders = _get_folders_for_category(manager.song_index, self._fmt, self._category)
         self._folder_page = 0
         self._render_folder_step()
         await interaction.response.edit_message(view=self)
@@ -857,6 +971,13 @@ class _ArchiveInfoView(discord.ui.LayoutView):
 
     async def _on_back_to_home(self, interaction: discord.Interaction):
         self._render_home()
+        await interaction.response.edit_message(view=self)
+
+    async def _on_back_to_category(self, interaction: discord.Interaction):
+        self._folder = None
+        self._folders = []
+        self._folder_page = 0
+        self._render_category_step()
         await interaction.response.edit_message(view=self)
 
     async def _on_back_to_folder(self, interaction: discord.Interaction):

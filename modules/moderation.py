@@ -2663,6 +2663,63 @@ def setup(bot):
         await _do_ban(ModContext(interaction), _mod, user, reason,
                       delete_days, fake=fake, rule_number=rule)
 
+    @bot.tree.command(name="multiban", description="[Mod] Ban multiple users at once with one reason")
+    @app_commands.describe(
+        user_ids="Space-separated list of user IDs to ban",
+        reason="Reason applied to all bans",
+        delete_days="Days of messages to delete (0-7)",
+        fake="Simulate without executing",
+    )
+    @app_commands.default_permissions(ban_members=True)
+    async def slash_multiban(interaction: discord.Interaction, user_ids: str,
+                             reason: str, delete_days: Optional[int] = 0,
+                             fake: bool = False):
+        if not has_elevated_role(interaction.user, _mod.cfg):
+            await interaction.response.send_message(ERROR_NO_PERMISSION, ephemeral=True)
+            return
+
+        raw_ids = user_ids.split()
+        if not raw_ids:
+            await interaction.response.send_message(
+                "❌ Provide at least one user ID.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        skipped: list[str] = []
+        banned_count = 0
+        for raw in raw_ids:
+            raw = raw.strip("<@!>")
+            if not raw.isdigit():
+                skipped.append(f"⚠️ `{raw}` — not a valid ID, skipped")
+                continue
+            try:
+                user = await interaction.client.fetch_user(int(raw))
+            except discord.NotFound:
+                skipped.append(f"⚠️ `{raw}` — user not found, skipped")
+                continue
+            except Exception:
+                skipped.append(f"⚠️ `{raw}` — fetch failed, skipped")
+                continue
+
+            # Rate-limit: wait 10s between each ban (skip delay before the first)
+            if banned_count > 0:
+                await asyncio.sleep(10)
+
+            try:
+                await _do_ban(ModContext(interaction), _mod, user, reason,
+                              delete_days or 0, fake=fake, rule_number=None)
+                banned_count += 1
+            except Exception:
+                skipped.append(f"❌ **{user}** (`{user.id}`) — ban failed")
+
+        # Only report skipped/failed entries; successful bans already have their own embeds
+        summary_parts = [f"**Multiban complete** — {banned_count} banned"
+                         + (" (dry run)" if fake else "")]
+        if skipped:
+            summary_parts.append("\n".join(skipped))
+        await interaction.followup.send("\n".join(summary_parts), ephemeral=True)
+
     @bot.tree.command(name="unban", description="[Mod] Unban a user from the server")
     @app_commands.describe(user_id="User ID to unban", reason="Reason for unban",
                            fake="Simulate without executing")
@@ -2802,6 +2859,68 @@ def setup(bot):
                 "❌ You must provide either a reason or `rule:<n>`.", delete_after=8)
         await _do_ban(ModContext(ctx), _mod, user, reason, delete_days,
                       fake=fake, rule_number=rule_number)
+
+    @bot.command(name="multiban")
+    async def prefix_multiban(ctx, *args):
+        """Usage: ?multiban <id|@user> [id|@user ...] reason:<reason> [days:<0-7>] [fake]"""
+        if not args:
+            return await ctx.send(
+                "❌ Usage: `?multiban <id/@user> [id/@user ...] reason:<text> [days:<0-7>] [fake]`",
+                delete_after=10)
+
+        fake        = any(a.lower() == "fake" for a in args)
+        args        = [a for a in args if a.lower() != "fake"]
+
+        reason_match = re.search(r'reason:(.+)', " ".join(args), re.IGNORECASE)
+        if not reason_match:
+            return await ctx.send(
+                "❌ You must include `reason:<text>` in the command.", delete_after=8)
+        reason = reason_match.group(1).strip()
+
+        days_match  = re.search(r'days:(\d+)', " ".join(args), re.IGNORECASE)
+        delete_days = int(days_match.group(1)) if days_match else 0
+
+        # Everything before the first reason:/days:/fake token is a user ref
+        user_refs = []
+        for a in args:
+            if re.match(r'reason:', a, re.IGNORECASE): break
+            if re.match(r'days:\d+', a, re.IGNORECASE): continue
+            user_refs.append(a.strip("<@!>"))
+
+        if not user_refs:
+            return await ctx.send("❌ No users specified.", delete_after=8)
+
+        skipped: list[str] = []
+        banned_count = 0
+        for raw in user_refs:
+            if not raw.isdigit():
+                skipped.append(f"⚠️ `{raw}` — not a valid ID, skipped")
+                continue
+            try:
+                user = await ctx.bot.fetch_user(int(raw))
+            except discord.NotFound:
+                skipped.append(f"⚠️ `{raw}` — user not found, skipped")
+                continue
+            except Exception:
+                skipped.append(f"⚠️ `{raw}` — fetch failed, skipped")
+                continue
+
+            # Rate-limit: wait 10s between each ban (skip delay before the first)
+            if banned_count > 0:
+                await asyncio.sleep(10)
+
+            try:
+                await _do_ban(ModContext(ctx), _mod, user, reason, delete_days, fake=fake)
+                banned_count += 1
+            except Exception:
+                skipped.append(f"❌ **{user}** (`{user.id}`) — ban failed")
+
+        # Only report skipped/failed entries; successful bans already have their own embeds
+        summary_parts = [f"**Multiban complete** — {banned_count} banned"
+                         + (" (dry run)" if fake else "")]
+        if skipped:
+            summary_parts.append("\n".join(skipped))
+        await ctx.send("\n".join(summary_parts))
 
     @bot.command(name="unban")
     async def prefix_unban(ctx, user_id: str = None, *, reason: str = "No reason provided"):

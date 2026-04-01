@@ -2686,6 +2686,13 @@ def setup(bot):
 
         await interaction.response.defer(ephemeral=True)
 
+        # Create a single ModContext for the whole multiban operation and mark it
+        # as already replied (because we just deferred), so every subsequent
+        # ctx.reply() inside _do_ban correctly uses followup.send instead of
+        # response.send_message (which would raise InteractionResponded).
+        ban_ctx = ModContext(interaction)
+        ban_ctx._replied = True
+
         skipped: list[str] = []
         banned_count = 0
         for raw in raw_ids:
@@ -2707,7 +2714,7 @@ def setup(bot):
                 await asyncio.sleep(10)
 
             try:
-                await _do_ban(ModContext(interaction), _mod, user, reason,
+                await _do_ban(ban_ctx, _mod, user, reason,
                               delete_days or 0, fake=fake, rule_number=None)
                 banned_count += 1
             except Exception:

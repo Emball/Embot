@@ -83,31 +83,18 @@ class DevManager:
         git_env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GCM_INTERACTIVE': 'never'}
 
         if name:
-            subprocess.run(['git', 'config', 'user.name', name],
+            subprocess.run(['git', '-c', 'credential.helper=', 'config', 'user.name', name],
                            capture_output=True, text=True, timeout=5, env=git_env)
         if email:
-            subprocess.run(['git', 'config', 'user.email', email],
+            subprocess.run(['git', '-c', 'credential.helper=', 'config', 'user.email', email],
                            capture_output=True, text=True, timeout=5, env=git_env)
 
-        subprocess.run(['git', 'config', 'core.askPass', ''],
+        subprocess.run(['git', '-c', 'credential.helper=', 'config', 'core.askPass', ''],
                        capture_output=True, text=True, timeout=5, env=git_env)
 
-        # Use credential.store — write token to ~/.git-credentials, no URL embedding
-        subprocess.run(['git', 'config', 'credential.helper', 'store'],
-                       capture_output=True, text=True, timeout=5, env=git_env)
-
-        creds_file = Path.home() / '.git-credentials'
-        cred_line = f"https://git:{token}@github.com\n"
-        creds_file.parent.mkdir(parents=True, exist_ok=True)
-        existing = set()
-        if creds_file.exists():
-            existing = set(creds_file.read_text().splitlines())
-        existing.add(cred_line.strip())
-        creds_file.write_text('\n'.join(existing) + '\n')
-
-        # Ensure remote URL is clean (no token embedded — avoids GH013)
+        # Embed token in remote URL — no credential helper interaction at all
         try:
-            r = subprocess.run(['git', 'remote', 'get-url', 'origin'],
+            r = subprocess.run(['git', '-c', 'credential.helper=', 'remote', 'get-url', 'origin'],
                                capture_output=True, text=True, timeout=5, env=git_env)
             current_url = r.stdout.strip()
             if r.returncode == 0 and 'github.com' in current_url:
@@ -123,11 +110,11 @@ class DevManager:
         except Exception:
             owner, repo = (name or 'Emball'), Path.cwd().name
 
-        clean_url = f"https://github.com/{owner}/{repo}.git"
-        subprocess.run(['git', 'remote', 'set-url', 'origin', clean_url],
+        auth_url = f"https://git:{token}@github.com/{owner}/{repo}.git"
+        subprocess.run(['git', '-c', 'credential.helper=', 'remote', 'set-url', 'origin', auth_url],
                        capture_output=True, text=True, timeout=5, env=git_env)
 
-        self.bot.logger.log(MODULE_NAME, "Git auto-configured: user, email, credential store, clean remote")
+        self.bot.logger.log(MODULE_NAME, "Git auto-configured: user, email, remote with embedded token")
     
     def _log_dev_features(self):
         """Log development-specific features that are enabled"""
@@ -676,7 +663,7 @@ icons/
             
             # Stage all changes
             result = await asyncio.create_subprocess_exec(
-                'git', 'add', '-A',
+                'git', '-c', 'credential.helper=', 'add', '-A',
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=git_env
@@ -685,7 +672,7 @@ icons/
             
             # Commit
             result = await asyncio.create_subprocess_exec(
-                'git', 'commit', '-m', message,
+                'git', '-c', 'credential.helper=', 'commit', '-m', message,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=git_env
@@ -705,7 +692,7 @@ icons/
             
             # Pull with rebase to sync remote changes, then push
             pull = await asyncio.create_subprocess_exec(
-                'git', 'pull', '--rebase', 'origin', 'main',
+                'git', '-c', 'credential.helper=', 'pull', '--rebase', 'origin', 'main',
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=git_env
@@ -716,7 +703,7 @@ icons/
                 self.bot.logger.log(MODULE_NAME, f"Git pull skipped (no upstream or rebase failed): {err.split(chr(10))[0]}", "WARNING")
             
             push = await asyncio.create_subprocess_exec(
-                'git', 'push', 'origin', 'main',
+                'git', '-c', 'credential.helper=', 'push', 'origin', 'main',
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=git_env

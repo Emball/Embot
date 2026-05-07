@@ -7,7 +7,7 @@
         "enabled": true,
         "host": "0.0.0.0",
         "port": 9876,
-        "remote_host": "192.168.1.50",
+        "remote_host": "10.0.0.126",
         "auto_update": true,
         "auto_update_interval_minutes": 5
     }

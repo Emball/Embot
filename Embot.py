@@ -780,6 +780,7 @@ def run_bot(token):
         sys.exit(1)
 
 async def _run_remote_mode(token):
+    sys.path.insert(0, str(script_dir / "modules"))
     from network import NetworkClient
     client = NetworkClient(bot, REMOTE_HOST, REMOTE_PORT)
     await client.connect(mode="test" if args.test else "console")
@@ -874,6 +875,11 @@ async def _sync_remote_files(client):
 if __name__ == "__main__":
     # --console mode doesn't need a token
     if args.console:
+        if REMOTE_HOST == '__auto__':
+            net = _cfg.get("network", {})
+            REMOTE_HOST = net.get("remote_host", "localhost")
+        if REMOTE_PORT is None:
+            REMOTE_PORT = _cfg.get("network", {}).get("port", 9876)
         asyncio.run(_run_remote_mode(""))
         sys.exit(0)
 

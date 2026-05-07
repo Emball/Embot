@@ -1,109 +1,115 @@
 # Embot
-### AI slop Discord bot for The Emball Pit Discord Server
 
-A feature-bloated, over-engineered Discord bot built with discord.py
-
----
+Discord bot for The Emball Pit. Built with discord.py.
 
 ## Modules
 
-### 🎵 Archive
-Stream FLAC and MP3 files from a local Eminem music library directly to Discord via DM. Maintains a persistent song index with fuzzy search, Discord CDN caching, and metadata extraction via Mutagen.
+**Archive** -- Stream FLAC/MP3 from a local music library to Discord DM. Persistent song index with fuzzy search, Discord CDN caching, metadata via Mutagen.
 
-### 🎤 VMS (Voice Message System)
-Automatically captures, transcribes, and archives every Discord voice message using OpenAI Whisper. Periodically replays old VMs in `#general` — either randomly or contextually matched against recent chat — and responds to @mentions with a random VM.
+**VMS** -- Captures, transcribes, and archives Discord voice messages using OpenAI Whisper. Periodic replay in #general, contextual matching, @mention responses.
 
-### 🎶 Player
-Queue-based music player with voice channel support. Supports FLAC and MP3, vote-skipping, loop mode, and auto-disconnect on inactivity. Pulls from the same archive as the Archive module.
+**Player** -- Queue-based music player with voice channel support. FLAC/MP3, vote-skipping, loop mode, auto-disconnect.
 
-### 🛡️ Moderation
-Full moderation suite with slash and prefix commands. Includes ban, kick, timeout, mute, softban, warn, purge, slowmode, lock/unlock, and a rule-violation ban flow. Features an oversight system that tracks pending actions, monitors embed deletions for tampering, generates daily integrity reports, and routes everything through a bot-logs channel. Media attachments are encrypted at rest and scanned for CSAM before being re-hosted.
+**Moderation** -- Full suite: ban, kick, timeout, mute, softban, warn, purge, slowmode, lock/unlock. Oversight system tracks pending actions, monitors embed deletions, generates daily integrity reports. Media encrypted at rest and scanned before re-hosting.
 
-### 🌍 Community
-XP system, submission channels, leaderboard, and Spotlight Friday — a weekly automated feature that highlights a top community submission in `#announcements`. Tracks thread engagement and awards XP for replies to submissions.
+**Community** -- XP system, submission tracking, leaderboard, weekly Spotlight Friday feature.
 
-### 🔗 Links
-Dynamic custom slash commands backed by a JSON config. Any link can be registered, toggled, or removed at runtime without restarting the bot. Includes collision detection against existing commands.
+**Links** -- Dynamic custom slash commands from JSON config. Add/remove at runtime.
 
-### ⭐ Starboard
-Reacts to ⭐ emoji and reposts qualifying messages to a dedicated starboard channel. Star count is tracked in SQLite and the starboard embed updates live as reactions change.
+**Starboard** -- Star-reaction tracking with live-updating embeds, SQLite-backed.
 
-### 🎱 Magic Emball
-`/magicemball` — ask a question, get a response. Includes special-case pattern matching for certain phrases. Per-user cooldown to prevent spam.
+**Magic Emball** -- `/magicemball` yes/no responses with regex pattern matching.
 
-### 🖼️ Icons
-Automatically rotates the server icon and bot avatar based on holidays and special dates (Halloween, Christmas, Thanksgiving, 4th of July, 9/11, Pride Month). Respects Discord's avatar rate limits.
+**Icons** -- Holiday-based server icon and avatar rotation with Discord rate-limit awareness.
 
-### 📋 Logger
-Structured event logging to both console and rotating session log files. All modules share a single `ConsoleLogger` instance via `bot.logger`.
+**Logger** -- Structured event logging to console and rotating session files.
 
-### 🔧 Dev *(development mode only)*
-Hot-reload, git integration, and version tracking. Only loaded when the bot is started with the `-dev` flag.
+**Dev** *(development mode)* -- Hot-reload, git auto-commit/push, version tracking.
 
----
+**Network** -- TCP server for remote console control, file sync, and session dominance between instances.
 
 ## Setup
 
-### Requirements
+Requirements:
 - Python 3.11+
-- FFmpeg on `PATH`
-- A Discord bot token with Message Content, Guild Members, and Voice intents enabled
+- FFmpeg on PATH
+- Discord bot token with Message Content, Guild Members, and Voice intents
 
-### Install dependencies
+Install:
 ```bash
 pip install -r requirements.txt
+# or
+uv sync
 ```
 
-### Environment variables
-| Variable | Required | Description |
-|---|---|---|
-| `DISCORD_BOT_TOKEN` | ✅ | Your Discord bot token |
-| `EMINEM_ROOT` | Archive module | Path to the root of the local music library |
-| `FERNET_KEY` | Moderation module | Fixed secret for encrypting cached media across restarts |
+Token goes in `config/token` (or `token.json` in root) as JSON:
+```json
+{
+    "bot_token": "YOUR_DISCORD_TOKEN",
+    "github_token": "ghp_xxxxxxxxxxxx",
+    "github_email": "you@example.com",
+    "github_name": "YourUsername"
+}
+```
 
-Alternatively, `EMINEM_ROOT` can be set in `config/archive_config.json`.
+Config files live in `config/`:
+- `embot.json` -- command prefix, home guild, network settings
+- `moderation.json` -- moderation rules, roles, channels
+- `starboard_config.json` -- channel, threshold, emoji
+- `archive_config.json` -- music library path
+- `links_config.json` -- registered link commands
 
-### Config files
-All config lives in `config/`. Key files:
+## Running
 
-| File | Module | Description |
-|---|---|---|
-| `moderation.json` | Moderation | Word lists, elevated roles, channel IDs, rules content |
-| `starboard_config.json` | Starboard | Channel ID, threshold, emoji |
-| `archive_config.json` | Archive | Path to music library |
-| `links_config.json` | Links | Registered link commands |
-
-### Run
 ```bash
-# Production
-python Embot.py
-
-# Development mode (hot-reload, git integration)
-python Embot.py -dev
+python Embot.py           # Production
+python Embot.py -dev      # Development (hot-reload, git auto-commit)
+python Embot.py -c 192.168.1.50   # Remote console
+python Embot.py -t 192.168.1.50   # Test mode (remote data, pauses primary)
 ```
 
----
+On Linux, use `start.sh`. On Windows, use `start.bat`. Both auto-restart on crash.
 
-## Console
-The bot exposes an interactive console while running:
+## Console Commands
 
 | Command | Description |
 |---|---|
 | `status` | Bot status, latency, loaded modules |
-| `reload <module>` | Hot-reload a specific module |
-| `modules` | List all loaded modules |
-| `logs` | Show current log file info |
-| `version` | Python, discord.py, and bot version |
+| `reload <module>` | Hot-reload a module |
+| `modules` | List loaded modules |
+| `logs` | Current log file info |
+| `commit` | Commit and push changes (dev mode) |
+| `version` | Bot and Python version |
 | `exit` | Graceful shutdown |
 
----
+## Network
 
-## Project Structure
+For multi-instance setups (e.g., Linux server + Windows dev machine). Configure `embot.json`:
+
+```json
+"network": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 9876,
+    "remote_host": "192.168.1.50",
+    "auto_update": true,
+    "auto_update_interval_minutes": 5
+}
+```
+
+- `--console <host>` -- Remote terminal relay. Identical to typing on the server.
+- `--test <host>` -- Syncs config/db/cache from remote, pauses the primary instance, runs locally.
+- The primary instance auto-updates via git pull when remote commits are detected.
+
+## Structure
+
 ```
 Embot/
-├── Embot.py              # Bot entrypoint, module loader, console
-├── _version.py           # Version string
-├── modules/              # Feature modules (auto-loaded on startup)
+├── Embot.py
+├── main.py
+├── _version.py
+├── start.sh / start.bat
+├── modules/
 │   ├── archive.py
 │   ├── community.py
 │   ├── dev.py
@@ -112,17 +118,14 @@ Embot/
 │   ├── logger.py
 │   ├── magic_emball.py
 │   ├── moderation.py
+│   ├── network.py
 │   ├── player.py
+│   ├── remasters.py
 │   ├── starboard.py
 │   └── vms.py
-├── config/               # JSON config files
-├── icons/                # Holiday icon PNGs
-├── cache/                # Runtime cache (VMs, archive URLs, Whisper models)
-├── db/                   # SQLite databases
-└── logs/                 # Session log files
+├── config/
+├── icons/
+├── cache/
+├── db/
+└── logs/
 ```
-
----
-
-## License
-Private. Do whatever, I don't care.

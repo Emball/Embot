@@ -26,9 +26,7 @@ script_dir = Path(__file__).parent.absolute()
 data_dir = script_dir / "logs"
 data_dir.mkdir(exist_ok=True)
 
-# ==================== CONFIG ====================
-
-_CONFIG_PATH = script_dir / "config" / "embot.json"
+_CONFIG_PATH = script_dir / "config"/ "embot.json"
 _CONFIG_DEFAULTS = {
     "command_prefixes":           ["!", "?"],
     "home_guild_id":              0,
@@ -56,8 +54,6 @@ def load_config() -> dict:
 
 _cfg = load_config()
 
-# ==================== BOT INIT ====================
-
 # Initialize bot with intents
 intents = discord.Intents.default()
 intents.message_content = True
@@ -71,10 +67,12 @@ class ConsoleLogger:
     
     def __init__(self):
         self.prompt_active = False
+        self.prompt_lock = threading.Lock()
         self.lock = threading.Lock()
         self.session_id = self._generate_session_id()
         self.log_file = None
         self._init_log_file()
+        self._cleanup_old_logs(retention_days=30)
     
     def _generate_session_id(self) -> str:
         """Generate a unique session ID based on timestamp"""
@@ -91,10 +89,22 @@ class ConsoleLogger:
         with open(self.log_file, 'w', encoding='utf-8') as f:
             f.write(f"=== Embot Session Log - {self.session_id} ===\n")
             f.write(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write("=" * 50 + "\n\n")
+            f.write("="* 50 + "\n\n")
         
         print(f"[LOGGER] Session log started: {self.log_file.name}")
     
+    def _cleanup_old_logs(self, retention_days=30):
+        try:
+            cutoff = datetime.now().timestamp() - (retention_days * 86400)
+            for log_file in data_dir.glob("session_*.log"):
+                try:
+                    if log_file.stat().st_mtime < cutoff:
+                        log_file.unlink()
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[LOGGER] Log cleanup failed: {e}")
+
     def _clear_line(self):
         """Clear the current line"""
         sys.stdout.write('\r\033[K')
@@ -102,9 +112,10 @@ class ConsoleLogger:
     
     def _restore_prompt(self):
         """Restore the > prompt after logging"""
-        if self.prompt_active:
-            sys.stdout.write('> ')
-            sys.stdout.flush()
+        with self.prompt_lock:
+            if self.prompt_active:
+                sys.stdout.write('> ')
+                sys.stdout.flush()
     
     def _write_to_file(self, message: str):
         """Write a message to the log file"""
@@ -302,7 +313,7 @@ async def on_ready():
         # Load version from file
         bot.version = load_version()
         
-        mode = "DEVELOPMENT MODE" if args.development else "PRODUCTION MODE"
+        mode = "DEVELOPMENT MODE"if args.development else "PRODUCTION MODE"
         bot.logger.log("MAIN", f"Embot online as {bot.user} - {mode} - v{bot.version}")
         
         # Start console IMMEDIATELY - don't wait for anything else
@@ -323,7 +334,7 @@ async def on_ready():
             bot.logger.log("MAIN", f"Commands synced successfully: {len(synced)} commands")
         except HTTPException as e:
             if e.status == 429 and e.code == 30034:
-                bot.logger.log("MAIN", "⚠️ Daily command sync limit reached (200/200). Commands will sync tomorrow.", "WARNING")
+                bot.logger.log("MAIN", "Daily command sync limit reached (200/200). Commands will sync tomorrow.", "WARNING")
             else:
                 bot.logger.error("MAIN", "Command sync failed", e)
         except Exception as e:
@@ -355,12 +366,15 @@ async def monitor_heartbeat():
 
 def run_console():
     """Run interactive console for commands - available in all modes"""
-    # Small delay to ensure bot is ready
-    time.sleep(2)
+    try:
+        asyncio.run_coroutine_threadsafe(bot.wait_until_ready(), bot.loop).result(timeout=30)
+    except Exception:
+        pass
     bot.logger.log("CONSOLE", "Console ready. Type 'help' for commands.")
     
     # Activate prompt
-    bot.logger.prompt_active = True
+    with bot.logger.prompt_lock:
+        bot.logger.prompt_active = True
     
     while True:
         try:
@@ -368,10 +382,12 @@ def run_console():
             cmd = input("> ").strip()
             
             # Clear prompt temporarily during command execution
-            bot.logger.prompt_active = False
+            with bot.logger.prompt_lock:
+                bot.logger.prompt_active = False
             
             if not cmd:
-                bot.logger.prompt_active = True
+                with bot.logger.prompt_lock:
+                    bot.logger.prompt_active = True
                 continue
             
             parts = cmd.split(maxsplit=1)
@@ -391,22 +407,25 @@ def run_console():
                     cmd_info['handler'](args_str),
                     bot.loop
                 ).result(timeout=30)
-            elif command == "exit" or command == "quit":
+            elif command == "exit"or command == "quit":
                 print("Shutting down bot...")
                 asyncio.run_coroutine_threadsafe(bot.close(), bot.loop)
                 break
             else:
-                print(f"❌ Unknown command: {command}. Type 'help' for available commands.")
+                print(f"Unknown command: {command}. Type 'help' for available commands.")
             
             # Reactivate prompt
-            bot.logger.prompt_active = True
+            with bot.logger.prompt_lock:
+                bot.logger.prompt_active = True
                 
         except KeyboardInterrupt:
             print("\nUse 'exit' to shutdown gracefully.")
-            bot.logger.prompt_active = True
+            with bot.logger.prompt_lock:
+                bot.logger.prompt_active = True
         except Exception as e:
-            print(f"⚠️ Error: {e}")
-            bot.logger.prompt_active = True
+            print(f"Error: {e}")
+            with bot.logger.prompt_lock:
+                bot.logger.prompt_active = True
 
 def print_help():
     """Print available console commands"""
@@ -446,7 +465,7 @@ def show_status():
             guild_name = guild.name[:45] + "..." if len(guild.name) > 45 else guild.name
             print(f"│   • {guild_name:<47} │")
         if len(bot.guilds) > 3:
-            print(f"│   ... and {len(bot.guilds) - 3} more{' ' * (40 - len(str(len(bot.guilds) - 3)))}│")
+            print(f"│   ... and {len(bot.guilds) - 3} more{'' * (40 - len(str(len(bot.guilds) - 3)))}│")
     
     # Latency
     latency = getattr(bot, 'latency', 0) * 1000
@@ -462,14 +481,14 @@ def show_status():
             name not in ['main', '__main__']):
             bot_modules.append(name)
     
-    print(f"│ Loaded modules: {len(bot_modules)}{' ' * (45 - len(str(len(bot_modules))))} │")
+    print(f"│ Loaded modules: {len(bot_modules)}{'' * (45 - len(str(len(bot_modules))))} │")
     
     # Development mode
-    mode = "🔧 DEVELOPMENT" if args.development else "⚙️ PRODUCTION"
+    mode = "DEVELOPMENT"if args.development else "PRODUCTION"
     print(f"│ Mode: {mode:<47} │")
     
     # Console commands info
-    print(f"│ Console commands: {len(bot.console_commands)}{' ' * (42 - len(str(len(bot.console_commands))))} │")
+    print(f"│ Console commands: {len(bot.console_commands)}{'' * (42 - len(str(len(bot.console_commands))))} │")
     
     # Log file info
     if hasattr(bot.logger, 'log_file'):
@@ -481,7 +500,7 @@ def show_status():
 def show_version():
     """Show version information"""
     version = bot.version if hasattr(bot, 'version') else "0.0.0.0"
-    print(f"\n🎯 Embot v{version}")
+    print(f"\n Embot v{version}")
     print(f"Python: {sys.version.split()[0]}")
     print(f"Discord.py: {discord.__version__}")
     print()
@@ -492,16 +511,16 @@ def setup_console_commands():
     async def handle_reload(args):
         """Reload modules command"""
         if not args.strip():
-            print("⚠️ Usage: reload <module_name>")
+            print("Usage: reload <module_name>")
             return
         
         module_name = args.strip()
-        file_path = Path(__file__).parent / "modules" / f"{module_name}.py"
+        file_path = Path(__file__).parent / "modules"/ f"{module_name}.py"
         if not file_path.exists():
-            print(f"⚠️ Module '{module_name}.py' not found in modules/")
+            print(f"Module '{module_name}.py' not found in modules/")
             return
         
-        print(f"🔄 Reloading {module_name}...")
+        print(f"Reloading {module_name}...")
         try:
             # First, get list of existing commands from this module
             existing_commands = {}
@@ -510,7 +529,7 @@ def setup_console_commands():
             else:
                 bot._module_commands = {}
             
-            # Remove existing commands from tree to prevent "already registered" errors
+            # Remove existing commands from tree to prevent "already registered"errors
             removed_count = 0
             if existing_commands:
                 for cmd_name in list(existing_commands.keys()):
@@ -519,7 +538,7 @@ def setup_console_commands():
                         removed_count += 1
                     except:
                         pass
-                print(f"  Removed {removed_count} existing command(s)")
+                print(f" Removed {removed_count} existing command(s)")
             
             # Reload the module
             if module_name in sys.modules:
@@ -543,14 +562,14 @@ def setup_console_commands():
                 bot._module_commands[module_name] = new_commands
                 
                 if new_commands:
-                    print(f"  Registered {len(new_commands)} command(s): {', '.join(new_commands.keys())}")
+                    print(f" Registered {len(new_commands)} command(s): {', '.join(new_commands.keys())}")
                 
-                print(f"✅ Module '{module_name}' reloaded successfully (commands updated, no sync needed)")
+                print(f"Module '{module_name}' reloaded successfully (commands updated, no sync needed)")
             else:
-                print(f"✅ Module '{module_name}' reloaded (no setup function)")
+                print(f"Module '{module_name}' reloaded (no setup function)")
                 
         except Exception as e:
-            print(f"❌ Failed to reload {module_name}: {e}")
+            print(f"Failed to reload {module_name}: {e}")
             import traceback
             traceback.print_exc()
     
@@ -566,30 +585,30 @@ def setup_console_commands():
                 name not in ['main', '__main__', 'Embot']):
                 bot_modules.append(name)
         
-        print(f"\n📦 Loaded Modules ({len(bot_modules)}):")
+        print(f"\n Loaded Modules ({len(bot_modules)}):")
         for module in sorted(bot_modules):
-            print(f"  • {module}")
+            print(f" • {module}")
         print()
     
     async def handle_logs(args):
         """Show log file information"""
         if hasattr(bot.logger, 'log_file') and bot.logger.log_file.exists():
             file_size = bot.logger.log_file.stat().st_size
-            print(f"\n📋 Current log file: {bot.logger.log_file.name}")
-            print(f"   Size: {file_size:,} bytes")
-            print(f"   Location: {bot.logger.log_file}")
+            print(f"\n Current log file: {bot.logger.log_file.name}")
+            print(f"  Size: {file_size:,} bytes")
+            print(f"  Location: {bot.logger.log_file}")
             
             # List other log files in data directory
             log_files = list(data_dir.glob("session_*.log"))
             if len(log_files) > 1:
-                print(f"\n📁 Other log files in {data_dir}:")
+                print(f"\n Other log files in {data_dir}:")
                 for log_file in sorted(log_files, key=lambda x: x.stat().st_mtime, reverse=True)[:5]:
                     if log_file != bot.logger.log_file:
                         size = log_file.stat().st_size
                         mtime = datetime.fromtimestamp(log_file.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-                        print(f"   • {log_file.name} ({size:,} bytes, {mtime})")
+                        print(f"  • {log_file.name} ({size:,} bytes, {mtime})")
         else:
-            print("❌ No log file found")
+            print("No log file found")
         print()
     
     register_console_command("reload", "Reload a specific module", handle_reload)
@@ -624,11 +643,39 @@ async def on_command_error(ctx, error):
             await ctx.send(f"⏳ I'm being rate limited. Please try again in {retry_after:.1f}s.")
         except Exception:
             pass
-    else:
-        bot.logger.error("MAIN", f"Command error in {ctx.command}", error)
-        await ctx.send(f"An error occurred: {str(error)}")
+        return
 
-# ==================== GRACEFUL SHUTDOWN HANDLER ====================
+    if isinstance(error, commands.MissingPermissions):
+        perms = ", ".join(error.missing_permissions)
+        try:
+            await ctx.send(f"You need the following permissions: {perms}", delete_after=10)
+        except Exception:
+            pass
+        return
+
+    if isinstance(error, commands.MissingRequiredArgument):
+        try:
+            await ctx.send(f"Missing required argument: `{error.param.name}`", delete_after=10)
+        except Exception:
+            pass
+        return
+
+    if isinstance(error, commands.BadArgument):
+        try:
+            await ctx.send(f"Bad argument: {error}", delete_after=10)
+        except Exception:
+            pass
+        return
+
+    if isinstance(error, commands.CommandOnCooldown):
+        try:
+            await ctx.send(f"Command on cooldown. Try again in {error.retry_after:.1f}s.", delete_after=10)
+        except Exception:
+            pass
+        return
+
+    bot.logger.error("MAIN", f"Command error in {ctx.command}", error)
+    await ctx.send(f"An error occurred: {str(error)}")
 
 async def shutdown_bot(signame):
     """Gracefully shutdown the bot"""
@@ -651,27 +698,7 @@ def handle_signal(signum, frame):
     loop = asyncio.get_event_loop()
     loop.create_task(shutdown_bot(signame))
 
-if __name__ == "__main__":
-    # Token stays in the environment — never put it in a config file
-    TOKEN = os.getenv('DISCORD_BOT_TOKEN')
-
-    if not TOKEN:
-        bot.logger.error("MAIN", "DISCORD_BOT_TOKEN environment variable not set!")
-        bot.logger.log("MAIN", "Please set your Discord bot token:")
-        bot.logger.log("MAIN", "export DISCORD_BOT_TOKEN='your-token-here'")
-        sys.exit(1)
-
-    # Attach config to bot so modules can read it via bot.config
-    bot.config = _cfg
-
-    home_guild_id = int(_cfg.get("home_guild_id") or 0)
-    if not home_guild_id:
-        bot.logger.error("MAIN", "home_guild_id is not set in config/embot.json!")
-        bot.logger.log("MAIN", f"Edit {_CONFIG_PATH} and set home_guild_id to your server's ID.")
-        sys.exit(1)
-
-    bot.home_guild_id = home_guild_id
-
+def _register_events():
     @bot.event
     async def on_guild_join(guild: discord.Guild):
         if guild.id != bot.home_guild_id:
@@ -681,20 +708,53 @@ if __name__ == "__main__":
                 bot.logger.log("MAIN", f"Successfully left unauthorized guild {guild.id}.")
             except Exception as e:
                 bot.logger.error("MAIN", f"Failed to leave unauthorized guild {guild.id}", e)
-    
+
+def run_bot(token):
+    """Start the bot with the given token. Callable from external launchers."""
+    global bot, _cfg, args, data_dir, script_dir
+
+    bot.config = _cfg
+
+    home_guild_id = int(_cfg.get("home_guild_id") or 0)
+    if not home_guild_id:
+        bot.logger.error("MAIN", "home_guild_id is not set in config/embot.json!")
+        bot.logger.log("MAIN", f"Edit {_CONFIG_PATH} and set home_guild_id to your server's ID.")
+        sys.exit(1)
+
+    bot.home_guild_id = home_guild_id
+    _register_events()
+
     try:
-        # Register signal handlers for graceful shutdown
-        signal.signal(signal.SIGTERM, handle_signal)
+        if hasattr(signal, 'SIGTERM'):
+            signal.signal(signal.SIGTERM, handle_signal)
         signal.signal(signal.SIGINT, handle_signal)
-        
-        # Setup console commands before starting
+
         setup_console_commands()
-        
-        mode_str = " with development mode" if args.development else ""
+
+        mode_str = "with development mode"if args.development else ""
         bot.logger.log("MAIN", f"Starting Embot v{load_version()}{mode_str}...")
         bot.logger.log("MAIN", f"Log files will be saved to: {data_dir}")
         bot.logger.log("MAIN", "Signal handlers registered for graceful shutdown")
-        bot.run(TOKEN)
+        bot.run(token)
     except Exception as e:
         bot.logger.error("MAIN", "Failed to start bot", e)
         sys.exit(1)
+
+if __name__ == "__main__":
+    TOKEN_FILE = (script_dir / "config" / "token") if (script_dir / "config" / "token").exists() else (script_dir / "token.json")
+    TOKEN = ""
+    if TOKEN_FILE.exists():
+        try:
+            import json
+            with open(TOKEN_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            TOKEN = data.get("bot_token", "")
+        except Exception:
+            TOKEN = TOKEN_FILE.read_text().strip()
+
+    if not TOKEN:
+        bot.logger.error("MAIN", f"Token file not found or empty: {TOKEN_FILE}")
+        bot.logger.log("MAIN", "Create config/token with your Discord bot token.")
+        sys.exit(1)
+
+    run_bot(TOKEN)

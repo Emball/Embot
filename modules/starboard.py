@@ -15,29 +15,19 @@ import asyncio
 
 MODULE_NAME = "STARBOARD"
 
-# ══════════════════════════════════════════════════════════════════════════════
 #  Path helpers (must be defined before CONFIG is loaded)
-# ══════════════════════════════════════════════════════════════════════════════
-
 def _script_dir() -> Path:
     return Path(__file__).parent.parent.absolute()  # modules/ → Embot/
 
-# ╔══════════════════════════════════════════════════════════════════════════╗
-# ║                         CONFIGURATION                                   ║
-# ╠══════════════════════════════════════════════════════════════════════════╣
-# ║  Edit config/starboard_config.json (created automatically on first run) ║
-# ║  then restart or `reload starboard` to apply changes.                   ║
-# ╚══════════════════════════════════════════════════════════════════════════╝
-
 def _load_starboard_config() -> dict:
     """Load config/starboard_config.json, falling back to defaults."""
-    config_path = _script_dir() / "config" / "starboard_config.json"
+    config_path = _script_dir() / "config"/ "starboard_config.json"
     defaults = {
         "channel_id": 0,     # Must be set in starboard_config.json
         "threshold": 3,
         "emoji": "⭐",
         "self_star": False,
-        "ignore_before": "",  # ISO date e.g. "2025-01-01" — messages before this are ignored
+        "ignore_before": "",  # ISO date e.g. "2025-01-01"— messages before this are ignored
     }
     if config_path.exists():
         try:
@@ -48,12 +38,10 @@ def _load_starboard_config() -> dict:
             print(f"[STARBOARD] Failed to load starboard_config.json: {e}")
     return defaults
 
-CONFIG = _load_starboard_config()
+CONFIG: dict = {}  # populated during setup() and refreshable
 
 def _db_path() -> Path:
-    return _script_dir() / "db" / "starboard.db"
-
-# ── SQLite schema ─────────────────────────────────────────────────────────
+    return _script_dir() / "db"/ "starboard.db"
 
 DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS starboard_entries (
@@ -76,7 +64,6 @@ def _get_conn() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL;")
     return conn
 
-
 def _init_db() -> None:
     """Initialise DB (create tables). Must only be called once at startup."""
     _db_path().parent.mkdir(parents=True, exist_ok=True)
@@ -85,12 +72,8 @@ def _init_db() -> None:
     conn.commit()
     conn.close()
 
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-# ── DB helpers ────────────────────────────────────────────────────────────
 
 def _get_entry(msg_key: str) -> dict | None:
     with _get_conn() as conn:
@@ -98,7 +81,6 @@ def _get_entry(msg_key: str) -> dict | None:
             "SELECT * FROM starboard_entries WHERE source_msg_id = ?", (msg_key,)
         ).fetchone()
     return dict(row) if row else None
-
 
 def _upsert_entry(msg_key: str, data: dict) -> None:
     with _get_conn() as conn:
@@ -118,17 +100,14 @@ def _upsert_entry(msg_key: str, data: dict) -> None:
         """, {**data, "source_msg_id": msg_key})
         conn.commit()
 
-
 def _delete_entry(msg_key: str) -> None:
     with _get_conn() as conn:
         conn.execute("DELETE FROM starboard_entries WHERE source_msg_id = ?", (msg_key,))
         conn.commit()
 
-
 def _entry_count() -> int:
     with _get_conn() as conn:
         return conn.execute("SELECT COUNT(*) FROM starboard_entries").fetchone()[0]
-
 
 # Per-message-id asyncio locks so unrelated messages never block each other.
 # LRU-capped to prevent unbounded memory growth (each unique message_id that
@@ -154,27 +133,21 @@ class _LRULockCache:
 
 _msg_locks = _LRULockCache(_MSG_LOCK_CAPACITY)
 
-
 def _get_msg_lock(msg_id: str) -> asyncio.Lock:
     return _msg_locks.get(msg_id)
 
-
-# ── Embed / content builders ──────────────────────────────────────────────
-
 def _star_label(count: int) -> str:
     if count >= 15:
-        return "🌟"
+        return ""
     elif count >= 10:
-        return "💫"
+        return ""
     elif count >= 5:
         return "⭐"
     else:
-        return "✨"
-
+        return ""
 
 def _build_content(count: int, source_channel: discord.TextChannel) -> str:
     return f"{_star_label(count)} **{count}** | {source_channel.mention}"
-
 
 def _build_embed(message: discord.Message, count: int) -> discord.Embed:
     embed = discord.Embed(
@@ -207,17 +180,14 @@ def _build_embed(message: discord.Message, count: int) -> discord.Embed:
     embed.set_footer(text=f"#{message.channel.name}")
     return embed
 
-
 def _count_reactions(message: discord.Message, emoji: str) -> int:
     for reaction in message.reactions:
         if str(reaction.emoji) == emoji:
             return reaction.count
     return 0
 
-
-# ── Core handler ──────────────────────────────────────────────────────────
-
 async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionActionEvent):
+    CONFIG.update(_load_starboard_config())
     if payload.guild_id is None:
         return
     if not CONFIG["channel_id"]:
@@ -258,7 +228,6 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
         count = _count_reactions(message, CONFIG["emoji"])
         entry = _get_entry(msg_key)
 
-        # ── Below threshold ──────────────────────────────────────────────
         if count < CONFIG["threshold"]:
             if entry:
                 try:
@@ -269,7 +238,6 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
                 _delete_entry(msg_key)
             return
 
-        # ── At or above threshold ────────────────────────────────────────
         content = _build_content(count, source_channel)
         embed = _build_embed(message, count)
 
@@ -324,14 +292,12 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
             })
             bot.logger.log(MODULE_NAME, f"Posted to starboard: msg {msg_key} by {message.author} ({count} stars)")
 
-
-# ── Setup ─────────────────────────────────────────────────────────────────
-
 def setup(bot: commands.Bot):
+    CONFIG.update(_load_starboard_config())
     _init_db()
 
     if not CONFIG["channel_id"]:
-        bot.logger.log(MODULE_NAME, "⚠️  channel_id is not set in CONFIG — starboard will not post until configured", "WARNING")
+        bot.logger.log(MODULE_NAME, " channel_id is not set in CONFIG — starboard will not post until configured", "WARNING")
     else:
         bot.logger.log(
             MODULE_NAME,

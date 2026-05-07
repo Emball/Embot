@@ -1,4 +1,3 @@
-# [file name]: community.py
 """
 Community module for Embot.
 Handles submission tracking (#projects / #artwork), voting/XP, Spotlight Friday,
@@ -35,25 +34,21 @@ except ImportError:
 
 MODULE_NAME = "COMMUNITY"
 
-# ─────────────────────────── CONSTANTS ───────────────────────────
-
 PROJECTS_CHANNEL_NAME  = "projects"
 ARTWORK_CHANNEL_NAME   = "artwork"
 ANNOUNCEMENTS_CHANNEL_NAME = "announcements"
 GENERAL_CHANNEL_NAME   = "general"
 
 VOTE_EMOJIS: dict[str, int] = {
-    "🔥": 5,
+    "": 5,
     "⭐": 10,
-    "😐": 0,
-    "🗑️": -5,
+    "": 0,
+    "": -5,
 }
-SETUP_EMOJIS = ["🔥", "😐", "🗑️"]   # Bot reacts with these on every submission
+SETUP_EMOJIS = ["", "", ""]   # Bot reacts with these on every submission
 
 MIN_DESCRIPTION_LENGTH = 10
 VERSION_REENTRY_DAYS   = 30          # Days before a group can re-enter spotlight
-
-# ─────────────────────────── HELPERS ────────────────────────────
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -90,22 +85,28 @@ def _normalize(content: str) -> str:
     """Normalise content for duplicate / version comparison."""
     text = _strip_version(content)
     text = re.sub(r'^#+\s*', '', text, flags=re.MULTILINE)
-    return re.sub(r'\s+', ' ', text).strip().lower()
+    return re.sub(r'\s+', '', text).strip().lower()
 
-async def _hash_url(url: str) -> Optional[str]:
+async def _hash_url(url: str, session: Optional["aiohttp.ClientSession"] = None) -> Optional[str]:
     if not HAS_AIOHTTP:
         return None
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as r:
+        async def _do_hash(sess):
+            async with sess.get(url, timeout=aiohttp.ClientTimeout(total=30)) as r:
                 if r.status != 200:
                     return None
                 return hashlib.sha256(await r.read()).hexdigest()
+
+        if session is not None:
+            return await _do_hash(session)
+        else:
+            async with aiohttp.ClientSession() as sess:
+                return await _do_hash(sess)
     except Exception:
         return None
 
-async def _hash_attachment(att: discord.Attachment) -> Optional[str]:
-    return await _hash_url(att.url)
+async def _hash_attachment(att: discord.Attachment, session: Optional["aiohttp.ClientSession"] = None) -> Optional[str]:
+    return await _hash_url(att.url, session)
 
 _SHORT_ID_CHARS = string.ascii_letters + string.digits  # 62 chars → ~56 trillion combos at 9 chars
 
@@ -125,17 +126,11 @@ def _display_name(bot, guild_id: int, user_id: int) -> str:
         pass
     return f"user:{user_id}"
 
-
-
-# ─────────────────────────── DATABASE ───────────────────────────
-
 class CommunityDB:
-    # ─────────────────────────────────────────────────────────────────────────
     # MIGRATION REGISTRY
     # Each entry is (version: int, description: str, sql: str).
     # To evolve the schema: append a new tuple — never edit existing ones.
     # The migration engine runs only the versions the current DB hasn't seen yet.
-    # ─────────────────────────────────────────────────────────────────────────
     _MIGRATIONS: list[tuple[int, str, str]] = [
         (1, "Initial schema", """
             CREATE TABLE IF NOT EXISTS community_config (
@@ -214,19 +209,14 @@ class CommunityDB:
             CREATE INDEX IF NOT EXISTS idx_hash ON file_hash_registry(hash);
         """),
 
-        # ── Future migrations go here ──────────────────────────────────────
         # Simple additions (new tables, indexes) can use plain SQL with IF NOT EXISTS.
-        #
         # For ALTER TABLE (adding columns), use a Python callable instead of a SQL
         # string — the engine supports both. The callable receives the connection and
         # the two helper methods so you can guard against re-runs:
-        #
         # (3, "Add channel_name to submissions", lambda c, col_ok, tbl_ok: (
         #     c.execute("ALTER TABLE submissions ADD COLUMN channel_name TEXT")
         #     if not col_ok(c, "submissions", "channel_name") else None
         # )),
-        # ──────────────────────────────────────────────────────────────────
-
         (2, "Add reactions_blocked flag to submissions", lambda c, col_ok, tbl_ok: (
             c.execute("ALTER TABLE submissions ADD COLUMN reactions_blocked INTEGER NOT NULL DEFAULT 0")
             if not col_ok(c, "submissions", "reactions_blocked") else None
@@ -238,7 +228,6 @@ class CommunityDB:
         self._lock = threading.Lock()
         self._init()
 
-    # ── connection ──
     def _conn(self) -> sqlite3.Connection:
         c = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=10)
         c.row_factory = sqlite3.Row
@@ -258,7 +247,6 @@ class CommunityDB:
                     (thread_id,)
                 ).fetchone()
 
-    # ── migration engine ──
     def _get_schema_version(self, c: sqlite3.Connection) -> int:
         """Read the current schema version from the migration_log table."""
         try:
@@ -324,11 +312,10 @@ class CommunityDB:
             except Exception as e:
                 print(
                     f"[COMMUNITY] [ERROR] Migration v{version} FAILED: {e}\n"
-                    f"  The database has NOT been modified for this migration."
+                    f" The database has NOT been modified for this migration."
                 )
                 raise  # Re-raise so the bot startup fails loudly rather than silently corrupting
 
-    # ── config ──
     def get_config(self, key: str, default=None):
         with self._conn() as c:
             row = c.execute("SELECT value FROM community_config WHERE key=?", (key,)).fetchone()
@@ -347,7 +334,6 @@ class CommunityDB:
             )
             c.commit()
 
-    # ── submissions ──
     def add_submission(self, sub: dict):
         with self._conn() as c:
             c.execute("""
@@ -368,7 +354,7 @@ class CommunityDB:
         if not kwargs:
             return
         kwargs["updated_at"] = _now_str()
-        set_clause = ", ".join(f"{k}=:{k}" for k in kwargs)
+        set_clause = ", ".join(f"{k}=:{k}"for k in kwargs)
         kwargs["id"] = sub_id
         with self._conn() as c:
             c.execute(f"UPDATE submissions SET {set_clause} WHERE id=:id", kwargs)
@@ -408,7 +394,6 @@ class CommunityDB:
                 (user_id, norm)
             ).fetchone()
 
-    # ── votes ──
     def get_vote(self, group_id: str, user_id: int) -> Optional[sqlite3.Row]:
         with self._conn() as c:
             return c.execute(
@@ -440,7 +425,6 @@ class CommunityDB:
                 c.commit()
             return old
 
-    # ── XP ──
     def add_xp(self, user_id: int, delta: float):
         with self._conn() as c:
             c.execute("""
@@ -460,7 +444,6 @@ class CommunityDB:
                 "SELECT user_id, xp FROM xp_ledger ORDER BY xp DESC LIMIT ?", (limit,)
             ).fetchall()
 
-    # ── thread XP ──
     def log_thread_xp(self, submitter_id: int, thread_id: int, message_id: int):
         """Returns True if this message is new (XP should be awarded)."""
         with self._conn() as c:
@@ -474,7 +457,6 @@ class CommunityDB:
             except sqlite3.IntegrityError:
                 return False
 
-    # ── spotlight ──
     def week_key(self) -> str:
         return _now().strftime("%Y-%W")
 
@@ -504,14 +486,13 @@ class CommunityDB:
         """
         params: list = [since]
         if exclude_user:
-            q += " AND s.user_id != ?"
+            q += "AND s.user_id != ?"
             params.append(exclude_user)
-        q += " GROUP BY s.group_id ORDER BY total_xp DESC LIMIT 1"
+        q += "GROUP BY s.group_id ORDER BY total_xp DESC LIMIT 1"
         with self._conn() as c:
             row = c.execute(q, params).fetchone()
             return row if (row and row["total_xp"] > 0) else None
 
-    # ── file hashes ──
     def register_hash(self, h: str, sub_id: str, user_id: int):
         with self._conn() as c:
             c.execute(
@@ -595,19 +576,14 @@ class CommunityDB:
                 LIMIT ?
             """, (cutoff, limit)).fetchall()
 
-
-# ─────────────────── COMMUNITY SYSTEM ───────────────────────────
-
 class CommunitySystem:
     def __init__(self, bot):
         self.bot = bot
-        db_path = Path(__file__).parent.parent / "db" / "community.db"
+        db_path = Path(__file__).parent.parent / "db"/ "community.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
         db_path.parent.mkdir(exist_ok=True)
         self.db = CommunityDB(db_path)
         self._submission_channel_ids: set[int] = set()
-
-    # ── logging helpers ──
 
     def clog(self, msg: str, level: str = "INFO"):
         self.bot.logger.log(MODULE_NAME, msg, level)
@@ -645,8 +621,6 @@ class CommunitySystem:
         except Exception as e:
             self.cerr("Failed to DM and failed to fallback to general", e)
 
-    # ── channel resolution ──
-
     def _get_submission_channel_names(self) -> List[str]:
         names = self.db.get_config("submission_channels")
         if names:
@@ -662,8 +636,6 @@ class CommunitySystem:
 
     def _is_submission_channel(self, channel_id: int) -> bool:
         return channel_id in self._submission_channel_ids
-
-    # ── submission validation ──
 
     def _validate(self, message: discord.Message) -> Optional[str]:
         """Return an error string if the message fails validation, else None."""
@@ -691,7 +663,7 @@ class CommunitySystem:
 
     def _invalid_embed(self, reason: str, channel_name: str) -> discord.Embed:
         e = discord.Embed(
-            title="⚠️ Submission Not Accepted",
+            title="Submission Not Accepted",
             description=(
                 f"Your post in **#{channel_name}** was removed because it didn't meet "
                 "the submission requirements.\n\n"
@@ -703,8 +675,6 @@ class CommunitySystem:
         )
         e.set_footer(text="Embot Community System")
         return e
-
-    # ── version logic ──
 
     def _next_version(self, existing_row: sqlite3.Row, new_content: str
                       ) -> Tuple[str, int, int]:
@@ -720,8 +690,6 @@ class CommunitySystem:
             maj = existing_row["version_major"] + 1
             min_ = 0
         return f"v{maj}.{min_}", maj, min_
-
-    # ── core submission handler ──
 
     async def handle_submission(self, message: discord.Message):
         """Process a message posted in a submission channel."""
@@ -751,18 +719,19 @@ class CommunitySystem:
 
         # Hash every attached file. Links are stored as plain text and matched by string equality.
         attachment_hashes: List[str] = []
-        for att in message.attachments:
-            h = await _hash_attachment(att)
-            if h:
-                attachment_hashes.append(h)
-            else:
-                self.clog(
-                    f"Could not hash attachment '{att.filename}' for {message.author} "
-                    f"(network error or unsupported type) — skipping hash for this file.",
-                    "WARNING"
-                )
+        if message.attachments:
+            async with aiohttp.ClientSession() as sess:
+                for att in message.attachments:
+                    h = await _hash_attachment(att, sess)
+                    if h:
+                        attachment_hashes.append(h)
+                    else:
+                        self.clog(
+                            f"Could not hash attachment '{att.filename}' for {message.author} "
+                            f"(network error or unsupported type) — skipping hash for this file.",
+                            "WARNING"
+                        )
 
-        # ── Duplicate detection — attachment hash check ──
         for h in attachment_hashes:
             owner = self.db.hash_owner(h, exclude_user=user_id)
             if owner:
@@ -774,7 +743,7 @@ class CommunitySystem:
                 owner_member = guild.get_member(owner["user_id"]) if guild else None
                 owner_name = owner_member.display_name if owner_member else f"another member"
                 embed = discord.Embed(
-                    title="🚨 Duplicate Submission Detected",
+                    title="Duplicate Submission Detected",
                     description=(
                         f"Your submission was removed because an attached file has already been "
                         f"submitted by **{owner_name}**. Please only submit your own original work."
@@ -790,7 +759,6 @@ class CommunitySystem:
                 )
                 return
 
-        # ── Duplicate detection — exact URL check (catches page links like SoundCloud/YouTube) ──
         for link in links:
             owner_row = self.db.link_owner(link, exclude_user=user_id)
             if owner_row:
@@ -802,7 +770,7 @@ class CommunitySystem:
                 owner_member = guild.get_member(owner_row["user_id"]) if guild else None
                 owner_name = owner_member.display_name if owner_member else "another member"
                 embed = discord.Embed(
-                    title="🚨 Duplicate Link Detected",
+                    title="Duplicate Link Detected",
                     description=(
                         f"Your submission was removed because that link has already been "
                         f"submitted by **{owner_name}**. Please only submit your own original work."
@@ -815,7 +783,6 @@ class CommunitySystem:
                 self.clog(f"Duplicate link from {message.author.display_name} — matches submission by {owner_name}.")
                 return
 
-        # ── Version detection ──
         existing = self.db.find_existing(user_id, norm)
         is_new_version = False
         group_id: str
@@ -839,9 +806,9 @@ class CommunitySystem:
                 if sub["is_current"]:
                     self.db.update_submission(sub["id"], is_current=0)
 
-            action = "re-entered the voting cycle as" if reenter_ok else "registered as"
+            action = "re-entered the voting cycle as"if reenter_ok else "registered as"
             dm_version_embed = discord.Embed(
-                title="📦 New Version Detected",
+                title="New Version Detected",
                 description=(
                     f"Your project **{title or 'Untitled'}** was {action} **{version_str}**.\n\n"
                     "Your previous vote history has been carried over, and voters who already "
@@ -880,7 +847,6 @@ class CommunitySystem:
             if linked_group and linked_group != group_id:
                 group_id = linked_group
 
-        # ── Create submission record ──
         # file_hashes stores attachment hashes only. Links are stored as plain text in `links`.
         sub_id = _short_id()
         sub_record = {
@@ -910,7 +876,6 @@ class CommunitySystem:
         for h in attachment_hashes:
             self.db.register_hash(h, sub_id, user_id)
 
-        # ── Create discussion thread ──
         thread_name = (title or "Submission")[:100]
         try:
             thread = await message.create_thread(name=thread_name, auto_archive_duration=10080)
@@ -919,20 +884,17 @@ class CommunitySystem:
             self.cerr("Failed to create submission thread", e)
             thread = None
 
-        # ── Add setup reactions ──
         for emoji in SETUP_EMOJIS:
             try:
                 await message.add_reaction(emoji)
             except Exception as e:
                 self.cerr(f"Failed to add reaction {emoji}", e)
 
-        # ── DM version notice if applicable ──
         if dm_version_embed:
             await self._dm_or_ping(message.author, dm_version_embed)
 
-        # ── Bot logs ──
         log_embed = discord.Embed(
-            title="📥 New Submission",
+            title="New Submission",
             description=(
                 f"**Author:** {message.author.mention}\n"
                 f"**Channel:** {message.channel.mention}\n"
@@ -951,13 +913,11 @@ class CommunitySystem:
             f"({version_str}, submission={group_id})"
         )
 
-    # ── edit handler ──
-
     async def handle_edit(self, payload: discord.RawMessageUpdateEvent):
         """Sync an edited submission. Skip if older than 30 days."""
         # Discord fires on_raw_message_edit for its own URL embed unfurling.
         # These payloads only contain 'embeds' and/or 'flags' — no actual user edit.
-        # Skip them to avoid spamming false "Synced edit (changed=False)" log lines.
+        # Skip them to avoid spamming false "Synced edit (changed=False)"log lines.
         _embed_only_keys = {"embeds", "flags", "id", "channel_id", "guild_id"}
         if payload.data and set(payload.data.keys()) <= _embed_only_keys:
             return
@@ -987,16 +947,18 @@ class CommunitySystem:
 
         # Hash each attachment individually — links are matched as plain text
         new_att_hashes: List[str] = []
-        for att in message.attachments:
-            h = await _hash_attachment(att)
-            if h:
-                new_att_hashes.append(h)
-            else:
-                self.clog(
-                    f"Edit: Could not hash attachment '{att.filename}' "
-                    f"(submission {sub['id']}) — skipping.",
-                    "WARNING"
-                )
+        if message.attachments:
+            async with aiohttp.ClientSession() as sess:
+                for att in message.attachments:
+                    h = await _hash_attachment(att, sess)
+                    if h:
+                        new_att_hashes.append(h)
+                    else:
+                        self.clog(
+                            f"Edit: Could not hash attachment '{att.filename}' "
+                            f"(submission {sub['id']}) — skipping.",
+                            "WARNING"
+                        )
 
         # Check validity
         err = self._validate(message)
@@ -1042,7 +1004,7 @@ class CommunitySystem:
                 member = guild.get_member(sub["user_id"])
                 if member:
                     dm = discord.Embed(
-                        title="📦 Version Tag Detected in Edit",
+                        title="Version Tag Detected in Edit",
                         description=(
                             f"Your submission **{_extract_title(new_content) or 'Untitled'}** "
                             f"has been updated to **v{maj}.{min_}** based on the version tag "
@@ -1089,8 +1051,6 @@ class CommunitySystem:
             )
         else:
             self.clog(f"Synced edit for submission {sub['id']} (content updated)")
-
-    # ── voting ──
 
     async def handle_reaction_add(self, payload: discord.RawReactionActionEvent):
         if payload.user_id == self.bot.user.id:
@@ -1152,9 +1112,9 @@ class CommunitySystem:
         self.db.add_xp(submitter, xp_delta)
         voter_name = _display_name(self.bot, payload.guild_id, voter_id)
         submitter_name = _display_name(self.bot, payload.guild_id, submitter)
-        vote_action = "changed" if old_vote else "cast"
+        vote_action = "changed"if old_vote else "cast"
         change_detail = (
-            f" (was {old_vote['emoji']} {old_vote['xp_delta']:+d} XP)" if old_vote else ""
+            f"(was {old_vote['emoji']} {old_vote['xp_delta']:+d} XP)"if old_vote else ""
         )
         self.clog(
             f"Vote {vote_action}: {emoji} ({xp_delta:+d} XP) by {voter_name} "
@@ -1187,8 +1147,6 @@ class CommunitySystem:
             f"on submission {group_id}"
         )
 
-    # ── submission deletion ──
-
     async def handle_delete(self, payload: discord.RawMessageDeleteEvent):
         """Mark a submission as deleted when its Discord message is removed."""
         sub = self.db.by_message(payload.message_id)
@@ -1217,8 +1175,6 @@ class CommunitySystem:
                     f"as current for group {sub['group_id']} after deletion of previous current"
                 )
 
-    # ── thread reply XP ──
-
     async def handle_thread_message(self, message: discord.Message):
         """Award 0.1 XP to the submission author when someone replies in its thread."""
         if message.author.bot:
@@ -1238,8 +1194,6 @@ class CommunitySystem:
 
         if self.db.log_thread_xp(submitter_id, channel.id, message.id):
             self.db.add_xp(submitter_id, 0.1)
-
-    # ── submission integrity ──
 
     async def check_submission_integrity(self, guild: discord.Guild):
         """
@@ -1302,8 +1256,6 @@ class CommunitySystem:
                         "WARNING"
                     )
 
-    # ── Spotlight Friday ──
-
     async def run_spotlight(self, guild: discord.Guild):
         if self.db.spotlight_ran_this_week():
             return
@@ -1329,7 +1281,7 @@ class CommunitySystem:
         name   = member.display_name if member else f"User {top['user_id']}"
 
         embed = discord.Embed(
-            title="🌟 Spotlight Friday",
+            title="Spotlight Friday",
             description=(
                 f"This week's featured submission is **{top['title'] or 'Untitled'}** "
                 f"by {member.mention if member else name}!\n\n"
@@ -1360,16 +1312,12 @@ class CommunitySystem:
             f"({int(top['total_xp'])} XP)"
         )
 
-
-# ─────────────────────────── SETUP ──────────────────────────────
-
 def setup(bot):
     # (db directory is created by db_path reference above)
 
     cs = CommunitySystem(bot)
     bot._community_system = cs
 
-    # ── Determine if it's Spotlight time (Friday 15:00 CST) ──
     def _is_spotlight_time() -> bool:
         now = _now()
         if CST:
@@ -1385,7 +1333,6 @@ def setup(bot):
                 local = local.replace(tzinfo=timezone.utc)
         return local.weekday() == 4 and local.hour == 15
 
-    # ── Event: new messages ──
     @bot.listen()
     async def on_message(message: discord.Message):
         if not message.guild or message.author.bot:
@@ -1402,35 +1349,30 @@ def setup(bot):
         # Thread reply XP
         await cs.handle_thread_message(message)
 
-    # ── Event: message edits ──
     @bot.listen()
     async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent):
         if not payload.guild_id:
             return
         await cs.handle_edit(payload)
 
-    # ── Event: reaction add ──
     @bot.listen()
     async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         if not payload.guild_id:
             return
         await cs.handle_reaction_add(payload)
 
-    # ── Event: reaction remove ──
     @bot.listen()
     async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
         if not payload.guild_id:
             return
         await cs.handle_reaction_remove(payload)
 
-    # ── Event: message delete ──
     @bot.listen()
     async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
         if not payload.guild_id:
             return
         await cs.handle_delete(payload)
 
-    # ── Task: Spotlight Friday (checks every minute) ──
     @tasks.loop(minutes=1)
     async def spotlight_task():
         try:
@@ -1447,7 +1389,6 @@ def setup(bot):
 
     spotlight_task.start()
 
-    # ── Task: Submission integrity check (every 10 minutes) ──
     @tasks.loop(minutes=10)
     async def integrity_task():
         try:
@@ -1461,8 +1402,6 @@ def setup(bot):
         await bot.wait_until_ready()
 
     integrity_task.start()
-
-    # ── Slash commands ──
 
     @bot.tree.command(name="community_setup", description="[Admin] Configure community submission channels")
     @app_commands.describe(
@@ -1502,13 +1441,13 @@ def setup(bot):
                 cs.db.set_config("spotlight_exclude_user_id", uid)
                 changed.append(f"Spotlight excluded user ID: `{uid}`")
             except ValueError:
-                await interaction.response.send_message("❌ Invalid user ID.", ephemeral=True)
+                await interaction.response.send_message("Invalid user ID.", ephemeral=True)
                 return
 
         cs._refresh_channel_ids(interaction.guild)
 
         embed = discord.Embed(
-            title="✅ Community Configuration Updated",
+            title="Community Configuration Updated",
             description="\n".join(changed) if changed else "No changes made.",
             color=0x2ecc71
         )
@@ -1537,13 +1476,13 @@ def setup(bot):
             return
 
         embed = discord.Embed(
-            title="🏆 Community XP Leaderboard",
+            title="Community XP Leaderboard",
             color=0xf1c40f,
             timestamp=_now()
         )
         guild = interaction.guild
         lines = []
-        medals = ["🥇", "🥈", "🥉"]
+        medals = ["", "", ""]
         for i, row in enumerate(rows):
             member = guild.get_member(row["user_id"])
             name   = member.display_name if member else f"User {row['user_id']}"
@@ -1560,12 +1499,12 @@ def setup(bot):
         try:
             mid = int(message_id)
         except ValueError:
-            await interaction.response.send_message("❌ Invalid message ID.", ephemeral=True)
+            await interaction.response.send_message("Invalid message ID.", ephemeral=True)
             return
 
         sub = cs.db.by_message(mid)
         if not sub:
-            await interaction.response.send_message("❌ No submission found for that message ID.", ephemeral=True)
+            await interaction.response.send_message("No submission found for that message ID.", ephemeral=True)
             return
 
         versions = cs.db.by_group(sub["group_id"])
@@ -1581,7 +1520,7 @@ def setup(bot):
         total_xp = int(xp_row["total"]) if xp_row else 0
 
         embed = discord.Embed(
-            title=f"📋 Submission: {sub['title'] or 'Untitled'}",
+            title=f"Submission: {sub['title'] or 'Untitled'}",
             color=0x5865f2,
             timestamp=_now()
         )
@@ -1607,7 +1546,7 @@ def setup(bot):
         member = interaction.guild.get_member(top["user_id"])
         name   = member.display_name if member else f"User {top['user_id']}"
         embed  = discord.Embed(
-            title="🌟 Spotlight Preview",
+            title="Spotlight Preview",
             description=f"**{top['title'] or 'Untitled'}** by {member.mention if member else name}\n"
                         f"Score: **{int(top['total_xp'])} XP** this week",
             color=0xf1c40f,
@@ -1620,6 +1559,6 @@ def setup(bot):
     async def spotlight_run(interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         await cs.run_spotlight(interaction.guild)
-        await interaction.followup.send("✅ Spotlight task executed.", ephemeral=True)
+        await interaction.followup.send("Spotlight task executed.", ephemeral=True)
 
     cs.clog("Community module setup complete")

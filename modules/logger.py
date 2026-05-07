@@ -1,4 +1,3 @@
-# [file name]: logger.py
 import discord
 from discord import app_commands
 from datetime import datetime, timezone
@@ -41,21 +40,8 @@ class EventLogger:
         if config is None:
             config = self.config
         try:
-            import tempfile
-            # Write to temporary file first
-            temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(self.config_file), suffix='.tmp')
-            try:
-                with os.fdopen(temp_fd, 'w') as f:
-                    json.dump(config, f, indent=2)
-                # Atomic replace
-                os.replace(temp_path, self.config_file)
-            except:
-                # Clean up temp file if something fails
-                try:
-                    os.unlink(temp_path)
-                except:
-                    pass
-                raise
+            from _utils import atomic_json_write
+            atomic_json_write(self.config_file, config)
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to save logger config", e)
     
@@ -105,10 +91,7 @@ class EventLogger:
             self.bot.logger.error(MODULE_NAME, f"Failed to send log to {channel.name}", e)
         return None
     
-    # ====================
     # MESSAGE EVENTS
-    # ====================
-    
     async def log_message_delete(self, message, rehosted_files: list = None):
         """Log when a message is deleted. rehosted_files is a list of dicts with 'filename' and 'data' (bytes)."""
         if not self.config.get("log_message_deletes"):
@@ -152,7 +135,7 @@ class EventLogger:
                 if verdict.blocked and not verdict.safe_files:
                     # All files blocked — log embed only with a note
                     embed.add_field(
-                        name="⚠️ Attachment(s) Withheld",
+                        name="Attachment(s) Withheld",
                         value="One or more files were blocked by MediaScanner. The server owner has been alerted.",
                         inline=False,
                     )
@@ -176,7 +159,7 @@ class EventLogger:
             elif other_files:
                 # Has audio/other — send files above embed with a note
                 has_audio = any(f['filename'].lower().endswith(audio_exts) for f in other_files)
-                label = "audio" if has_audio else "file"
+                label = "audio"if has_audio else "file"
                 embed.add_field(name="Attachment", value=f"*{label} hosted above*", inline=False)
                 # Send files first, then embed as a follow-up so files appear above
                 try:
@@ -263,10 +246,7 @@ class EventLogger:
         
         await self.log_to_channel(channel, embed)
     
-    # ====================
     # MEMBER EVENTS
-    # ====================
-    
     async def log_member_join(self, member):
         """Log when a member joins"""
         if not self.config.get("log_member_joins"):
@@ -412,10 +392,7 @@ class EventLogger:
             embed.set_footer(text=f"User ID: {after.id}")
             await self.log_to_channel(channel, embed)
     
-    # ====================
     # ROLE EVENTS
-    # ====================
-    
     async def log_role_create(self, role):
         """Log when a role is created"""
         if not self.config.get("log_role_changes"):
@@ -425,8 +402,8 @@ class EventLogger:
         if not channel:
             return
         
-        hoisted = "Yes" if role.hoist else "No"
-        mentionable = "Yes" if role.mentionable else "No"
+        hoisted = "Yes"if role.hoist else "No"
+        mentionable = "Yes"if role.mentionable else "No"
         
         description = (
             f"**Role {role.mention} was created**\n\n"
@@ -498,7 +475,7 @@ class EventLogger:
         if not changes:
             return
         
-        description = f"**Role {after.mention} was updated**\n\n" + "\n".join(changes)
+        description = f"**Role {after.mention} was updated**\n\n"+ "\n".join(changes)
         
         embed = discord.Embed(
             description=description,
@@ -510,10 +487,7 @@ class EventLogger:
         
         await self.log_to_channel(channel, embed)
     
-    # ====================
     # CHANNEL EVENTS
-    # ====================
-    
     async def log_channel_create(self, channel):
         """Log when a channel is created"""
         if not self.config.get("log_channel_changes"):
@@ -585,7 +559,7 @@ class EventLogger:
         if not changes:
             return
         
-        description = f"**Channel {after.mention} was updated**\n\n" + "\n".join(changes)
+        description = f"**Channel {after.mention} was updated**\n\n"+ "\n".join(changes)
         
         embed = discord.Embed(
             description=description,
@@ -597,10 +571,7 @@ class EventLogger:
         
         await self.log_to_channel(channel, embed)
     
-    # ====================
     # VOICE EVENTS
-    # ====================
-    
     async def log_voice_state_update(self, member, before, after):
         """Log voice channel joins/leaves/moves"""
         if not self.config.get("log_voice_changes"):
@@ -664,10 +635,7 @@ class EventLogger:
             embed.set_footer(text=f"User ID: {member.id}")
             await self.log_to_channel(channel, embed)
     
-    # ====================
     # INVITE EVENTS
-    # ====================
-    
     async def log_invite_create(self, invite):
         """Log when an invite is created"""
         if not self.config.get("log_invite_changes"):
@@ -678,7 +646,7 @@ class EventLogger:
             return
         
         # Build description
-        max_uses = "Unlimited" if not invite.max_uses else str(invite.max_uses)
+        max_uses = "Unlimited"if not invite.max_uses else str(invite.max_uses)
         
         if invite.max_age:
             hours = invite.max_age // 3600
@@ -737,10 +705,7 @@ class EventLogger:
         
         await self.log_to_channel(channel, embed)
 
-    # ====================
     # MODERATION ACTION LOGGING
-    # ====================
-
     async def log_ban(self, guild: discord.Guild, user: discord.User,
                       moderator: discord.Member, reason: str,
                       delete_days: int, action_channel: discord.TextChannel) -> Optional[int]:
@@ -851,7 +816,7 @@ class EventLogger:
         """Log a purge action to bot-logs. Returns message ID."""
         channel = self.get_bot_logs_channel(guild)
         desc = f"**{count}** message{'s' if count != 1 else ''} deleted"
-        desc += f" from {target_user.mention}" if target_user else f" in {action_channel.mention}"
+        desc += f"from {target_user.mention}"if target_user else f"in {action_channel.mention}"
         embed = discord.Embed(
             title="Messages Purged",
             description=desc,
@@ -936,7 +901,6 @@ class EventLogger:
         embed.add_field(name="Reason", value=reason, inline=False)
         embed.add_field(name="Channel", value=trigger_channel.mention, inline=True)
         await self.log_to_channel(channel, embed)
-
 
 def setup(bot):
     """Setup function called by main.py"""
@@ -1050,7 +1014,7 @@ def setup(bot):
         event_logger.save_config()
         
         embed = discord.Embed(
-            title="✅ Join Logs Channel Set",
+            title="Join Logs Channel Set",
             description=f"Join/leave logs will now be sent to {channel.mention}",
             color=0x2ecc71
         )
@@ -1067,7 +1031,7 @@ def setup(bot):
         event_logger.save_config()
         
         embed = discord.Embed(
-            title="✅ Bot Logs Channel Set",
+            title="Bot Logs Channel Set",
             description=f"Bot/moderation logs will now be sent to {channel.mention}",
             color=0x2ecc71
         )
@@ -1083,7 +1047,7 @@ def setup(bot):
         bot_channel = event_logger.get_bot_logs_channel(interaction.guild)
         
         embed = discord.Embed(
-            title="📋 Logging Configuration",
+            title="Logging Configuration",
             color=0x5865f2,
             timestamp=datetime.now(timezone.utc)
         )
@@ -1096,16 +1060,16 @@ def setup(bot):
         )
         
         settings = [
-            f"{'✅' if event_logger.config.get('log_message_edits') else '❌'} Message Edits",
-            f"{'✅' if event_logger.config.get('log_message_deletes') else '❌'} Message Deletes",
-            f"{'✅' if event_logger.config.get('log_member_joins') else '❌'} Member Joins",
-            f"{'✅' if event_logger.config.get('log_member_leaves') else '❌'} Member Leaves",
-            f"{'✅' if event_logger.config.get('log_bans') else '❌'} Bans/Unbans",
-            f"{'✅' if event_logger.config.get('log_role_changes') else '❌'} Role Changes",
-            f"{'✅' if event_logger.config.get('log_channel_changes') else '❌'} Channel Changes",
-            f"{'✅' if event_logger.config.get('log_voice_changes') else '❌'} Voice Changes",
-            f"{'✅' if event_logger.config.get('log_invite_changes') else '❌'} Invite Changes",
-            f"{'✅' if event_logger.config.get('log_nickname_changes') else '❌'} Nickname Changes"
+            f"{'' if event_logger.config.get('log_message_edits') else ''} Message Edits",
+            f"{'' if event_logger.config.get('log_message_deletes') else ''} Message Deletes",
+            f"{'' if event_logger.config.get('log_member_joins') else ''} Member Joins",
+            f"{'' if event_logger.config.get('log_member_leaves') else ''} Member Leaves",
+            f"{'' if event_logger.config.get('log_bans') else ''} Bans/Unbans",
+            f"{'' if event_logger.config.get('log_role_changes') else ''} Role Changes",
+            f"{'' if event_logger.config.get('log_channel_changes') else ''} Channel Changes",
+            f"{'' if event_logger.config.get('log_voice_changes') else ''} Voice Changes",
+            f"{'' if event_logger.config.get('log_invite_changes') else ''} Invite Changes",
+            f"{'' if event_logger.config.get('log_nickname_changes') else ''} Nickname Changes"
         ]
         
         embed.add_field(name="Enabled Features", value="\n".join(settings), inline=False)

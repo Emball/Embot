@@ -76,12 +76,25 @@ def setup(bot):
     import time as _time
     _user_last_used: dict = {}
     _COOLDOWN_SECONDS = 5
+    _cleanup_counter = 0
+    _CLEANUP_INTERVAL = 100
+    _CLEANUP_TTL = 3600
 
     @bot.tree.command(name="magicemball", description="Ask the magic Emball a yes/no question")
     @app_commands.describe(question="Your question for the magic 8-ball")
     async def magic_emball(interaction: discord.Interaction, question: str):
         """Magic Emball with smart logic and regex-based detection"""
+        nonlocal _cleanup_counter
         try:
+            # Periodic TTL cleanup of stale entries
+            _cleanup_counter += 1
+            if _cleanup_counter >= _CLEANUP_INTERVAL:
+                _cleanup_counter = 0
+                now_ts = _time.monotonic()
+                stale = [uid for uid, ts in _user_last_used.items() if now_ts - ts > _CLEANUP_TTL]
+                for uid in stale:
+                    del _user_last_used[uid]
+
             # Per-user rate limiting
             uid = interaction.user.id
             now = _time.monotonic()
@@ -113,7 +126,7 @@ def setup(bot):
                 bot.logger.log(MODULE_NAME, "Using random response")
 
             embed = discord.Embed(
-                title="🎱 Magic Emball",
+                title="Magic Emball",
                 color=discord.Color.purple()
             )
             embed.add_field(name="Question", value=question, inline=False)
@@ -127,7 +140,7 @@ def setup(bot):
             bot.logger.error(MODULE_NAME, "Magic emball command failed", e)
             try:
                 await interaction.response.send_message(
-                    "❌ The magic is broken... try again later.",
+                    "The magic is broken... try again later.",
                     ephemeral=True
                 )
             except:

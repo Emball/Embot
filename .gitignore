@@ -3,7 +3,17 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-__init__.py
+
+# ── Virtual environments ───────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+Winpython64*/
+
+# ── Project tooling (managed externally) ───────────────────────────────────────
+.git/
+pyproject.toml
+uv.lock
 
 # ── Runtime data (never commit) ───────────────────────────────────────────────
 logs/
@@ -17,23 +27,22 @@ temp/
 
 # ── Secrets & environment ─────────────────────────────────────────────────────
 .env
-config.ini
-Winpython64*/
-venv/
-env/
+config/token
+config/token.json
+config/token.example
+token.json
+.python-version
 
 # ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# ── Config files ARE committed — do not add *.json here ──────────────────────
-# config/moderation.json    ← user settings, word lists, rules content
-# config/links_config.json  ← link commands
-# config/logger_config.json ← logging toggles and channel IDs
-# config/version_data.json  ← version history
-# _version.py               ← current version string
+# ── Temp / helper scripts (not part of the bot) ───────────────────────────────
+clean_comments.py
+check_broken.py
+fix_spaces.py
 
-# Exclude any JSON that ends up outside config/ (e.g. temp exports)
+# ── JSON safety net (config/*.json is committed explicitly) ───────────────────
 *.json
 !config/*.json

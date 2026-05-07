@@ -14,7 +14,7 @@ import difflib
 MODULE_NAME = "DEV"
 
 # Configuration
-VERSION_DATA_FILE = str(Path(__file__).parent.parent / "cache" / "dev" / "version_data.json")
+VERSION_DATA_FILE = str(Path(__file__).parent.parent / "cache"/ "dev"/ "version_data.json")
 TRACKED_EXTENSIONS = ['.py']
 # Exclude files that the bot writes to (prevents self-triggering)
 EXCLUDE_FILES = [
@@ -38,7 +38,6 @@ MAJOR_THRESHOLD = 100       # Major features (minor version bump)
 MINOR_THRESHOLD = 20        # Minor features (patch version bump)
 PATCH_THRESHOLD = 1         # Bug fixes (micro version bump)
 
-
 class DevManager:
     """Manages development mode: versioning, hot-reloading, and GitHub integration"""
     
@@ -46,34 +45,100 @@ class DevManager:
         self.bot = bot
         self.version_history = []
         self.file_hashes = {}
-        self.file_contents = {}  # Store actual file contents for diff
+        self.file_contents = {}
         self.last_check_time = None
         self.git_enabled = False
-        self.auto_commit_enabled = True  # DEFAULT TO ENABLED as requested
-        self.auto_versioning_enabled = True  # Default to enabled
+        self.auto_commit_enabled = True
+        self.auto_versioning_enabled = True
         
-        # Check Git availability
         self._check_git()
         
-        # Load existing version data
+        if self.git_enabled:
+            self._auto_setup_git()
+        
         self._load_version_data()
-        
-        # Create .gitignore if it doesn't exist
         self._ensure_gitignore()
-        
-        # Log development features
         self._log_dev_features()
+    
+    def _auto_setup_git(self):
+        root = Path(__file__).parent.parent
+        token_candidates = [root / "config" / "token", root / "token.json"]
+        token_path = next((p for p in token_candidates if p.exists()), None)
+        if not token_path:
+            return
+        try:
+            with open(token_path, 'r', encoding='utf-8') as f:
+                creds = json.load(f)
+            gh_token = creds.get("github_token", "")
+            gh_email = creds.get("github_email", "")
+            gh_name = creds.get("github_name", "")
+            if not gh_token:
+                return
+            self.bot.logger.log(MODULE_NAME, "Auto-configuring git from config/token...")
+            self._auto_configure_git(gh_token, gh_email, gh_name)
+        except Exception as e:
+            self.bot.logger.log(MODULE_NAME, f"Git auto-setup skipped: {e}", "WARNING")
+    
+    def _auto_configure_git(self, token, email, name):
+        git_env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GCM_INTERACTIVE': 'never'}
+
+        if name:
+            subprocess.run(['git', 'config', 'user.name', name],
+                           capture_output=True, text=True, timeout=5, env=git_env)
+        if email:
+            subprocess.run(['git', 'config', 'user.email', email],
+                           capture_output=True, text=True, timeout=5, env=git_env)
+
+        subprocess.run(['git', 'config', 'core.askPass', ''],
+                       capture_output=True, text=True, timeout=5, env=git_env)
+
+        # Use credential.store — write token to ~/.git-credentials, no URL embedding
+        subprocess.run(['git', 'config', 'credential.helper', 'store'],
+                       capture_output=True, text=True, timeout=5, env=git_env)
+
+        creds_file = Path.home() / '.git-credentials'
+        cred_line = f"https://git:{token}@github.com\n"
+        creds_file.parent.mkdir(parents=True, exist_ok=True)
+        existing = set()
+        if creds_file.exists():
+            existing = set(creds_file.read_text().splitlines())
+        existing.add(cred_line.strip())
+        creds_file.write_text('\n'.join(existing) + '\n')
+
+        # Ensure remote URL is clean (no token embedded — avoids GH013)
+        try:
+            r = subprocess.run(['git', 'remote', 'get-url', 'origin'],
+                               capture_output=True, text=True, timeout=5, env=git_env)
+            current_url = r.stdout.strip()
+            if r.returncode == 0 and 'github.com' in current_url:
+                parts = current_url.split('@')[-1] if '@' in current_url else current_url
+                parts = parts.replace('https://', '').replace('http://', '')
+                parts = parts.removesuffix('.git').split('/')
+                if len(parts) >= 2:
+                    owner, repo = parts[-2], parts[-1]
+                else:
+                    owner, repo = (name or 'Emball'), Path.cwd().name
+            else:
+                owner, repo = (name or 'Emball'), Path.cwd().name
+        except Exception:
+            owner, repo = (name or 'Emball'), Path.cwd().name
+
+        clean_url = f"https://github.com/{owner}/{repo}.git"
+        subprocess.run(['git', 'remote', 'set-url', 'origin', clean_url],
+                       capture_output=True, text=True, timeout=5, env=git_env)
+
+        self.bot.logger.log(MODULE_NAME, "Git auto-configured: user, email, credential store, clean remote")
     
     def _log_dev_features(self):
         """Log development-specific features that are enabled"""
-        self.bot.logger.log(MODULE_NAME, "🔧 Development features enabled:")
-        self.bot.logger.log(MODULE_NAME, "  • Automatic versioning (MAJOR.MINOR.PATCH.MICRO)")
-        self.bot.logger.log(MODULE_NAME, "  • Git integration (commit & push)")
-        self.bot.logger.log(MODULE_NAME, "  • Development console commands")
-        self.bot.logger.log(MODULE_NAME, f"  • Auto-commit: {'ENABLED' if self.auto_commit_enabled else 'DISABLED'}")
-        self.bot.logger.log(MODULE_NAME, f"  • Auto-versioning: {'ENABLED' if self.auto_versioning_enabled else 'DISABLED'}")
-        self.bot.logger.log(MODULE_NAME, f"  • Excluded files: {', '.join(EXCLUDE_FILES)}")
-        self.bot.logger.log(MODULE_NAME, f"  • Excluded dirs: {', '.join(EXCLUDE_DIRS)}")
+        self.bot.logger.log(MODULE_NAME, "Development features enabled:")
+        self.bot.logger.log(MODULE_NAME, " • Automatic versioning (MAJOR.MINOR.PATCH.MICRO)")
+        self.bot.logger.log(MODULE_NAME, " • Git integration (commit & push)")
+        self.bot.logger.log(MODULE_NAME, " • Development console commands")
+        self.bot.logger.log(MODULE_NAME, f" • Auto-commit: {'ENABLED' if self.auto_commit_enabled else 'DISABLED'}")
+        self.bot.logger.log(MODULE_NAME, f" • Auto-versioning: {'ENABLED' if self.auto_versioning_enabled else 'DISABLED'}")
+        self.bot.logger.log(MODULE_NAME, f" • Excluded files: {', '.join(EXCLUDE_FILES)}")
+        self.bot.logger.log(MODULE_NAME, f" • Excluded dirs: {', '.join(EXCLUDE_DIRS)}")
     
     def _check_git(self):
         """Check if Git is available and repository is initialized"""
@@ -107,55 +172,24 @@ class DevManager:
             self.bot.logger.log(MODULE_NAME, "Git not available", "WARNING")
     
     def setup_github_with_token(self, token):
-        """Setup GitHub token using git credential helper (secure)"""
+        """Setup GitHub using token from config/token or token.json."""
         try:
-            # Get repo owner/name
-            repo_path = self.get_repo_owner_and_name()
-            if repo_path == "owner/repo":
-                self.bot.logger.log(MODULE_NAME, "Could not detect repository, using current directory", "WARNING")
-                current_dir = Path.cwd().name
-                repo_path = f"{self.get_github_username()}/{current_dir}"
-            
-            # Set remote URL WITHOUT token (use HTTPS)
-            repo_url = f"https://github.com/{repo_path}.git"
-            
-            self.bot.logger.log(MODULE_NAME, f"Setting remote URL: {repo_url}")
-            
-            result = subprocess.run(
-                ['git', 'remote', 'set-url', 'origin', repo_url],
-                capture_output=True, text=True, timeout=10
-            )
-            
-            if result.returncode != 0:
-                # Try adding remote if it doesn't exist
-                result = subprocess.run(
-                    ['git', 'remote', 'add', 'origin', repo_url],
-                    capture_output=True, text=True, timeout=10
-                )
-                if result.returncode != 0:
-                    self.bot.logger.error(MODULE_NAME, f"Failed to set remote: {result.stderr}")
-                    return False
-            
-            # Configure git credential helper to store token securely
-            subprocess.run(
-                ['git', 'config', 'credential.helper', 'store'],
-                capture_output=True, text=True, timeout=10
-            )
-            
-            # Store credentials using git credential helper
-            credential_input = f"protocol=https\nhost=github.com\nusername=git\npassword={token}\n\n"
-            subprocess.run(
-                ['git', 'credential', 'approve'],
-                input=credential_input,
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            
-            self.bot.logger.log(MODULE_NAME, "✅ GitHub token configured securely using credential helper!")
+            root = Path(__file__).parent.parent
+            token_candidates = [root / "config" / "token", root / "token.json"]
+            token_path = next((p for p in token_candidates if p.exists()), None)
+            if token_path:
+                with open(token_path, 'r', encoding='utf-8') as f:
+                    creds = json.load(f)
+                gh_token = creds.get("github_token", token)
+                gh_email = creds.get("github_email", "")
+                gh_name = creds.get("github_name", "")
+            else:
+                gh_token = token
+                gh_email = ""
+                gh_name = ""
+            self._auto_configure_git(gh_token, gh_email, gh_name)
             self.git_enabled = True
             return True
-                
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "GitHub token setup failed", e)
             return False
@@ -180,9 +214,9 @@ class DevManager:
                         # git@github.com:owner/repo.git
                         if ':' in url:
                             return url.split(':')[1].replace('.git', '')
-            return "owner/repo"  # Fallback
+            return "owner/repo" # Fallback
         except:
-            return "owner/repo"  # Fallback
+            return "owner/repo" # Fallback
     
     def get_github_username(self):
         """Try to get GitHub username from git config"""
@@ -195,7 +229,7 @@ class DevManager:
                 return result.stdout.strip()
         except:
             pass
-        return "your_username"  # Fallback
+        return "your_username" # Fallback
     
     def _ensure_gitignore(self):
         """Create a comprehensive .gitignore if it doesn't exist"""
@@ -294,7 +328,6 @@ icons/
                     content = f.read()
                 
                 # Extract version using regex to avoid importing
-                import re
                 match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
                 if match:
                     return match.group(1)
@@ -417,7 +450,7 @@ icons/
         tracked_count = 0
         excluded_count = 0
         
-        for file_path in bot_dir.glob('*.py'):
+        for file_path in bot_dir.glob('**/*.py'):
             if file_path.is_file():
                 if self._should_exclude_file(file_path):
                     excluded_count += 1
@@ -554,9 +587,9 @@ icons/
             for file, details in changes['details'].items():
                 if details['type'] == 'modified':
                     self.bot.logger.log(MODULE_NAME, 
-                        f"  {file}: +{details['added']} -{details['removed']} = {details['lines_changed']} lines")
+                        f" {file}: +{details['added']} -{details['removed']} = {details['lines_changed']} lines")
                 else:
-                    self.bot.logger.log(MODULE_NAME, f"  {file}: {details['type']}")
+                    self.bot.logger.log(MODULE_NAME, f" {file}: {details['type']}")
             
             # Only update version if auto-versioning is enabled
             if not self.auto_versioning_enabled:
@@ -613,9 +646,9 @@ icons/
                 self.bot.logger.log(MODULE_NAME, "Auto-committing changes...")
                 success = await self.git_commit_and_push(commit_message, history_entry)
                 if success:
-                    self.bot.logger.log(MODULE_NAME, "✅ Auto-commit successful")
+                    self.bot.logger.log(MODULE_NAME, "Auto-commit successful")
                 else:
-                    self.bot.logger.log(MODULE_NAME, "⚠️ Auto-commit completed with warnings", "WARNING")
+                    self.bot.logger.log(MODULE_NAME, "Auto-commit completed with warnings", "WARNING")
             
             return history_entry
             
@@ -628,6 +661,8 @@ icons/
         if not self.git_enabled:
             self.bot.logger.log(MODULE_NAME, "Git not enabled", "WARNING")
             return False
+        
+        git_env = {**__import__('os').environ, 'GIT_TERMINAL_PROMPT': '0', 'GCM_INTERACTIVE': 'never'}
         
         try:
             current_version = self._get_version_from_file()
@@ -643,7 +678,8 @@ icons/
             result = await asyncio.create_subprocess_exec(
                 'git', 'add', '-A',
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                env=git_env
             )
             await result.wait()
             
@@ -651,13 +687,14 @@ icons/
             result = await asyncio.create_subprocess_exec(
                 'git', 'commit', '-m', message,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                env=git_env
             )
             stdout, stderr = await result.communicate()
             
             if result.returncode != 0:
                 error = stderr.decode()
-                if "nothing to commit" in error:
+                if "nothing to commit"in error:
                     self.bot.logger.log(MODULE_NAME, "Nothing to commit")
                     return False
                 else:
@@ -666,18 +703,30 @@ icons/
             
             self.bot.logger.log(MODULE_NAME, f"Committed: {message}")
             
-            # Push
-            result = await asyncio.create_subprocess_exec(
-                'git', 'push',
+            # Pull with rebase to sync remote changes, then push
+            pull = await asyncio.create_subprocess_exec(
+                'git', 'pull', '--rebase', 'origin', 'main',
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                env=git_env
             )
-            stdout, stderr = await result.communicate()
+            pull_stdout, pull_stderr = await pull.communicate()
+            if pull.returncode != 0:
+                err = pull_stderr.decode().strip()
+                self.bot.logger.log(MODULE_NAME, f"Git pull skipped (no upstream or rebase failed): {err.split(chr(10))[0]}", "WARNING")
             
-            if result.returncode != 0:
+            push = await asyncio.create_subprocess_exec(
+                'git', 'push', 'origin', 'main',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=git_env
+            )
+            stdout, stderr = await push.communicate()
+            
+            if push.returncode != 0:
                 error = stderr.decode()
-                self.bot.logger.error(MODULE_NAME, f"Git push failed: {error}")
-                return False
+                self.bot.logger.log(MODULE_NAME, f"Git push failed: {error.strip().split(chr(10))[0]}", "WARNING")
+                return True
             
             self.bot.logger.log(MODULE_NAME, "Pushed to remote repository")
             return True
@@ -713,10 +762,9 @@ icons/
         
         return info
 
-
 def setup(bot, register_console_command):
     """Setup function called by main bot to initialize this module"""
-    bot.logger.log(MODULE_NAME, "🔧 Setting up DEV module (development mode)")
+    bot.logger.log(MODULE_NAME, "Setting up DEV module (development mode)")
     
     dev_manager = DevManager(bot)
     bot.dev_manager = dev_manager
@@ -736,14 +784,14 @@ def setup(bot, register_console_command):
         bot.version = dev_manager._get_version_from_file()
         
         if version_entry:
-            bot.logger.log(MODULE_NAME, f"✅ Version updated to v{version_entry['version']}")
+            bot.logger.log(MODULE_NAME, f"Version updated to v{version_entry['version']}")
             
             if dev_manager.auto_commit_enabled and dev_manager.git_enabled:
-                bot.logger.log(MODULE_NAME, f"✅ Auto-committed v{bot.version} on startup")
+                bot.logger.log(MODULE_NAME, f"Auto-committed v{bot.version} on startup")
             else:
-                bot.logger.log(MODULE_NAME, "ℹ️ Auto-commit not enabled or Git not available")
+                bot.logger.log(MODULE_NAME, "ℹ Auto-commit not enabled or Git not available")
         else:
-            bot.logger.log(MODULE_NAME, f"✅ Version check complete - v{bot.version} (no changes)")
+            bot.logger.log(MODULE_NAME, f"Version check complete - v{bot.version} (no changes)")
     
     asyncio.create_task(initial_version_check())
     
@@ -753,7 +801,7 @@ def setup(bot, register_console_command):
         async def handle_commit(args):
             """Commit and push changes"""
             message = args.strip() if args.strip() else None
-            print("📦 Checking for changes...")
+            print("Checking for changes...")
             
             # Only check version on manual commit if auto-versioning is enabled
             version_entry = None
@@ -761,19 +809,19 @@ def setup(bot, register_console_command):
                 version_entry = await dev_manager.check_and_update_version(auto_commit=False)
                 
                 if version_entry:
-                    print(f"✅ Version updated to v{version_entry['version']}")
+                    print(f"Version updated to v{version_entry['version']}")
             else:
-                print("ℹ️ Auto-versioning disabled, using current version")
+                print("ℹ Auto-versioning disabled, using current version")
             
-            print("📤 Committing and pushing...")
+            print("Committing and pushing...")
             
             success = await dev_manager.git_commit_and_push(message, version_entry)
             
             if success:
                 current_version = dev_manager._get_version_from_file()
-                print(f"✅ Changes committed and pushed! (v{current_version})")
+                print(f"Changes committed and pushed! (v{current_version})")
             else:
-                print("⚠️ Git operation completed with warnings (check logs)")
+                print("Git operation completed with warnings (check logs)")
         
         async def handle_changelog(args):
             """Show version changelog"""
@@ -786,28 +834,28 @@ def setup(bot, register_console_command):
             
             recent = dev_manager.version_history[-count:]
             
-            print(f"\n📋 Changelog (last {count} versions):\n")
+            print(f"\n Changelog (last {count} versions):\n")
             
             for entry in reversed(recent):
                 timestamp = datetime.fromisoformat(entry['timestamp'])
                 
                 type_emoji = {
-                    'BREAKING': '🔴',
+                    'BREAKING': '',
                     'MAJOR': '🟠',
                     'MINOR': '🟡',
                     'MICRO': '🟢'
-                }.get(entry['change_type'], '⚪')
+                }.get(entry['change_type'], '')
                 
                 print(f"{type_emoji} v{entry['version']} ({entry['change_type']}) - {timestamp.strftime('%Y-%m-%d %H:%M')}")
-                print(f"   From v{entry['previous_version']}")
-                print(f"   {entry['files_changed']} files, {entry['lines_changed']} lines changed")
+                print(f"  From v{entry['previous_version']}")
+                print(f"  {entry['files_changed']} files, {entry['lines_changed']} lines changed")
                 
                 if entry.get('details'):
                     for file, details in entry['details'].items():
                         if details['type'] == 'modified':
-                            print(f"   • {file}: +{details.get('added', 0)} -{details.get('removed', 0)}")
+                            print(f"  • {file}: +{details.get('added', 0)} -{details.get('removed', 0)}")
                         else:
-                            print(f"   • {file}: {details['type']}")
+                            print(f"  • {file}: {details['type']}")
                 print()
         
         async def handle_git(args):
@@ -862,32 +910,32 @@ def setup(bot, register_console_command):
                 print("└─────────────────────────────────────────────────────────────────────┘\n")
                 
             except Exception as e:
-                print(f"❌ Error getting git status: {e}")
+                print(f"Error getting git status: {e}")
         
         async def handle_files(args):
             """Show tracked files"""
             files = sorted(dev_manager.file_hashes.keys())
             
-            print(f"\n📁 Tracked Files ({len(files)}):\n")
+            print(f"\n Tracked Files ({len(files)}):\n")
             for file in files:
-                print(f"  • {file}")
+                print(f" • {file}")
             print()
         
         async def handle_setup_github(args):
             """Setup GitHub with token - usage: setup_github YOUR_TOKEN"""
             token = args.strip()
             if not token:
-                print("❌ Usage: setup_github YOUR_GITHUB_TOKEN")
-                print("   Get token from: GitHub → Settings → Developer settings → Personal access tokens")
+                print("Usage: setup_github YOUR_GITHUB_TOKEN")
+                print("  Get token from: GitHub → Settings → Developer settings → Personal access tokens")
                 return
             
-            print("🔄 Setting up GitHub with token...")
+            print("Setting up GitHub with token...")
             success = dev_manager.setup_github_with_token(token)
             
             if success:
-                print("✅ GitHub configured! Try 'commit test' now.")
+                print("GitHub configured! Try 'commit test' now.")
             else:
-                print("❌ Failed to setup GitHub. Check logs.")
+                print("Failed to setup GitHub. Check logs.")
         
         async def handle_dev_status(args):
             """Show development module status"""
@@ -899,9 +947,9 @@ def setup(bot, register_console_command):
             print(f"│ Current Version: v{info['current_version']:<44} │")
             print(f"│ Tracked Files: {info['tracked_files']:<47} │")
             print(f"│ Total Versions: {info['total_versions']:<46} │")
-            print(f"│ Git Enabled: {'✅ Yes' if info['git_enabled'] else '❌ No':<49} │")
-            print(f"│ Auto-Commit: {'✅ Enabled' if info['auto_commit_enabled'] else '❌ Disabled':<45} │")
-            print(f"│ Auto-Versioning: {'✅ Enabled' if info['auto_versioning_enabled'] else '❌ Disabled':<41} │")
+            print(f"│ Git Enabled: {' Yes' if info['git_enabled'] else ' No':<49} │")
+            print(f"│ Auto-Commit: {' Enabled' if info['auto_commit_enabled'] else ' Disabled':<45} │")
+            print(f"│ Auto-Versioning: {' Enabled' if info['auto_versioning_enabled'] else ' Disabled':<41} │")
             
             if info['last_update']:
                 last = info['last_update']
@@ -911,13 +959,13 @@ def setup(bot, register_console_command):
                 
                 version_text = f"v{last['version']} ({last['type']})"
                 spacing = 36 - len(version_text)
-                print(f"│   Version: {version_text}{' ' * spacing} │")
+                print(f"│   Version: {version_text}{'' * spacing} │")
                 
-                print(f"│   Time: {timestamp}{' ' * (50 - len(timestamp))} │")
+                print(f"│   Time: {timestamp}{'' * (50 - len(timestamp))} │")
                 
                 files_text = f"{last['files_changed']}, Lines: {last['lines_changed']}"
                 spacing = 35 - len(files_text)
-                print(f"│   Files: {files_text}{' ' * spacing} │")
+                print(f"│   Files: {files_text}{'' * spacing} │")
             
             print("└─────────────────────────────────────────────────────────────────────┘\n")
         
@@ -925,15 +973,15 @@ def setup(bot, register_console_command):
             """Toggle auto-commit functionality"""
             if args.strip().lower() in ['on', 'enable', 'true', '1']:
                 dev_manager.auto_commit_enabled = True
-                print("✅ Auto-commit ENABLED")
+                print("Auto-commit ENABLED")
             elif args.strip().lower() in ['off', 'disable', 'false', '0']:
                 dev_manager.auto_commit_enabled = False
-                print("✅ Auto-commit DISABLED")
+                print("Auto-commit DISABLED")
             else:
                 # Toggle if no args
                 dev_manager.auto_commit_enabled = not dev_manager.auto_commit_enabled
-                status = "ENABLED" if dev_manager.auto_commit_enabled else "DISABLED"
-                print(f"✅ Auto-commit {status}")
+                status = "ENABLED"if dev_manager.auto_commit_enabled else "DISABLED"
+                print(f"Auto-commit {status}")
             
             dev_manager.bot.logger.log(MODULE_NAME, f"Auto-commit {status}")
         
@@ -941,15 +989,15 @@ def setup(bot, register_console_command):
             """Toggle auto-versioning functionality"""
             if args.strip().lower() in ['on', 'enable', 'true', '1']:
                 dev_manager.auto_versioning_enabled = True
-                print("✅ Auto-versioning ENABLED")
+                print("Auto-versioning ENABLED")
             elif args.strip().lower() in ['off', 'disable', 'false', '0']:
                 dev_manager.auto_versioning_enabled = False
-                print("✅ Auto-versioning DISABLED")
+                print("Auto-versioning DISABLED")
             else:
                 # Toggle if no args
                 dev_manager.auto_versioning_enabled = not dev_manager.auto_versioning_enabled
-                status = "ENABLED" if dev_manager.auto_versioning_enabled else "DISABLED"
-                print(f"✅ Auto-versioning {status}")
+                status = "ENABLED"if dev_manager.auto_versioning_enabled else "DISABLED"
+                print(f"Auto-versioning {status}")
             
             dev_manager.bot.logger.log(MODULE_NAME, f"Auto-versioning {status}")
         
@@ -965,4 +1013,4 @@ def setup(bot, register_console_command):
     
     setup_dev_console_commands()
     
-    bot.logger.log(MODULE_NAME, f"✅ DEV module setup complete - v{bot.version}")
+    bot.logger.log(MODULE_NAME, f"DEV module setup complete - v{bot.version}")

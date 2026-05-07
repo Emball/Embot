@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# start.sh — Linux launcher for Embot
-# Uses uv for fast, cache-efficient dependency management.
-# Requires: uv (https://github.com/astral-sh/uv)
+# start.sh — Professional Linux launcher for Embot
+# Automatically initializes uv project structure and manages symlinked dependencies.
 
 set -euo pipefail
 
+# ── Configuration ────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_DIR="$SCRIPT_DIR/.venv"
+export PATH="$HOME/.local/bin:$PATH"
+
+# Force uv to use symlinks from the global cache (~/.cache/uv).
+export UV_LINK_MODE="symlink"
 
 # ── Load .env if present ─────────────────────────────────────────────────────
 if [ -f "$SCRIPT_DIR/.env" ]; then
@@ -15,32 +18,38 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     set +a
 fi
 
-# ── Ensure ~/.local/bin is on PATH (needed if uv was just installed) ────────
-export PATH="$HOME/.local/bin:$PATH"
-
-# ── Install uv if missing ───────────────────────────────────────────────────
+# ── Ensure uv is installed ───────────────────────────────────────────────────
 if ! command -v uv &>/dev/null; then
-    echo "[start.sh] uv not found — installing via official installer..."
+    echo "[start.sh] uv not found — installing..."
     curl -LsSf https://astral.sh/uv/install.sh | sh
     export PATH="$HOME/.local/bin:$PATH"
 fi
 
-# ── Create venv pinned to Python 3.11 ───────────────────────────────────────
-if [ ! -d "$VENV_DIR" ]; then
-    echo "[start.sh] Creating virtual environment with Python 3.11..."
-    uv venv "$VENV_DIR" --python 3.11
+# ── Project Initialization (Option 2) ────────────────────────────────────────
+# If pyproject.toml doesn't exist, initialize it and migrate requirements.txt
+if [ ! -f "$SCRIPT_DIR/pyproject.toml" ]; then
+    echo "[start.sh] Initializing new uv project..."
+    cd "$SCRIPT_DIR"
+    uv init --python 3.11 --no-workspace
+    
+    if [ -f "$SCRIPT_DIR/requirements.txt" ]; then
+        echo "[start.sh] Migrating dependencies from requirements.txt..."
+        uv add -r requirements.txt
+    fi
 fi
 
-# ── Install / sync dependencies from requirements.txt ───────────────────────
+# ── Sync Environment ─────────────────────────────────────────────────────────
+# This ensures .venv is up to date and symlinked.
 echo "[start.sh] Syncing dependencies..."
-uv pip install \
-    --python "$VENV_DIR/bin/python" \
-    -r "$SCRIPT_DIR/requirements.txt"
+cd "$SCRIPT_DIR"
+uv sync --frozen --python 3.11
 
 # ── Restart loop ─────────────────────────────────────────────────────────────
-echo "[start.sh] Starting Embot (press Ctrl+C twice to quit the loop)..."
+echo "[start.sh] Starting Embot (press Ctrl+C to stop)..."
 while true; do
-    "$VENV_DIR/bin/python" "$SCRIPT_DIR/Embot.py" -dev || true
+    # Runs Embot.py using the project's managed Python 3.11 environment.
+    uv run python "$SCRIPT_DIR/Embot.py" -dev || true
+    
     echo
     echo "[start.sh] Embot exited. Press Enter to restart, or Ctrl+C to stop."
     read -r || break

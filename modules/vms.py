@@ -28,8 +28,6 @@ from discord.ext import tasks
 
 MODULE_NAME = "VMS"
 
-# ==================== CONFIGURATION ====================
-
 GENERAL_CHANNEL_NAME      = "general"
 PING_COOLDOWN_SECONDS     = 10
 VM_COOLDOWN_DAYS          = 7
@@ -39,7 +37,7 @@ DELETE_AFTER_DAYS         = 365
 ARCHIVE_JOB_INTERVAL_HOURS = 24
 RANDOM_PLAYBACK_MIN       = 40
 RANDOM_PLAYBACK_MAX       = 80
-WHISPER_MODEL_SIZE        = "base"    # tiny / base / small / medium / large
+WHISPER_MODEL_SIZE        = "base"   # tiny / base / small / medium / large
 BACKFILL_DAYS             = 365
 
 # Emball guild ID — VMs from here are stored persistently; all others are ephemeral
@@ -69,21 +67,19 @@ STOP_WORDS = {
     'got', 'im', 'yeah', 'okay', 'ok', 'also', 'lol', 'um', 'uh', 'oh', 'yes',
 }
 
-# ==================== PATH HELPERS ====================
-
 def _script_dir() -> Path:
     """Root Embot/ directory (two levels up from modules/)."""
     return Path(__file__).parent.parent.absolute()
 
 def _vms_dir() -> Path:
     """Voice message audio files live here."""
-    p = _script_dir() / "cache" / "vms"
+    p = _script_dir() / "cache"/ "vms"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 def _archive_dir() -> Path:
     """Archived voice messages live here."""
-    p = _script_dir() / "cache" / "vms" / "archive"
+    p = _script_dir() / "cache"/ "vms"/ "archive"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -95,23 +91,21 @@ def _db_path() -> str:
 
 def _broken_dir() -> Path:
     """Corrupt or unprocessable voice message files are moved here."""
-    p = _script_dir() / "cache" / "vms" / "broken"
+    p = _script_dir() / "cache"/ "vms"/ "broken"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 def _whisper_model_dir() -> Path:
     """Whisper model cache directory."""
-    p = _script_dir() / "cache" / "whisper_models"
+    p = _script_dir() / "cache"/ "whisper_models"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 def _temp_vms_dir() -> Path:
     """Temp dir for external (non-Emball) VM transcriptions — files deleted after use."""
-    p = _script_dir() / "cache" / "vms" / "temp"
+    p = _script_dir() / "cache"/ "vms"/ "temp"
     p.mkdir(parents=True, exist_ok=True)
     return p
-
-# ==================== NAMING CONVENTION ====================
 
 def _vm_canonical_name(
     vm_id: int,
@@ -128,7 +122,6 @@ def _vm_canonical_name(
         date_str  = datetime.fromtimestamp(created_at).strftime("%m-%d-%y")
         return f"vm_{safe_user}_{message_id}_{date_str}.ogg"
     return f"vm_{vm_id}.ogg"
-
 
 def _parse_vm_filename(filename: str) -> dict:
     """Parse metadata out of a canonical VM filename. Returns dict with username, message_id, created_at, vm_id."""
@@ -155,7 +148,6 @@ def _parse_vm_filename(filename: str) -> dict:
 
     return {"username": None, "message_id": None, "created_at": None, "vm_id": None}
 
-
 def _rename_to_canonical(
     current_path: Path,
     vm_id: int,
@@ -177,9 +169,6 @@ def _rename_to_canonical(
         return canonical
     current_path.rename(canonical)
     return canonical
-
-
-# ==================== DATABASE SETUP ====================
 
 DB_SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -240,7 +229,6 @@ CREATE TABLE IF NOT EXISTS vms_transcription_disabled (
 );
 """
 
-
 def _init_db(db_path: str):
     conn = sqlite3.connect(db_path)
     try:
@@ -248,8 +236,6 @@ def _init_db(db_path: str):
         conn.commit()
     finally:
         conn.close()
-
-# ==================== WAVEFORM GENERATION ====================
 
 def _generate_waveform(filepath: str, num_samples: int = WAVEFORM_SAMPLES) -> str:
     """Generate base64 waveform bytes for Discord. Tries soundfile, then pydub, then fallback."""
@@ -275,7 +261,6 @@ def _generate_waveform(filepath: str, num_samples: int = WAVEFORM_SAMPLES) -> st
 
     return _fallback_waveform(num_samples)
 
-
 def _downsample_to_waveform(pcm: np.ndarray, num_samples: int) -> list:
     """Compress float32 PCM to num_samples amplitude bytes using RMS per chunk."""
     if len(pcm) == 0:
@@ -297,7 +282,6 @@ def _downsample_to_waveform(pcm: np.ndarray, num_samples: int) -> list:
         smoothed[i] = int((result[i - 1] + result[i] * 2 + result[i + 1]) / 4)
     return smoothed
 
-
 def _fallback_waveform(num_samples: int) -> str:
     """Bell-curve waveform fallback when audio libraries are unavailable."""
     t = np.linspace(0, np.pi, num_samples)
@@ -305,8 +289,6 @@ def _fallback_waveform(num_samples: int) -> str:
     noise = np.random.uniform(0.5, 1.0, num_samples)
     wave = (envelope * noise * 200).astype(np.uint8)
     return base64.b64encode(bytes(wave)).decode()
-
-# ==================== AUDIO HELPERS ====================
 
 def _get_ogg_duration(filepath: str) -> float:
     """Best-effort OGG duration extraction."""
@@ -324,12 +306,10 @@ def _get_ogg_duration(filepath: str) -> float:
         pass
     return 0.0
 
-# ==================== WHISPER LIFECYCLE MANAGER ====================
 # Load on first use, unload after WHISPER_IDLE_UNLOAD_SECS of inactivity,
 # explicitly free CUDA memory on unload.  All access goes through _WhisperManager.
 
 WHISPER_IDLE_UNLOAD_SECS = int(os.getenv("WHISPER_IDLE_UNLOAD_SECS", "300"))  # 5 min default
-
 
 class _WhisperManager:
     """
@@ -351,8 +331,6 @@ class _WhisperManager:
         self._last_use    = 0.0            # epoch seconds of last touch()
         self._watchdog: Optional[threading.Thread] = None
         self._stop_watchdog = threading.Event()
-
-    # ── Public API ──────────────────────────────────────────────────────────
 
     def load(self, model_size: Optional[str] = None) -> Optional[object]:
         """Return the loaded model, loading it now if needed. Returns None on failure."""
@@ -395,15 +373,13 @@ class _WhisperManager:
         """Stop the idle-unload watchdog (called on bot shutdown)."""
         self._stop_watchdog.set()
 
-    # ── Internal ────────────────────────────────────────────────────────────
-
     def _load_locked(self, size: str):
         """Must be called with self._lock held."""
         try:
             import whisper
             try:
                 import torch
-                self._device = "cuda" if torch.cuda.is_available() else "cpu"
+                self._device = "cuda"if torch.cuda.is_available() else "cpu"
             except ImportError:
                 self._device = "cpu"
             model_dir = str(_whisper_model_dir())
@@ -457,16 +433,13 @@ class _WhisperManager:
                 if idle >= WHISPER_IDLE_UNLOAD_SECS:
                     self._unload_locked()
 
-
 # Module-level singleton — all code that previously used _whisper_model
 # directly now goes through this object.
 _whisper_mgr = _WhisperManager()
 
-# ── Compatibility shims for code that calls _load_whisper() / _whisper_lock ──
 # These preserve the existing call-sites without any further changes.
 
 _whisper_lock = _whisper_mgr._lock   # BulkProcessor/backfill use this for size-swap guard
-
 
 def _load_whisper() -> Optional[object]:
     """Load Whisper via the lifecycle manager (lazy, idle-unloading)."""
@@ -491,7 +464,6 @@ def _quarantine_file(filepath: str) -> str:
         print(f"[{MODULE_NAME}] Failed to quarantine {src}: {exc}")
         return src.name
 
-
 def _is_audio_valid(audio) -> bool:
     """Return False if the audio array is None, empty, or all-zero (silent)."""
     if audio is None or len(audio) == 0:
@@ -499,7 +471,6 @@ def _is_audio_valid(audio) -> bool:
     if len(audio) < 1600:          # < 0.1 s at 16 kHz
         return False
     return True
-
 
 def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool, str]:
     """
@@ -548,7 +519,7 @@ def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool, 
 
         except Exception as exc:
             exc_str = str(exc)
-            if "Linear(" in exc_str or "in_features" in exc_str:
+            if "Linear("in exc_str or "in_features"in exc_str:
                 print(f"[{MODULE_NAME}] Whisper internal error ({filepath}) — quarantining")
             else:
                 print(f"[{MODULE_NAME}] Transcription error ({filepath}): {exc_str} — quarantining")
@@ -562,7 +533,6 @@ def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool, 
         except Exception:
             pass
         return None, 0.0, "", True, broken_name
-
 
 def _transcribe_with_model(filepath: str, model_size: str) -> Tuple[Optional[str], float, bool]:
     """Transcribe with a specific model size. Returns (transcript, duration, is_broken). Does not touch the DB."""
@@ -589,9 +559,6 @@ def _transcribe_with_model(filepath: str, model_size: str) -> Tuple[Optional[str
 
     except Exception:
         return None, 0.0, True
-
-
-# ==================== DISCORD VOICE MESSAGE API ====================
 
 async def _send_voice_message(
     bot_token: str,
@@ -670,11 +637,16 @@ async def _send_voice_message(
         print(f"[{MODULE_NAME}] Message send error: {exc}")
         return None
 
+def _is_cuda() -> bool:
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except ImportError:
+        return False
 
-# ==================== BULK PROCESSOR ====================
+_CUDA_AVAILABLE: bool = _is_cuda()
 
 _BULK_SENTINEL = object()   # pushed into the work queue to signal "no more files"
-
 
 class BulkProcessor:
     """
@@ -690,8 +662,6 @@ class BulkProcessor:
         self.stop_event  = stop_event
         self._work_q: queue.Queue = queue.Queue()
         self._thread: Optional[threading.Thread] = None
-
-    # ── Public API ──────────────────────────────────────────────────────────
 
     def start(self, initial_files: Optional[List[Tuple[int, str]]] = None):
         """Start the worker thread, optionally pre-seeding with (vm_id, filepath) pairs."""
@@ -731,8 +701,6 @@ class BulkProcessor:
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
-
-    # ── Internal ────────────────────────────────────────────────────────────
 
     def _run(self):
         """Sequential worker loop. Blocks on queue, processes files, commits results one-by-one."""
@@ -837,19 +805,6 @@ class BulkProcessor:
             self.logger.log(MODULE_NAME,
                 f"BulkProcessor: broken-batch commit error — {exc}", "ERROR")
 
-
-def _is_cuda() -> bool:
-    try:
-        import torch
-        return torch.cuda.is_available()
-    except ImportError:
-        return False
-
-_CUDA_AVAILABLE: bool = _is_cuda()
-
-
-# ==================== VMS MANAGER ====================
-
 class VMSManager:
     """Central manager: storage, transcription queuing, archiving, playback."""
 
@@ -887,7 +842,7 @@ class VMSManager:
         conn = self._conn()
         try:
             cols = [row[1] for row in conn.execute("PRAGMA table_info(vms)").fetchall()]
-            if "filepath" not in cols:
+            if "filepath"not in cols:
                 return
 
             self.bot.logger.log(MODULE_NAME,
@@ -1020,7 +975,7 @@ class VMSManager:
                         if reply_to is not None:
                             try:
                                 await reply_to.reply(
-                                    "> ⚠️ This voice message appears to be corrupt and could not be transcribed."
+                                    ">  This voice message appears to be corrupt and could not be transcribed."
                                 )
                             except Exception:
                                 pass
@@ -1260,7 +1215,7 @@ class VMSManager:
             conn.close()
 
         if new_counts:
-            parts = ", ".join(f"{n} in /{l}" for l, n in new_counts.items())
+            parts = ", ".join(f"{n} in /{l}"for l, n in new_counts.items())
             print(f"[{MODULE_NAME}] Registered untracked files: {parts} "
                   f"(discord metadata NULL for retroactive entries)")
 
@@ -1273,7 +1228,7 @@ class VMSManager:
         if reset_ids:
             for i in range(0, len(reset_ids), SCAN_BATCH_SIZE):
                 chunk = reset_ids[i:i + SCAN_BATCH_SIZE]
-                placeholders = ",".join("?" * len(chunk))
+                placeholders = ",".join("?"* len(chunk))
                 conn = self._conn()
                 try:
                     conn.execute(
@@ -1438,7 +1393,7 @@ class VMSManager:
         return result
 
     def select_contextual(self, recent_messages: List[str]) -> Optional[Tuple[int, str, float]]:
-        chat_kw = self._keywords(" ".join(recent_messages))
+        chat_kw = self._keywords("".join(recent_messages))
         if not chat_kw:
             return None
 
@@ -2003,9 +1958,6 @@ class VMSManager:
 
         self.bot.logger.log(MODULE_NAME, "VMS shutdown complete")
 
-
-# ==================== EXTERNAL TRANSCRIPTION QUEUE ====================
-
 EXT_COOLDOWN_SECONDS = 30
 
 _ext_queue:        Optional[asyncio.Queue] = None
@@ -2016,32 +1968,29 @@ _ext_worker_task:  Optional[asyncio.Task]  = None
 _ext_avg_secs:     float                   = 5.0  # EMA of actual transcription times
 _EXT_AVG_ALPHA:    float                   = 0.3
 
-
 def _ext_cooldown_remaining(user_id: str) -> float:
     last = _ext_cooldowns.get(user_id, 0.0)
     return max(0.0, EXT_COOLDOWN_SECONDS - (time.time() - last))
 
-
 def _ext_queue_eta(position: int) -> float:
     """Estimated seconds until item at given 1-based queue position is processed."""
     return position * _ext_avg_secs
-
 
 def _ext_status_embed(position: int, total: int, done: bool = False,
                       transcript: str = None, error: str = None) -> discord.Embed:
     """Build a status embed for an external transcription request."""
     if error:
         e = discord.Embed(color=0xe74c3c)
-        e.description = f"⚠️ {error}"
+        e.description = f"{error}"
         return e
     if done:
         e = discord.Embed(color=0x2ecc71)
         e.description = f"> {transcript}"
         return e
     eta = _ext_queue_eta(position)
-    eta_str = f"~{int(eta)}s" if eta < 60 else f"~{int(eta // 60)}m {int(eta % 60)}s"
+    eta_str = f"~{int(eta)}s"if eta < 60 else f"~{int(eta // 60)}m {int(eta % 60)}s"
     e = discord.Embed(
-        title="🎙️ Transcribing…",
+        title="Transcribing…",
         color=0x3498db,
     )
     if position == 1:
@@ -2050,9 +1999,6 @@ def _ext_status_embed(position: int, total: int, done: bool = False,
         e.description = f"**Position {position}** of {total} in queue\nEstimated wait: {eta_str}"
     return e
 
-
-# ==================== MODULE SETUP ====================
-
 def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
     """
     Compute stats exclusively from active (processed=1) VMs in the Emball guild.
@@ -2060,7 +2006,6 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
     """
     from collections import Counter
 
-    # ── Core counts ──────────────────────────────────────────────────────────
     rows = manager._db_all(
         """SELECT v.id, v.duration_secs, v.transcript, v.created_at,
                   v.discord_channel_id, v.filename,
@@ -2074,7 +2019,7 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
 
     if not rows:
         embed = discord.Embed(
-            title="🎙️ VM Stats",
+            title="VM Stats",
             description="No transcribed voice messages in the active cache yet.",
             color=0x5865f2,
         )
@@ -2093,7 +2038,6 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
     longest_secs     = max(durations) if durations else 0
     shortest_secs    = min(d for d in durations if d > 0) if durations else 0
 
-    # ── Word / transcript stats ───────────────────────────────────────────────
     all_words: list[str] = []
     word_counts_per_vm: list[int] = []
     for t in transcripts:
@@ -2106,7 +2050,6 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
     word_freq      = Counter(w for w in all_words if w not in STOP_WORDS)
     top_words      = word_freq.most_common(5)
 
-    # ── Playback stats ────────────────────────────────────────────────────────
     total_plays    = sum(play_counts)
     most_played_id, most_played_count = None, 0
     for r in rows:
@@ -2114,11 +2057,9 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
             most_played_count = r[6]
             most_played_id    = r[0]
 
-    # ── Most active channel ───────────────────────────────────────────────────
     channel_freq   = Counter(channel_ids)
     top_channel_id = channel_freq.most_common(1)[0][0] if channel_freq else None
 
-    # ── Most prolific user (parsed from canonical filenames) ─────────────────
     user_counter: Counter = Counter()
     for fn in filenames:
         parsed = _parse_vm_filename(fn)
@@ -2126,7 +2067,6 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
             user_counter[parsed["username"]] += 1
     top_user, top_user_count = user_counter.most_common(1)[0] if user_counter else (None, 0)
 
-    # ── Time-based fun facts ──────────────────────────────────────────────────
     now         = int(time.time())
     newest_ts   = max(created_ats)
     oldest_ts   = min(created_ats)
@@ -2138,7 +2078,6 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
         hour_counter[datetime.fromtimestamp(ts).hour] += 1
     peak_hour, peak_hour_count = hour_counter.most_common(1)[0] if hour_counter else (0, 0)
 
-    # ── Format helpers ────────────────────────────────────────────────────────
     def fmt_dur(secs: float) -> str:
         secs = int(secs)
         if secs < 60:
@@ -2154,16 +2093,15 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
             return f"{secs/3600:.1f} hours"
         return f"{secs/86400:.1f} days"
 
-    # ── Build embed ───────────────────────────────────────────────────────────
     embed = discord.Embed(
-        title="🎙️ Voice Message Stats",
+        title="Voice Message Stats",
         color=0x5865f2,
         timestamp=datetime.utcnow(),
     )
 
     # — Overview
     embed.add_field(
-        name="📊 Overview",
+        name="Overview",
         value=(
             f"**{total_vms:,}** voice messages transcribed\n"
             f"**{fmt_big(total_secs)}** of total audio\n"
@@ -2174,7 +2112,7 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
 
     # — Duration
     embed.add_field(
-        name="⏱️ Duration",
+        name="⏱ Duration",
         value=(
             f"Average: **{fmt_dur(avg_secs)}**\n"
             f"Longest: **{fmt_dur(longest_secs)}**\n"
@@ -2185,21 +2123,21 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
 
     # — Words
     embed.add_field(
-        name="💬 Words",
+        name="Words",
         value=(
             f"Avg per VM: **{avg_words:.0f}**\n"
             f"Top words:\n"
-            + "\n".join(f"`{w}` ×{c:,}" for w, c in top_words)
+            + "\n".join(f"`{w}` ×{c:,}"for w, c in top_words)
         ),
         inline=True,
     )
 
     # — Playback
     embed.add_field(
-        name="▶️ Playback",
+        name="▶ Playback",
         value=(
             f"Total plays: **{total_plays:,}**\n"
-            + (f"Most played: VM **#{most_played_id}** ({most_played_count}×)" if most_played_id else "No plays yet")
+            + (f"Most played: VM **#{most_played_id}** ({most_played_count}×)"if most_played_id else "No plays yet")
         ),
         inline=True,
     )
@@ -2207,21 +2145,20 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
     # — Fun facts
     peak_hour_fmt = datetime.strptime(str(peak_hour), "%H").strftime("%I %p").lstrip("0")
     facts = [
-        f"🏆 Chattiest sender: **{top_user}** with {top_user_count} VMs" if top_user else None,
-        f"📺 Busiest channel: <#{top_channel_id}>" if top_channel_id else None,
-        f"🌙 Peak sending hour: **{peak_hour_fmt}** ({peak_hour_count} VMs)",
-        f"📅 Avg rate: **{vms_per_day:.1f}** VMs/day over the last {span_days:,} days",
-        f"📖 That's roughly **{total_words / max(total_vms,1):.0f}** words per VM on average",
+        f"Chattiest sender: **{top_user}** with {top_user_count} VMs"if top_user else None,
+        f"Busiest channel: <#{top_channel_id}>"if top_channel_id else None,
+        f"Peak sending hour: **{peak_hour_fmt}** ({peak_hour_count} VMs)",
+        f"Avg rate: **{vms_per_day:.1f}** VMs/day over the last {span_days:,} days",
+        f"That's roughly **{total_words / max(total_vms,1):.0f}** words per VM on average",
     ]
     embed.add_field(
-        name="✨ Fun Facts",
+        name="Fun Facts",
         value="\n".join(f for f in facts if f),
         inline=False,
     )
 
     embed.set_footer(text="Active cache only · archived & deleted VMs excluded")
     return embed
-
 
 def setup(bot):
     bot.logger.log(MODULE_NAME, "Setting up VMS module")
@@ -2251,7 +2188,7 @@ def setup(bot):
                     item = await _ext_queue.get()
                     vm_att, temp_path, followup_msg = item['vm_att'], item['temp_path'], item['msg']
 
-                    # Mark current item as "processing now" and update rest
+                    # Mark current item as "processing now"and update rest
                     async with _ext_pending_lock:
                         total = len(_ext_pending)
                     try:
@@ -2370,10 +2307,10 @@ def setup(bot):
             date_str = args_str.strip()
             if not date_str:
                 print("Usage: vms-resume <date>")
-                print("  Examples:")
-                print("    vms-resume 2024-11-15")
-                print("    vms-resume 2024-11-15 14:30")
-                print("    vms-resume 2024-11-15 14:30:00")
+                print(" Examples:")
+                print("   vms-resume 2024-11-15")
+                print("   vms-resume 2024-11-15 14:30")
+                print("   vms-resume 2024-11-15 14:30:00")
                 return
 
             since_dt = None
@@ -2386,7 +2323,7 @@ def setup(bot):
 
             if since_dt is None:
                 print(f"Could not parse date '{date_str}'.")
-                print("  Expected: YYYY-MM-DD  or  YYYY-MM-DD HH:MM  or  YYYY-MM-DD HH:MM:SS")
+                print(" Expected: YYYY-MM-DD  or  YYYY-MM-DD HH:MM  or  YYYY-MM-DD HH:MM:SS")
                 return
 
             if getattr(manager, '_backfill_running', False):
@@ -2422,7 +2359,7 @@ def setup(bot):
                 f"DM from {message.author}"
                 if not message.guild
                 else f"#{getattr(message.channel, 'name', message.channel.id)}"
-                     f" in {message.guild.name}"
+                     f"in {message.guild.name}"
             )
             bot.logger.log(MODULE_NAME,
                 f"Voice message from {message.author} in {source}")
@@ -2521,7 +2458,7 @@ def setup(bot):
 
         if vm_att is None:
             await interaction.followup.send(
-                "⚠️ No voice message found on that message.", ephemeral=True
+                "No voice message found on that message.", ephemeral=True
             )
             return
 
@@ -2537,7 +2474,7 @@ def setup(bot):
             remaining_cd = _ext_cooldown_remaining(user_id)
             if remaining_cd > 0:
                 await interaction.followup.send(
-                    f"⏱️ You're on cooldown. Try again in **{int(remaining_cd)+1}s**.",
+                    f"⏱ You're on cooldown. Try again in **{int(remaining_cd)+1}s**.",
                     ephemeral=True
                 )
                 return
@@ -2575,7 +2512,7 @@ def setup(bot):
             vm_id = await manager.save_voice_message(message, vm_att)
             if not vm_id:
                 await interaction.followup.send(
-                    "⚠️ Failed to save voice message.", ephemeral=True
+                    "Failed to save voice message.", ephemeral=True
                 )
                 return
 
@@ -2584,7 +2521,7 @@ def setup(bot):
 
             if not filepath:
                 await interaction.followup.send(
-                    "⚠️ VM saved but file could not be located for transcription.", ephemeral=True
+                    "VM saved but file could not be located for transcription.", ephemeral=True
                 )
                 return
 
@@ -2596,7 +2533,7 @@ def setup(bot):
 
             if broken or not transcript:
                 await interaction.followup.send(
-                    "⚠️ Could not transcribe that voice message.", ephemeral=True
+                    "Could not transcribe that voice message.", ephemeral=True
                 )
                 return
 
@@ -2612,7 +2549,7 @@ def setup(bot):
         except Exception as exc:
             bot.logger.log(MODULE_NAME, f"App transcribe (Emball) error: {exc}", "ERROR")
             await interaction.followup.send(
-                "⚠️ An error occurred while transcribing.", ephemeral=True
+                "An error occurred while transcribing.", ephemeral=True
             )
 
     def _has_vm(message: discord.Message) -> bool:
@@ -2627,7 +2564,7 @@ def setup(bot):
     async def transcribe_vm_public(interaction: discord.Interaction, message: discord.Message):
         if not _has_vm(message):
             await interaction.response.send_message(
-                "⚠️ That message doesn't contain a voice message.", ephemeral=True
+                "That message doesn't contain a voice message.", ephemeral=True
             )
             return
         await _do_transcribe(interaction, message, ephemeral=False)
@@ -2638,7 +2575,7 @@ def setup(bot):
     async def transcribe_vm_private(interaction: discord.Interaction, message: discord.Message):
         if not _has_vm(message):
             await interaction.response.send_message(
-                "⚠️ That message doesn't contain a voice message.", ephemeral=True
+                "That message doesn't contain a voice message.", ephemeral=True
             )
             return
         await _do_transcribe(interaction, message, ephemeral=True)
@@ -2662,7 +2599,7 @@ def setup(bot):
         if setting == "disable":
             if manager.is_transcription_disabled(user_id, guild_id):
                 await interaction.response.send_message(
-                    "🔇 Auto-transcription of your voice messages is already **disabled** in this server.",
+                    "Auto-transcription of your voice messages is already **disabled** in this server.",
                     ephemeral=True
                 )
             else:
@@ -2670,7 +2607,7 @@ def setup(bot):
                 bot.logger.log(MODULE_NAME,
                     f"Auto-transcription disabled for user {interaction.user} in guild {guild_id}")
                 await interaction.response.send_message(
-                    "🔇 Auto-transcription of your voice messages has been **disabled** in this server.\n"
+                    "Auto-transcription of your voice messages has been **disabled** in this server.\n"
                     "Your VMs will still be saved — they just won't be transcribed automatically.\n"
                     "You can re-enable at any time with `/vmtranscribe enable`.",
                     ephemeral=True
@@ -2678,7 +2615,7 @@ def setup(bot):
         else:  # enable
             if not manager.is_transcription_disabled(user_id, guild_id):
                 await interaction.response.send_message(
-                    "🔊 Auto-transcription of your voice messages is already **enabled** in this server.",
+                    "Auto-transcription of your voice messages is already **enabled** in this server.",
                     ephemeral=True
                 )
             else:
@@ -2686,7 +2623,7 @@ def setup(bot):
                 bot.logger.log(MODULE_NAME,
                     f"Auto-transcription re-enabled for user {interaction.user} in guild {guild_id}")
                 await interaction.response.send_message(
-                    "🔊 Auto-transcription of your voice messages has been **enabled** in this server.",
+                    "Auto-transcription of your voice messages has been **enabled** in this server.",
                     ephemeral=True
                 )
 
@@ -2706,6 +2643,6 @@ def setup(bot):
             await interaction.followup.send(embed=embed)
         except Exception as exc:
             bot.logger.error(MODULE_NAME, "vmstats command error", exc)
-            await interaction.followup.send("⚠️ Failed to fetch stats.", ephemeral=True)
+            await interaction.followup.send("Failed to fetch stats.", ephemeral=True)
 
     bot.logger.log(MODULE_NAME, "Registered slash command: /vmstats")

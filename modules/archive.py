@@ -29,11 +29,11 @@ def _load_eminem_root() -> Path:
     env_val = os.environ.get("EMINEM_ROOT")
     if env_val:
         return Path(env_val)
-    config_file = Path(__file__).parent.parent / "config" / "archive_config.json"
+    config_file = Path(__file__).parent.parent / "config"/ "archive_config.json"
     if config_file.exists():
         try:
             data = _json.loads(config_file.read_text(encoding="utf-8"))
-            if "eminem_root" in data:
+            if "eminem_root"in data:
                 return Path(data["eminem_root"])
         except Exception:
             pass
@@ -43,7 +43,7 @@ def _load_eminem_root() -> Path:
     )
 
 def _load_archive_config() -> dict:
-    config_file = Path(__file__).parent.parent / "config" / "archive_config.json"
+    config_file = Path(__file__).parent.parent / "config"/ "archive_config.json"
     defaults = {
         "info_channel_name": "info",
         "info_embed_msg_id": None,
@@ -57,7 +57,7 @@ def _load_archive_config() -> dict:
     return defaults
 
 def _save_archive_config(data: dict) -> None:
-    config_file = Path(__file__).parent.parent / "config" / "archive_config.json"
+    config_file = Path(__file__).parent.parent / "config"/ "archive_config.json"
     config_file.parent.mkdir(parents=True, exist_ok=True)
     try:
         existing = {}
@@ -80,8 +80,8 @@ except FileNotFoundError as _e:
 
 FORMATS = ["FLAC", "MP3"]
 CACHE_CHANNEL_NAME = "songcache"
-INDEX_FILE = str(Path(__file__).parent.parent / "cache" / "archive" / "song_index.json")
-CACHE_INDEX = str(Path(__file__).parent.parent / "cache" / "archive" / "cache_index.json")
+INDEX_FILE = str(Path(__file__).parent.parent / "cache"/ "archive"/ "song_index.json")
+CACHE_INDEX = str(Path(__file__).parent.parent / "cache"/ "archive"/ "cache_index.json")
 Path(__file__).parent.parent.joinpath("cache", "archive").mkdir(parents=True, exist_ok=True)
 INDEX_REFRESH_HOURS = 24
 CACHE_EXPIRE_DAYS = 7
@@ -96,8 +96,6 @@ LARGE_FILE_MSG = "Sorry! The song file was too big to upload."
 MAX_SEARCH_RESULTS = 5
 NAV_PAGE_SIZE = 23  # reserve 2 slots for ◀ ▶ pagination arrows
 
-# ── Folder name cleaner ────────────────────────────────────────────────────────
-
 _FOLDER_CLEAN_RE = re.compile(
     r"^\d+\s*-\s*|\s*\(.*?\)\s*$|\s*\[.*?\]\s*$",
     re.VERBOSE,
@@ -108,11 +106,7 @@ def _clean_folder_name(raw: str) -> str:
     cleaned = _FOLDER_CLEAN_RE.sub("", raw).strip()
     return cleaned if cleaned else raw
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  METADATA / INDEX
-# ══════════════════════════════════════════════════════════════════════════════
-
 async def extract_metadata_async(file_path):
     loop = asyncio.get_event_loop()
     try:
@@ -211,7 +205,7 @@ def normalize_title(title):
     t = re.sub(r'[({\[].*?[)}\]](?=\s*$)', '', t)
     t = re.sub(r'\b(?:feat\.?|ft\.?|with)\s+.*', '', t, flags=re.IGNORECASE)
     t = re.sub(r'[^\w\s]', '', t)
-    t = re.sub(r'\s+', ' ', t).strip()
+    t = re.sub(r'\s+', '', t).strip()
     return t.casefold()
 
 async def check_file_modifications(bot):
@@ -230,14 +224,19 @@ async def check_file_modifications(bot):
             bot.logger.log(MODULE_NAME, f"Could not read index file: {e}", "WARNING")
             return True
         current_file_count = 0
-        for fmt in FORMATS:
-            fmt_path = EMINEM_ROOT / fmt
-            if not fmt_path.exists():
-                continue
-            for root, _, files in os.walk(fmt_path):
-                for file in files:
-                    if file.lower().endswith(('.flac', '.mp3')):
-                        current_file_count += 1
+        loop = asyncio.get_event_loop()
+        def _count_files():
+            count = 0
+            for fmt in FORMATS:
+                fmt_path = EMINEM_ROOT / fmt
+                if not fmt_path.exists():
+                    continue
+                for root, _, files in os.walk(fmt_path):
+                    for file in files:
+                        if file.lower().endswith(('.flac', '.mp3')):
+                            count += 1
+            return count
+        current_file_count = await loop.run_in_executor(None, _count_files)
         index_file_count = 0
         for fmt in FORMATS:
             if fmt in songs:
@@ -373,11 +372,7 @@ def select_best_candidate(cands, version=None):
     scored.sort(key=lambda x: (x[0], x[1]))
     return scored[0][2] if scored else None
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  CACHE (DM fallback CDN URLs)
-# ══════════════════════════════════════════════════════════════════════════════
-
 async def get_cached_url(bot, file_path):
     """Upload to #songcache and return a CDN URL. Used only as DM fallback."""
     p = Path(file_path)
@@ -429,14 +424,10 @@ async def get_cached_url(bot, file_path):
             bot.logger.error(MODULE_NAME, "Unexpected upload error", e)
             return None
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  DELIVERY  — ephemeral direct upload → DM cache fallback
-# ══════════════════════════════════════════════════════════════════════════════
-
 async def _deliver_song(bot, interaction: discord.Interaction, candidate: dict) -> None:
     """
-    Send "Uploading…" ephemeral, upload to #songcache, then edit that same
+    Send "Uploading…"ephemeral, upload to #songcache, then edit that same
     message to just a CDN hyperlink. One ephemeral, no clutter.
     """
     p = Path(candidate['path'])
@@ -450,16 +441,13 @@ async def _deliver_song(bot, interaction: discord.Interaction, candidate: dict) 
         await msg.edit(content=LARGE_FILE_MSG)
         return
     if not url:
-        await msg.edit(content="❌ Failed to retrieve song.")
+        await msg.edit(content="Failed to retrieve song.")
         return
 
     await msg.edit(content=f"[{p.name}]({url})")
     bot.logger.log(MODULE_NAME, f"Delivered '{p.name}' via CDN link")
 
-# ══════════════════════════════════════════════════════════════════════════════
 #  FED CHECK
-# ══════════════════════════════════════════════════════════════════════════════
-
 def _is_fed(interaction: discord.Interaction) -> bool:
     try:
         from moderation import is_flagged as _check
@@ -469,11 +457,7 @@ def _is_fed(interaction: discord.Interaction) -> bool:
         pass
     return False
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  NAVIGATOR — per-user ephemeral multi-step LayoutView
-# ══════════════════════════════════════════════════════════════════════════════
-
 def _get_categories_for_format(song_index: dict, fmt: str) -> list:
     cats = set()
     for entries in song_index.get(fmt, {}).values():
@@ -552,7 +536,6 @@ def _song_options_for_page(songs: list, page: int):
         opts.append(discord.SelectOption(label="Next page  ▶", value="__next__"))
     return opts, has_prev, has_next
 
-
 class ArchiveNavigatorView(discord.ui.LayoutView):
     """
     Ephemeral multi-step navigator using Components v2.
@@ -591,7 +574,7 @@ class ArchiveNavigatorView(discord.ui.LayoutView):
         self.clear_items()
         opts, _, _ = _folder_options_for_page(self._categories, self._category_page)
         pages = (len(self._categories) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
-        page_hint = f"  ·  page {self._category_page + 1}/{pages}" if pages > 1 else ""
+        page_hint = f" ·  page {self._category_page + 1}/{pages}"if pages > 1 else ""
         self.add_item(discord.ui.TextDisplay(
             f"## Eminem Archive  ·  {self._fmt}\n"
             f"{len(self._categories)} categories{page_hint}"
@@ -613,7 +596,7 @@ class ArchiveNavigatorView(discord.ui.LayoutView):
         self.clear_items()
         opts, _, _ = _folder_options_for_page(self._folders, self._folder_page)
         pages = (len(self._folders) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
-        page_hint = f"  ·  page {self._folder_page + 1}/{pages}" if pages > 1 else ""
+        page_hint = f" ·  page {self._folder_page + 1}/{pages}"if pages > 1 else ""
         self.add_item(discord.ui.TextDisplay(
             f"## {self._category}\n"
             f"{len(self._folders)} albums{page_hint}"
@@ -635,7 +618,7 @@ class ArchiveNavigatorView(discord.ui.LayoutView):
         self.clear_items()
         opts, _, _ = _song_options_for_page(self._songs, self._song_page)
         pages = (len(self._songs) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
-        page_hint = f"  ·  page {self._song_page + 1}/{pages}" if pages > 1 else ""
+        page_hint = f" ·  page {self._song_page + 1}/{pages}"if pages > 1 else ""
         self.add_item(discord.ui.TextDisplay(
             f"## {self._folder}\n"
             f"{len(self._songs)} songs{page_hint}"
@@ -753,11 +736,7 @@ class ArchiveNavigatorView(discord.ui.LayoutView):
     async def on_timeout(self):
         self.clear_items()
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  INFO MESSAGE  (pinned in #info) — Components v2
-# ══════════════════════════════════════════════════════════════════════════════
-
 class _ArchiveInfoView(discord.ui.LayoutView):
     """
     Persistent Components v2 view pinned in #info.
@@ -778,8 +757,6 @@ class _ArchiveInfoView(discord.ui.LayoutView):
         self._folder_page = 0
         self._song_page = 0
         self._render_home()
-
-    # ── Step renderers ────────────────────────────────────────────────────────
 
     def _render_home(self):
         self.clear_items()
@@ -814,7 +791,7 @@ class _ArchiveInfoView(discord.ui.LayoutView):
         self.clear_items()
         opts, _, _ = _folder_options_for_page(self._categories, self._category_page)
         pages = (len(self._categories) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
-        page_hint = f"  ·  page {self._category_page + 1}/{pages}" if pages > 1 else ""
+        page_hint = f" ·  page {self._category_page + 1}/{pages}"if pages > 1 else ""
         self.add_item(discord.ui.TextDisplay(
             f"## Eminem Archive  ·  {self._fmt}\n"
             f"{len(self._categories)} categories{page_hint}"
@@ -836,7 +813,7 @@ class _ArchiveInfoView(discord.ui.LayoutView):
         self.clear_items()
         opts, has_prev, has_next = _folder_options_for_page(self._folders, self._folder_page)
         pages = (len(self._folders) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
-        page_hint = f"  ·  page {self._folder_page + 1}/{pages}" if pages > 1 else ""
+        page_hint = f" ·  page {self._folder_page + 1}/{pages}"if pages > 1 else ""
         self.add_item(discord.ui.TextDisplay(
             f"## {self._category}\n"
             f"{len(self._folders)} albums{page_hint}"
@@ -858,7 +835,7 @@ class _ArchiveInfoView(discord.ui.LayoutView):
         self.clear_items()
         opts, has_prev, has_next = _song_options_for_page(self._songs, self._song_page)
         pages = (len(self._songs) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
-        page_hint = f"  ·  page {self._song_page + 1}/{pages}" if pages > 1 else ""
+        page_hint = f" ·  page {self._song_page + 1}/{pages}"if pages > 1 else ""
         self.add_item(discord.ui.TextDisplay(
             f"## {_clean_folder_name(self._folder)}\n"
             f"{len(self._songs)} songs{page_hint}"
@@ -875,8 +852,6 @@ class _ArchiveInfoView(discord.ui.LayoutView):
         back.callback = self._on_back_to_folder
         back_row.add_item(back)
         self.add_item(back_row)
-
-    # ── Callbacks ─────────────────────────────────────────────────────────────
 
     async def _on_format(self, interaction: discord.Interaction):
         if _is_fed(interaction):
@@ -989,7 +964,6 @@ class _ArchiveInfoView(discord.ui.LayoutView):
         self._render_folder_step()
         await interaction.response.edit_message(view=self)
 
-
 async def _get_info_channel(bot) -> Optional[discord.TextChannel]:
     cfg = _load_archive_config()
     name = cfg.get("info_channel_name", "info")
@@ -998,7 +972,6 @@ async def _get_info_channel(bot) -> Optional[discord.TextChannel]:
             if ch.name == name:
                 return ch
     return None
-
 
 async def post_or_refresh_info_embed(bot, force: bool = False) -> None:
     """Post the archive info message to #info. Skips if it already exists unless force=True."""
@@ -1023,11 +996,7 @@ async def post_or_refresh_info_embed(bot, force: bool = False) -> None:
     except discord.Forbidden:
         bot.logger.log(MODULE_NAME, "Missing permissions to post in #info", "WARNING")
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  LOGGING
-# ══════════════════════════════════════════════════════════════════════════════
-
 async def _log_delivery(bot, user, candidate: dict, source: str = "command"):
     try:
         channel = discord.utils.get(bot.get_all_channels(), name="bot-logs")
@@ -1058,20 +1027,16 @@ async def send_bot_log(bot, log_data):
         if 'action' in log_data:
             embed.add_field(name="Command", value=log_data['action'], inline=False)
         if 'params' in log_data:
-            params = "\n".join([f"- {k}: {v}" for k, v in log_data['params'].items()])
+            params = "\n".join([f"- {k}: {v}"for k, v in log_data['params'].items()])
             embed.add_field(name="Parameters", value=params, inline=False)
-        embed.add_field(name="Status", value="SUCCESS" if log_data['success'] else "FAILURE", inline=True)
+        embed.add_field(name="Status", value="SUCCESS"if log_data['success'] else "FAILURE", inline=True)
         if not log_data['success'] and log_data.get('error'):
             embed.add_field(name="Error", value=f"```{log_data['error']}```", inline=False)
         await channel.send(embed=embed)
     except Exception as e:
         bot.logger.error(MODULE_NAME, "Failed to send log", e)
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  ARCHIVEManager
-# ══════════════════════════════════════════════════════════════════════════════
-
 class ARCHIVEManager:
     def __init__(self, bot):
         self.bot = bot
@@ -1120,11 +1085,7 @@ class ARCHIVEManager:
     async def before_cache_purge(self):
         await self.bot.wait_until_ready()
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  SETUP
-# ══════════════════════════════════════════════════════════════════════════════
-
 def setup(bot):
     bot.logger.log(MODULE_NAME, "Setting up ARCHIVE module")
 
@@ -1141,7 +1102,6 @@ def setup(bot):
         await ARCHIVE_manager.ensure_ready()
         await post_or_refresh_info_embed(bot, force=False)
 
-    # ── /archive ───────────────────────────────────────────────────────────
     @bot.tree.command(name="archive", description="Get a song from Eminem's archive")
     @app_commands.describe(
         format="File format",
@@ -1176,14 +1136,13 @@ def setup(bot):
         if not best:
             msg = f"'{song_name}'"
             if version:
-                msg += f" (version '{version}')"
+                msg += f"(version '{version}')"
             await interaction.followup.send(f"{msg} not found.", ephemeral=True)
             return
         bot.logger.log(MODULE_NAME, f"Delivering: {best['original_title']}")
         await _deliver_song(bot, interaction, best)
         await _log_delivery(bot, interaction.user, best, source="slash command")
 
-    # ── /rebuild_index ─────────────────────────────────────────────────────
     @bot.tree.command(name="rebuild_index", description="[Admin] Rebuild the song index cache")
     async def rebuild_index(interaction: discord.Interaction):
         if not interaction.user.guild_permissions.administrator:
@@ -1201,11 +1160,10 @@ def setup(bot):
             bot.logger.error(MODULE_NAME, "Index rebuild failed", e)
             await interaction.followup.send("Failed to rebuild index.", ephemeral=True)
 
-    # ── Console: postinfo_archive ──────────────────────────────────────────
     async def handle_postinfo_archive(_args: str):
         bot.logger.log(MODULE_NAME, "Force-refreshing archive info embed...")
         await post_or_refresh_info_embed(bot, force=True)
-        print("  Archive info embed refreshed.\n")
+        print(" Archive info embed refreshed.\n")
 
     bot.console_commands["postinfo_archive"] = {
         "description": "Force-refresh the archive browse embed in #info",

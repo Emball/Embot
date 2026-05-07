@@ -168,7 +168,13 @@ class IconManager:
                 if elapsed < cooldown_minutes:
                     self.bot.logger.log(MODULE_NAME,
                         f"Skipping avatar update — cooldown ({elapsed:.1f}/{cooldown_minutes} min elapsed)")
+                    cooldown_ok = False
+                else:
+                    cooldown_ok = True
             else:
+                cooldown_ok = True
+
+            if cooldown_ok:
                 try:
                     with open(icon_path, 'rb') as icon_file:
                         icon_data = icon_file.read()

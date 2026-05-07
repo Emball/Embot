@@ -1,7 +1,7 @@
 {
-    "announcements_channel_name": "announcements",
-    "offtopic_channel_name": "off-topic",
-    "releases_role_name": "Emball Releases",
-    "info_channel_name": "info",
-    "info_embed_msg_id": null
+  "announcements_channel_name": "announcements",
+  "offtopic_channel_name": "off-topic",
+  "releases_role_name": "Emball Releases",
+  "info_channel_name": "info",
+  "info_embed_msg_id": "1497735273038217328"
 }

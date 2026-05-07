@@ -1,4 +1,3 @@
-# [file name]: links.py
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -14,9 +13,9 @@ class LinkManager:
     
     def __init__(self, bot):
         self.bot = bot
-        self.config_file = str(Path(__file__).parent.parent / "config" / "links_config.json")
+        self.config_file = str(Path(__file__).parent.parent / "config"/ "links_config.json")
         self.links = self.load_links()
-        self.prefix = "?"  # Default prefix for link commands
+        self.prefix = "?" # Default prefix for link commands
     
     def load_links(self):
         """Load links from config/links_config.json. Raises FileNotFoundError if missing."""
@@ -37,21 +36,8 @@ class LinkManager:
         if links is None:
             links = self.links
         try:
-            import tempfile
-            # Write to temporary file first
-            temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(self.config_file), suffix='.tmp')
-            try:
-                with os.fdopen(temp_fd, 'w') as f:
-                    json.dump(links, f, indent=2)
-                # Atomic replace
-                os.replace(temp_path, self.config_file)
-            except:
-                # Clean up temp file if something fails
-                try:
-                    os.unlink(temp_path)
-                except:
-                    pass
-                raise
+            from _utils import atomic_json_write
+            atomic_json_write(self.config_file, links)
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to save links config", e)
     
@@ -85,7 +71,7 @@ class LinkManager:
         url = link_data.get("url", "")
         
         if not url:
-            await message.channel.send(f"⚠️ The `{command}` link is not configured yet. Please set it up using `/linkset {command} <url>`")
+            await message.channel.send(f"The `{command}` link is not configured yet. Please set it up using `/linkset {command} <url>`")
             return True
         
         # Send the link as plain text
@@ -93,7 +79,6 @@ class LinkManager:
         self.bot.logger.log(MODULE_NAME, f"{message.author} used ?{command}")
         
         return True
-
 
 def setup(bot):
     """Setup function called by main.py"""
@@ -131,7 +116,7 @@ def setup(bot):
         # Validate URL (basic check)
         if not url.startswith(("http://", "https://")):
             await interaction.response.send_message(
-                "❌ Invalid URL. Please provide a valid URL starting with http:// or https://",
+                "Invalid URL. Please provide a valid URL starting with http:// or https://",
                 ephemeral=True
             )
             return
@@ -148,7 +133,7 @@ def setup(bot):
         link_manager.save_links()
         
         embed = discord.Embed(
-            title=f"✅ Link {'Created' if is_new else 'Updated'}",
+            title=f"Link {'Created' if is_new else 'Updated'}",
             description=f"Link command `?{name}` has been {'created' if is_new else 'updated'}",
             color=0x2ecc71
         )
@@ -171,7 +156,7 @@ def setup(bot):
         
         if name not in link_manager.links:
             await interaction.response.send_message(
-                f"❌ Link command `?{name}` does not exist.",
+                f"Link command `?{name}` does not exist.",
                 ephemeral=True
             )
             return
@@ -180,7 +165,7 @@ def setup(bot):
         link_manager.save_links()
         
         embed = discord.Embed(
-            title="🗑️ Link Removed",
+            title="Link Removed",
             description=f"Link command `?{name}` has been removed",
             color=0xe74c3c
         )
@@ -198,7 +183,7 @@ def setup(bot):
         
         if name not in link_manager.links:
             await interaction.response.send_message(
-                f"❌ Link command `?{name}` does not exist.",
+                f"Link command `?{name}` does not exist.",
                 ephemeral=True
             )
             return
@@ -211,7 +196,7 @@ def setup(bot):
         new_status = link_manager.links[name]["enabled"]
         
         embed = discord.Embed(
-            title=f"{'✅ Link Enabled' if new_status else '❌ Link Disabled'}",
+            title=f"{' Link Enabled' if new_status else ' Link Disabled'}",
             description=f"Link command `?{name}` has been {'enabled' if new_status else 'disabled'}",
             color=0x2ecc71 if new_status else 0xe74c3c
         )
@@ -223,11 +208,11 @@ def setup(bot):
     async def link_list(interaction: discord.Interaction):
         """List all link commands"""
         if not link_manager.links:
-            await interaction.response.send_message("❌ No link commands configured yet.", ephemeral=True)
+            await interaction.response.send_message("No link commands configured yet.", ephemeral=True)
             return
         
         embed = discord.Embed(
-            title="🔗 Available Link Commands",
+            title="Available Link Commands",
             description=f"Use `?<command>` to access these links (e.g., `?tracker`)",
             color=0x5865f2
         )
@@ -239,12 +224,12 @@ def setup(bot):
         for name, data in sorted(link_manager.links.items()):
             link_info = f"**?{name}**"
             if data.get("description"):
-                link_info += f" - {data['description']}"
+                link_info += f"- {data['description']}"
             
             if data.get("url"):
                 link_info += f"\n└─ [Link]({data['url']})"
             else:
-                link_info += "\n└─ ⚠️ Not configured"
+                link_info += "\n└─  Not configured"
             
             if data.get("enabled", True):
                 enabled_links.append(link_info)
@@ -259,7 +244,7 @@ def setup(bot):
                 chunk_size = 1024
                 chunks = [enabled_text[i:i+chunk_size] for i in range(0, len(enabled_text), chunk_size)]
                 for i, chunk in enumerate(chunks):
-                    field_name = "Enabled Links" if i == 0 else f"Enabled Links (cont. {i+1})"
+                    field_name = "Enabled Links"if i == 0 else f"Enabled Links (cont. {i+1})"
                     embed.add_field(name=field_name, value=chunk, inline=False)
             else:
                 embed.add_field(name="Enabled Links", value=enabled_text, inline=False)
@@ -283,7 +268,7 @@ def setup(bot):
         
         if name not in link_manager.links:
             await interaction.response.send_message(
-                f"❌ Link command `?{name}` does not exist.",
+                f"Link command `?{name}` does not exist.",
                 ephemeral=True
             )
             return
@@ -291,14 +276,14 @@ def setup(bot):
         data = link_manager.links[name]
         
         embed = discord.Embed(
-            title=f"🔗 Link Info: ?{name}",
+            title=f"Link Info: ?{name}",
             color=0x5865f2 if data.get("enabled", True) else 0x95a5a6
         )
         
         embed.add_field(name="Command", value=f"`?{name}`", inline=True)
         embed.add_field(
             name="Status",
-            value="✅ Enabled" if data.get("enabled", True) else "❌ Disabled",
+            value="Enabled"if data.get("enabled", True) else "Disabled",
             inline=True
         )
         
@@ -308,7 +293,7 @@ def setup(bot):
         if data.get("url"):
             embed.add_field(name="URL", value=data["url"], inline=False)
         else:
-            embed.add_field(name="URL", value="⚠️ Not configured", inline=False)
+            embed.add_field(name="URL", value="Not configured", inline=False)
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
     

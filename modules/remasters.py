@@ -25,16 +25,12 @@ except ImportError:
 
 MODULE_NAME = "REMASTERS"
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  CONFIG
-# ══════════════════════════════════════════════════════════════════════════════
-
 def _script_dir() -> Path:
     return Path(__file__).parent.parent.absolute()
 
 def _load_config() -> dict:
-    config_path = _script_dir() / "config" / "remasters_config.json"
+    config_path = _script_dir() / "config"/ "remasters_config.json"
     defaults = {
         "announcements_channel_name": "announcements",
         "offtopic_channel_name": "off-topic",
@@ -52,7 +48,7 @@ def _load_config() -> dict:
     return defaults
 
 def _save_config(data: dict) -> None:
-    config_path = _script_dir() / "config" / "remasters_config.json"
+    config_path = _script_dir() / "config"/ "remasters_config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         existing = {}
@@ -69,11 +65,7 @@ def _save_config(data: dict) -> None:
 
 CONFIG: dict = {}  # filled in setup()
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  DATABASE  (no token table — ephemeral delivery is stateless)
-# ══════════════════════════════════════════════════════════════════════════════
-
 DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS remasters (
     id              TEXT PRIMARY KEY,
@@ -100,7 +92,7 @@ CREATE TABLE IF NOT EXISTS remaster_versions (
 """
 
 def _db_path() -> Path:
-    return _script_dir() / "db" / "remasters.db"
+    return _script_dir() / "db"/ "remasters.db"
 
 def _get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(str(_db_path()))
@@ -121,8 +113,6 @@ def _now_iso() -> str:
 
 def _new_id() -> str:
     return str(_uuid.uuid4())
-
-# ── DB helpers ────────────────────────────────────────────────────────────────
 
 def _db_all_remasters() -> list:
     with _get_conn() as c:
@@ -199,12 +189,8 @@ def _db_update_remaster_meta(rid: str, title: str, desc: str) -> None:
         )
         c.commit()
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  ANNOUNCEMENT EMBED BUILDERS  (these stay as regular embeds — they go in
 #  announcements channel which doesn't need IS_COMPONENTS_V2)
-# ══════════════════════════════════════════════════════════════════════════════
-
 def _release_embed(remaster: dict, version_row: dict, role_mention: str = "",
                    is_update: bool = False) -> discord.Embed:
     title = remaster["title"]
@@ -212,14 +198,14 @@ def _release_embed(remaster: dict, version_row: dict, role_mention: str = "",
     desc = remaster["description"]
     if is_update:
         embed = discord.Embed(
-            title=f"🔄  {title}  ·  {version}",
+            title=f" {title}  ·  {version}",
             description=f"*A new version of **{title}** is now available.*\n\n{desc}",
             color=discord.Color.from_rgb(90, 160, 255),
         )
         embed.set_footer(text=f"Updated release  ·  {version}  ·  Click Download to get your copy")
     else:
         embed = discord.Embed(
-            title=f"✦  {title}  ·  {version}",
+            title=f" {title}  ·  {version}",
             description=desc,
             color=discord.Color.from_rgb(255, 215, 80),
         )
@@ -233,16 +219,12 @@ def _release_embed(remaster: dict, version_row: dict, role_mention: str = "",
 
 def _outdated_embed(old_embed: discord.Embed, latest_version: str) -> discord.Embed:
     new_embed = old_embed.copy()
-    notice = f"⚠️  *A newer version (`{latest_version}`) is available. This embed is archived.*\n\n"
+    notice = f" *A newer version (`{latest_version}`) is available. This embed is archived.*\n\n"
     new_embed.description = notice + (old_embed.description or "")
     new_embed.color = discord.Color.from_rgb(120, 120, 120)
     return new_embed
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  CONSOLE TUI  (unchanged)
-# ══════════════════════════════════════════════════════════════════════════════
-
 class _RemasterTUI:
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -282,24 +264,24 @@ class _RemasterTUI:
         while True:
             stdscr.clear()
             h, w = stdscr.getmaxyx()
-            header = "  ✦  EMBOT REMASTER RELEASE  ✦  New Release"
+            header = "   EMBOT REMASTER RELEASE    New Release"
             stdscr.addstr(1, max(0, (w - len(header)) // 2), header,
                           curses.color_pair(1) | curses.A_BOLD)
-            stdscr.addstr(2, 2, "─" * (w - 4), curses.color_pair(1))
+            stdscr.addstr(2, 2, "─"* (w - 4), curses.color_pair(1))
             stdscr.addstr(3, 2, "Tab/↓ next field  ↑ prev  Enter submit  Ctrl+C cancel",
                           curses.color_pair(3))
             for i, (label, value, optional) in enumerate(fields):
                 y = 5 + i * 3
-                opt_str = "  (optional)" if optional else ""
-                stdscr.addstr(y, 2, f"  {label}{opt_str}:",
+                opt_str = " (optional)"if optional else ""
+                stdscr.addstr(y, 2, f" {label}{opt_str}:",
                               curses.color_pair(2) | (curses.A_BOLD if i == idx else 0))
                 box_w = w - 6
                 val_display = value[-box_w:] if len(value) > box_w else value
                 attr = curses.A_REVERSE if i == idx else curses.A_NORMAL
                 stdscr.addstr(y + 1, 3, val_display.ljust(box_w)[:box_w], attr)
             if error:
-                stdscr.addstr(5 + len(fields) * 3, 2, f"  ✗  {error}", curses.color_pair(4))
-            stdscr.addstr(h - 2, 2, "  [ SUBMIT ]  Ctrl+C to cancel", curses.color_pair(3))
+                stdscr.addstr(5 + len(fields) * 3, 2, f"   {error}", curses.color_pair(4))
+            stdscr.addstr(h - 2, 2, " [ SUBMIT ]  Ctrl+C to cancel", curses.color_pair(3))
             stdscr.refresh()
             _, value, _ = fields[idx]
             cy = 5 + idx * 3 + 1
@@ -372,8 +354,8 @@ class _RemasterTUI:
         curses.init_pair(5, curses.COLOR_WHITE,  curses.COLOR_BLUE)
         remasters = _db_all_remasters()
         if not remasters:
-            stdscr.addstr(2, 2, "  No releases yet.", curses.color_pair(4))
-            stdscr.addstr(4, 2, "  Press any key to exit.")
+            stdscr.addstr(2, 2, " No releases yet.", curses.color_pair(4))
+            stdscr.addstr(4, 2, " Press any key to exit.")
             stdscr.refresh()
             stdscr.getch()
             self._result = None
@@ -389,14 +371,14 @@ class _RemasterTUI:
             stdscr.clear()
             h, w = stdscr.getmaxyx()
             if page == "list":
-                header = "  ✦  EMBOT REMASTERS  ✦  Manage Releases"
+                header = "   EMBOT REMASTERS    Manage Releases"
                 stdscr.addstr(1, max(0, (w - len(header)) // 2), header,
                               curses.color_pair(1) | curses.A_BOLD)
-                stdscr.addstr(2, 2, "─" * (w - 4), curses.color_pair(1))
+                stdscr.addstr(2, 2, "─"* (w - 4), curses.color_pair(1))
                 stdscr.addstr(3, 2, "↑↓ navigate  Enter select  Q quit", curses.color_pair(3))
                 for i, rem in enumerate(remasters):
                     y = 5 + i
-                    label = f"  {rem['title']:40s}  v{rem['latest_version']:12s}  {rem['updated_at'][:10]}"
+                    label = f" {rem['title']:40s}  v{rem['latest_version']:12s}  {rem['updated_at'][:10]}"
                     if i == sel:
                         stdscr.addstr(y, 2, label[:w-4].ljust(w-4), curses.color_pair(5))
                     else:
@@ -416,16 +398,16 @@ class _RemasterTUI:
                     return
             elif page == "detail":
                 versions = _db_versions_for(detail_rem["id"])
-                header = f"  ✦  {detail_rem['title']}  ✦  v{detail_rem['latest_version']}"
+                header = f"   {detail_rem['title']}    v{detail_rem['latest_version']}"
                 stdscr.addstr(1, 2, header, curses.color_pair(1) | curses.A_BOLD)
-                stdscr.addstr(2, 2, "─" * (w - 4), curses.color_pair(1))
+                stdscr.addstr(2, 2, "─"* (w - 4), curses.color_pair(1))
                 stdscr.addstr(3, 2, "A add version  E edit metadata  B back  Q quit",
                               curses.color_pair(3))
                 stdscr.addstr(5, 2, "Versions:", curses.color_pair(2))
                 for i, ver in enumerate(versions):
                     y = 6 + i
-                    tag = " ← latest" if ver["is_latest"] else ""
-                    label = f"  {ver['version']:15s}  {ver['created_at'][:10]}{tag}"
+                    tag = "← latest"if ver["is_latest"] else ""
+                    label = f" {ver['version']:15s}  {ver['created_at'][:10]}{tag}"
                     if i == detail_ver_sel:
                         stdscr.addstr(y, 2, label[:w-4].ljust(w-4), curses.color_pair(5))
                     else:
@@ -457,22 +439,22 @@ class _RemasterTUI:
                     return
             elif page in ("add_version", "edit_meta"):
                 is_add = page == "add_version"
-                header = f"  ✦  {detail_rem['title']}  ✦  {'Add Version' if is_add else 'Edit Metadata'}"
+                header = f"   {detail_rem['title']}    {'Add Version' if is_add else 'Edit Metadata'}"
                 stdscr.addstr(1, 2, header, curses.color_pair(1) | curses.A_BOLD)
-                stdscr.addstr(2, 2, "─" * (w - 4), curses.color_pair(1))
+                stdscr.addstr(2, 2, "─"* (w - 4), curses.color_pair(1))
                 stdscr.addstr(3, 2, "Tab/↓ next  ↑ prev  Enter submit  B back",
                               curses.color_pair(3))
                 for i, (label, value, optional) in enumerate(fields):
                     y = 5 + i * 3
-                    opt_str = "  (optional)" if optional else ""
-                    stdscr.addstr(y, 2, f"  {label}{opt_str}:",
+                    opt_str = " (optional)"if optional else ""
+                    stdscr.addstr(y, 2, f" {label}{opt_str}:",
                                   curses.color_pair(2) | (curses.A_BOLD if i == field_idx else 0))
                     box_w = w - 6
                     val_display = value[-(box_w):] if len(value) > box_w else value
                     attr = curses.A_REVERSE if i == field_idx else curses.A_NORMAL
                     stdscr.addstr(y + 1, 3, val_display.ljust(box_w)[:box_w], attr)
                 if error:
-                    stdscr.addstr(5 + len(fields) * 3, 2, f"  ✗  {error}", curses.color_pair(4))
+                    stdscr.addstr(5 + len(fields) * 3, 2, f"   {error}", curses.color_pair(4))
                 _, value, _ = fields[field_idx]
                 cy = 5 + field_idx * 3 + 1
                 cx = min(3 + len(value), w - 4)
@@ -544,24 +526,24 @@ class _RemasterTUI:
                         fields[field_idx] = [label, value[:-1], optional]
 
     def _fallback_new_release(self):
-        print("\n  ✦  EMBOT REMASTER RELEASE  ✦  New Release")
-        print("  Leave blank and press Enter to cancel.\n")
+        print("\n    EMBOT REMASTER RELEASE    New Release")
+        print(" Leave blank and press Enter to cancel.\n")
         try:
-            title = input("  Title: ").strip()
+            title = input(" Title: ").strip()
             if not title:
                 self._result = None; return
-            version = input("  Version: ").strip()
+            version = input(" Version: ").strip()
             if not version:
                 self._result = None; return
-            desc = input("  Description: ").strip()
+            desc = input(" Description: ").strip()
             if not desc:
                 self._result = None; return
-            file_path = input("  File path: ").strip()
+            file_path = input(" File path: ").strip()
             if not file_path or not Path(file_path).exists():
-                print("  File not found."); self._result = None; return
-            image_path = input("  Image path (optional, Enter to skip): ").strip() or None
+                print(" File not found."); self._result = None; return
+            image_path = input(" Image path (optional, Enter to skip): ").strip() or None
             if image_path and not Path(image_path).exists():
-                print("  Image not found."); self._result = None; return
+                print(" Image not found."); self._result = None; return
             self._result = {
                 "action": "new",
                 "title": title,
@@ -576,12 +558,12 @@ class _RemasterTUI:
     def _fallback_manage(self):
         remasters = _db_all_remasters()
         if not remasters:
-            print("  No releases yet.\n")
+            print(" No releases yet.\n")
             self._result = None
             return
-        print("\n  ✦  EMBOT REMASTERS  ✦  Manage Releases\n")
+        print("\n    EMBOT REMASTERS    Manage Releases\n")
         for i, rem in enumerate(remasters):
-            print(f"  [{i+1}] {rem['title']}  v{rem['latest_version']}")
+            print(f" [{i+1}] {rem['title']}  v{rem['latest_version']}")
         try:
             choice = input("\n  Select number (or 0 to cancel): ").strip()
             if not choice or choice == "0":
@@ -591,16 +573,16 @@ class _RemasterTUI:
                 self._result = None; return
             rem = remasters[idx]
             print(f"\n  {rem['title']}  v{rem['latest_version']}")
-            print("  [1] Add new version\n  [2] Edit metadata\n  [0] Cancel")
-            action = input("  Choice: ").strip()
+            print(" [1] Add new version\n  [2] Edit metadata\n  [0] Cancel")
+            action = input(" Choice: ").strip()
             if action == "1":
-                version = input("  New version: ").strip()
+                version = input(" New version: ").strip()
                 if not version:
                     self._result = None; return
-                file_path = input("  File path: ").strip()
+                file_path = input(" File path: ").strip()
                 if not file_path or not Path(file_path).exists():
-                    print("  File not found."); self._result = None; return
-                image_path = input("  Image path (optional): ").strip() or None
+                    print(" File not found."); self._result = None; return
+                image_path = input(" Image path (optional): ").strip() or None
                 self._result = {
                     "action": "add_version",
                     "remaster_id": rem["id"],
@@ -609,8 +591,8 @@ class _RemasterTUI:
                     "image_path": image_path,
                 }
             elif action == "2":
-                new_title = input(f"  Title [{rem['title']}]: ").strip() or rem["title"]
-                new_desc = input(f"  Description [{rem['description'][:40]}]: ").strip() \
+                new_title = input(f" Title [{rem['title']}]: ").strip() or rem["title"]
+                new_desc = input(f" Description [{rem['description'][:40]}]: ").strip() \
                     or rem["description"]
                 self._result = {
                     "action": "edit_meta",
@@ -623,11 +605,7 @@ class _RemasterTUI:
         except (EOFError, KeyboardInterrupt, ValueError):
             self._result = None
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  DISCORD HELPERS
-# ══════════════════════════════════════════════════════════════════════════════
-
 async def _upload_file(bot: commands.Bot, file_path: str) -> tuple:
     """Upload a local file to the bot owner's DM for a private CDN URL."""
     path = Path(file_path)
@@ -699,11 +677,7 @@ def _user_is_cleared(interaction: discord.Interaction) -> bool:
 def _user_can_download(interaction: discord.Interaction) -> bool:
     return _user_has_releases_role(interaction) and _user_is_cleared(interaction)
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  DELIVERY — ephemeral Components v2 inline audio player → DM fallback
-# ══════════════════════════════════════════════════════════════════════════════
-
 async def _deliver_remaster(bot: commands.Bot, interaction: discord.Interaction,
                              version_row: dict) -> None:
     """
@@ -723,7 +697,6 @@ async def _deliver_remaster(bot: commands.Bot, interaction: discord.Interaction,
     desc = remaster.get("description", "")
     image_url = version_row.get("image_cdn_url")
 
-    # ── Primary: ephemeral card with CDN download link ────────────────────────
     try:
         view = discord.ui.LayoutView(timeout=None)
         if image_url:
@@ -751,7 +724,6 @@ async def _deliver_remaster(bot: commands.Bot, interaction: discord.Interaction,
     except Exception as e:
         bot.logger.log(MODULE_NAME, f"Ephemeral delivery error ({e}), falling back to DM", "WARNING")
 
-    # ── Fallback: DM the CDN URL ──────────────────────────────────────────────
     bot.logger.log(MODULE_NAME, f"Falling back to DM for '{title}'")
     try:
         dm_view = discord.ui.LayoutView(timeout=None)
@@ -786,10 +758,7 @@ async def _deliver_remaster(bot: commands.Bot, interaction: discord.Interaction,
             ephemeral=True,
         )
 
-# ══════════════════════════════════════════════════════════════════════════════
 #  ANNOUNCEMENT POSTING
-# ══════════════════════════════════════════════════════════════════════════════
-
 async def _post_release(bot: commands.Bot, result: dict) -> None:
     logger = bot.logger
     logger.log(MODULE_NAME, f"Processing new release: {result['title']} {result['version']}")
@@ -812,7 +781,7 @@ async def _post_release(bot: commands.Bot, result: dict) -> None:
         _db_set_announcement(vid, str(msg.id), str(ann_ch.id))
         # Discussion thread
         try:
-            thread_name = f"💬 {remaster['title']} {version_row['version']} — Discussion"
+            thread_name = f"{remaster['title']} {version_row['version']} — Discussion"
             await msg.create_thread(
                 name=thread_name[:100],
                 auto_archive_duration=10080,
@@ -876,11 +845,7 @@ async def _apply_meta_edit(bot: commands.Bot, result: dict) -> None:
     # Refresh info embed so title/desc changes are reflected
     await post_or_refresh_info_embed(bot, force=True)
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  DOWNLOAD BUTTON  (on announcement embeds — stays as legacy View)
-# ══════════════════════════════════════════════════════════════════════════════
-
 class _DownloadView(discord.ui.View):
     def __init__(self, version_id: str):
         super().__init__(timeout=None)
@@ -905,11 +870,7 @@ class _DownloadView(discord.ui.View):
         await interaction.response.defer(ephemeral=True, thinking=True)
         await _deliver_remaster(interaction.client, interaction, version_row)
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  REMASTER NAVIGATOR  (ephemeral) — Components v2 LayoutView
-# ══════════════════════════════════════════════════════════════════════════════
-
 class RemasterNavigatorView(discord.ui.LayoutView):
     """
     Ephemeral per-user navigator using Components v2.
@@ -925,8 +886,6 @@ class RemasterNavigatorView(discord.ui.LayoutView):
         self._page = 0
         self._render_list()
 
-    # ── Renderers ─────────────────────────────────────────────────────────────
-
     def _render_list(self):
         self.clear_items()
         total = len(self._remasters)
@@ -939,7 +898,7 @@ class RemasterNavigatorView(discord.ui.LayoutView):
         has_prev = self._page > 0
         has_next = end < total
         pages = (total + page_size - 1) // page_size
-        page_hint = f"  ·  page {self._page + 1}/{pages}" if pages > 1 else ""
+        page_hint = f" ·  page {self._page + 1}/{pages}"if pages > 1 else ""
 
         self.add_item(discord.ui.TextDisplay(
             f"## Emball Remaster Archive\n"
@@ -1013,8 +972,6 @@ class RemasterNavigatorView(discord.ui.LayoutView):
             "-# Click Download to listen — delivered privately, only you can see it"
         ))
 
-    # ── Callbacks ─────────────────────────────────────────────────────────────
-
     async def _on_select(self, interaction: discord.Interaction):
         if not _user_can_download(interaction):
             await interaction.response.send_message(
@@ -1049,7 +1006,7 @@ class RemasterNavigatorView(discord.ui.LayoutView):
                 "This didn't work. Please try again later.", ephemeral=True)
             return
         cid = interaction.data.get("custom_id", "")
-        vid = cid.split(":", 1)[1] if ":" in cid else None
+        vid = cid.split(":", 1)[1] if ":"in cid else None
         if not vid:
             await interaction.response.send_message("Release not found.", ephemeral=True)
             return
@@ -1068,11 +1025,7 @@ class RemasterNavigatorView(discord.ui.LayoutView):
     async def on_timeout(self):
         self.clear_items()
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  INFO MESSAGE  (pinned in #info) — Components v2
-# ══════════════════════════════════════════════════════════════════════════════
-
 class _RemastersInfoView(discord.ui.LayoutView):
     """
     Persistent Components v2 view pinned in #info.
@@ -1086,8 +1039,6 @@ class _RemastersInfoView(discord.ui.LayoutView):
         self._selected_rid: Optional[str] = None
         self._page = 0
         self._render_list()
-
-    # ── Renderers ─────────────────────────────────────────────────────────────
 
     def _render_list(self):
         self.clear_items()
@@ -1114,7 +1065,7 @@ class _RemastersInfoView(discord.ui.LayoutView):
         has_prev = self._page > 0
         has_next = end < total
         pages = (total + page_size - 1) // page_size
-        page_hint = f"  ·  page {self._page + 1}/{pages}" if pages > 1 else ""
+        page_hint = f" ·  page {self._page + 1}/{pages}"if pages > 1 else ""
 
         opts = []
         if has_prev:
@@ -1186,8 +1137,6 @@ class _RemastersInfoView(discord.ui.LayoutView):
             "-# Click Download to listen — delivered privately, only you can see it"
         ))
 
-    # ── Callbacks ─────────────────────────────────────────────────────────────
-
     async def _on_select(self, interaction: discord.Interaction):
         if not _user_can_download(interaction):
             await interaction.response.send_message(
@@ -1222,7 +1171,7 @@ class _RemastersInfoView(discord.ui.LayoutView):
                 "This didn't work. Please try again later.", ephemeral=True)
             return
         cid = interaction.data.get("custom_id", "")
-        vid = cid.split(":", 1)[1] if ":" in cid else None
+        vid = cid.split(":", 1)[1] if ":"in cid else None
         if not vid:
             await interaction.response.send_message("Release not found.", ephemeral=True)
             return
@@ -1243,7 +1192,6 @@ class _RemastersInfoView(discord.ui.LayoutView):
         self._selected_rid = None
         self._render_list()
         await interaction.response.edit_message(view=self)
-
 
 async def post_or_refresh_info_embed(bot: commands.Bot, force: bool = False) -> None:
     """Post (or refresh) the remaster info message in #info."""
@@ -1267,11 +1215,7 @@ async def post_or_refresh_info_embed(bot: commands.Bot, force: bool = False) -> 
     except discord.Forbidden:
         bot.logger.log(MODULE_NAME, "Missing permissions to post in #info", "WARNING")
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  CONSOLE COMMAND HANDLER
-# ══════════════════════════════════════════════════════════════════════════════
-
 def _make_console_handler(bot: commands.Bot):
     async def handle_remaster(args: str):
         args = args.strip()
@@ -1280,44 +1224,40 @@ def _make_console_handler(bot: commands.Bot):
             tui = _RemasterTUI(bot)
             result = await loop.run_in_executor(None, tui.run_new_release)
             if result is None:
-                print("  Cancelled.\n"); return
+                print(" Cancelled.\n"); return
             if result["action"] == "new":
-                print(f"  Posting release: {result['title']} {result['version']}...")
+                print(f" Posting release: {result['title']} {result['version']}...")
                 await _post_release(bot, result)
-                print("  Done.\n")
+                print(" Done.\n")
         elif args == "manage":
             loop = asyncio.get_event_loop()
             tui = _RemasterTUI(bot)
             result = await loop.run_in_executor(None, tui.run_manage)
             if result is None:
-                print("  Cancelled.\n"); return
+                print(" Cancelled.\n"); return
             if result["action"] == "add_version":
-                print(f"  Posting new version {result['version']}...")
+                print(f" Posting new version {result['version']}...")
                 await _post_new_version(bot, result)
-                print("  Done.\n")
+                print(" Done.\n")
             elif result["action"] == "edit_meta":
                 await _apply_meta_edit(bot, result)
-                print("  Metadata updated.\n")
+                print(" Metadata updated.\n")
         elif args == "list":
             remasters = _db_all_remasters()
             if not remasters:
-                print("  No releases yet.\n"); return
+                print(" No releases yet.\n"); return
             print(f"\n  {'Title':<40} {'Version':<14} {'Updated'}")
-            print("  " + "─" * 72)
+            print(" "+ "─"* 72)
             for r in remasters:
-                print(f"  {r['title']:<40} {r['latest_version']:<14} {r['updated_at'][:10]}")
+                print(f" {r['title']:<40} {r['latest_version']:<14} {r['updated_at'][:10]}")
             print()
         else:
-            print("  Usage:  /remaster          — publish new release")
-            print("          /remaster manage    — manage existing releases")
-            print("          /remaster list      — list all releases\n")
+            print(" Usage:  /remaster          — publish new release")
+            print("         /remaster manage    — manage existing releases")
+            print("         /remaster list      — list all releases\n")
     return handle_remaster
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  SETUP
-# ══════════════════════════════════════════════════════════════════════════════
-
 def setup(bot: commands.Bot):
     global CONFIG
     CONFIG = _load_config()
@@ -1361,7 +1301,7 @@ def setup(bot: commands.Bot):
     async def handle_postinfo_remasters(_args: str):
         bot.logger.log(MODULE_NAME, "Force-refreshing remaster info embed...")
         await post_or_refresh_info_embed(bot, force=True)
-        print("  Remaster info embed refreshed.\n")
+        print(" Remaster info embed refreshed.\n")
 
     bot.console_commands["postinfo_remasters"] = {
         "description": "Force-refresh the remaster browse embed in #info",

@@ -93,6 +93,11 @@
         "number": 15,
         "title": "Stop Leaving and Rejoining",
         "description": "Repeatedly leaving and rejoining the server serves no purpose and is disruptive. If you want a break, just mute the server. Members observed doing this repeatedly will be banned."
+      },
+      {
+        "number": 16,
+        "title": "Joe Strange",
+        "description": "Do not post personal information relating to Joe Strange or images taken from his personal social media. Images that show on Google Search are fine."
       }
     ]
   }

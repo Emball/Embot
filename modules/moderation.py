@@ -493,7 +493,7 @@ class BanAppealView(ui.View):
         super().__init__(timeout=None)
         self.guild_id = guild_id
 
-    @ui.button(label="Submit Appeal", style=discord.ButtonStyle.primary, emoji="",
+    @ui.button(label="Submit Appeal", style=discord.ButtonStyle.primary, emoji="📝",
                custom_id="ban_appeal_submit")
     async def appeal_button(self, interaction: discord.Interaction, button: ui.Button):
         if not hasattr(interaction.client, 'moderation') or \
@@ -516,7 +516,7 @@ class ActionReviewView(ui.View):
         self.revert_btn.custom_id   = f"action_revert:{action_id}"
         self.view_chat_btn.custom_id = f"action_viewchat:{action_id}"
 
-    @ui.button(label="Approve", style=discord.ButtonStyle.green, emoji="")
+    @ui.button(label="Approve", style=discord.ButtonStyle.green, emoji="✅")
     async def approve_btn(self, interaction: discord.Interaction, button: ui.Button):
         action_id = button.custom_id.split(":", 1)[1]
         success = await self.moderation.approve_action(action_id)
@@ -552,7 +552,7 @@ class ActionReviewView(ui.View):
             await interaction.response.send_message(
                 "Failed to revert action.", ephemeral=True)
 
-    @ui.button(label="View Chat", style=discord.ButtonStyle.gray, emoji="")
+    @ui.button(label="View Chat", style=discord.ButtonStyle.gray, emoji="💬")
     async def view_chat_btn(self, interaction: discord.Interaction, button: ui.Button):
         action_id = button.custom_id.split(":", 1)[1]
         action    = self.moderation._get_pending_action(action_id)
@@ -575,9 +575,9 @@ class AppealVoteView(ui.View):
         # Embed appeal_id in each custom_id so Discord can route interactions
         # to the correct view instance after a bot restart.
         yes_btn = ui.Button(label="Vote Yes", style=discord.ButtonStyle.green,
-                            emoji="", custom_id=f"appeal_accept:{appeal_id}")
+                            emoji="✅", custom_id=f"appeal_accept:{appeal_id}")
         no_btn  = ui.Button(label="Vote No",  style=discord.ButtonStyle.red,
-                            emoji="", custom_id=f"appeal_deny:{appeal_id}")
+                            emoji="❌", custom_id=f"appeal_deny:{appeal_id}")
         yes_btn.callback = self._accept_callback
         no_btn.callback  = self._deny_callback
         self.add_item(yes_btn)

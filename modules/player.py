@@ -158,7 +158,7 @@ class MusicPlayer:
         duration_str = str(timedelta(seconds=self.current.duration)) if self.current.duration > 0 else "Unknown"
         
         embed = discord.Embed(
-            title="Now Playing",
+            title="🎵 Now Playing",
             description=f"**{self.current.title}**",
             color=0x1abc9c
         )
@@ -187,7 +187,7 @@ class MusicPlayer:
                     await self.queue.put(item)
                 embed.add_field(name="Next Up", value=next_song.title, inline=False)
         
-        embed.set_footer(text=f"Loop: {' ON' if self.loop else '⏹ OFF'} | Queue: {self.queue.qsize()}")
+        embed.set_footer(text=f"Loop: {'🔁 ON' if self.loop else '⏹ OFF'} | Queue: {self.queue.qsize()}")
 
         try:
             self.now_playing_msg = await self.text_channel.send(embed=embed)
@@ -535,7 +535,7 @@ def setup(bot):
             return
             
         embed = discord.Embed(
-            title="Music Queue",
+            title="🎵 Music Queue",
             color=0x3498db
         )
         
@@ -572,7 +572,7 @@ def setup(bot):
             if len(queue_items) > 10:
                 embed.set_footer(text=f"Plus {len(queue_items) - 10} more songs...")
         
-        embed.set_footer(text=f"Loop: {' ON' if player.loop else '⏹ OFF'}")
+        embed.set_footer(text=f"Loop: {'🔁 ON' if player.loop else '⏹ OFF'}")
         await interaction.response.send_message(embed=embed)
 
     @bot.tree.command(name="loop", description="Toggle loop mode for current song")

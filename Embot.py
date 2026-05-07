@@ -718,8 +718,11 @@ def handle_signal(signum, frame):
     """Handle termination signals"""
     signame = signal.Signals(signum).name
     
-    # Create task to shutdown gracefully
-    loop = asyncio.get_event_loop()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
     loop.create_task(shutdown_bot(signame))
 
 def _register_events():

@@ -40,12 +40,12 @@ ANNOUNCEMENTS_CHANNEL_NAME = "announcements"
 GENERAL_CHANNEL_NAME   = "general"
 
 VOTE_EMOJIS: dict[str, int] = {
-    "": 5,
+    "🔥": 5,
     "⭐": 10,
-    "": 0,
-    "": -5,
+    "😐": 0,
+    "🗑️": -5,
 }
-SETUP_EMOJIS = ["", "", ""]   # Bot reacts with these on every submission
+SETUP_EMOJIS = ["🔥", "😐", "🗑️"]   # Bot reacts with these on every submission
 
 MIN_DESCRIPTION_LENGTH = 10
 VERSION_REENTRY_DAYS   = 30          # Days before a group can re-enter spotlight

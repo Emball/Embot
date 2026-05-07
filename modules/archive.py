@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import atexit
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -17,6 +18,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
 METADATA_EXECUTOR = ThreadPoolExecutor(max_workers=4)
+atexit.register(METADATA_EXECUTOR.shutdown, wait=False)
 MODULE_NAME = "ARCHIVE"
 
 _cache_lock = asyncio.Lock()

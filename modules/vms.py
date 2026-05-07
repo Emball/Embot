@@ -324,49 +324,156 @@ def _get_ogg_duration(filepath: str) -> float:
         pass
     return 0.0
 
-# ==================== WHISPER (lazy-loaded, thread-safe, custom model dir) ==
+# ==================== WHISPER LIFECYCLE MANAGER ====================
+# Load on first use, unload after WHISPER_IDLE_UNLOAD_SECS of inactivity,
+# explicitly free CUDA memory on unload.  All access goes through _WhisperManager.
 
-_whisper_model  = None
-_whisper_lock   = threading.Lock()
-_whisper_device = "cpu"
-_whisper_load_failed = False   # set True on first failure — stops retrying
+WHISPER_IDLE_UNLOAD_SECS = int(os.getenv("WHISPER_IDLE_UNLOAD_SECS", "300"))  # 5 min default
 
 
-def _load_whisper() -> Optional[object]:
-    """Load Whisper once (lazy, thread-safe). Prefers CUDA, falls back to CPU."""
-    global _whisper_model, _whisper_device, _whisper_load_failed
-    if _whisper_model is not None:
-        return _whisper_model
-    if _whisper_load_failed:
-        return None
-    with _whisper_lock:
-        if _whisper_model is not None:
-            return _whisper_model
-        if _whisper_load_failed:
-            return None
+class _WhisperManager:
+    """
+    Thread-safe Whisper model lifecycle manager.
+
+    • load()   — returns the model, loading it if necessary.
+    • touch()  — reset the idle timer (call after each successful transcription).
+    • unload() — explicitly free the model and CUDA context.
+
+    A background daemon thread calls unload() automatically after
+    WHISPER_IDLE_UNLOAD_SECS of inactivity (no touch() calls).
+    """
+
+    def __init__(self):
+        self._lock        = threading.Lock()
+        self._model       = None
+        self._device      = "cpu"
+        self._load_failed = False          # stops retrying after a hard failure
+        self._last_use    = 0.0            # epoch seconds of last touch()
+        self._watchdog: Optional[threading.Thread] = None
+        self._stop_watchdog = threading.Event()
+
+    # ── Public API ──────────────────────────────────────────────────────────
+
+    def load(self, model_size: Optional[str] = None) -> Optional[object]:
+        """Return the loaded model, loading it now if needed. Returns None on failure."""
+        size = model_size or WHISPER_MODEL_SIZE
+        with self._lock:
+            if self._model is not None:
+                # If a different size was requested, swap out.
+                if getattr(self._model, '_vms_size', None) != size:
+                    self._unload_locked()
+                else:
+                    self._last_use = time.time()
+                    return self._model
+            if self._load_failed:
+                return None
+            self._load_locked(size)
+            return self._model
+
+    def touch(self):
+        """Reset the idle timer. Call after each successful transcription."""
+        self._last_use = time.time()
+
+    def unload(self):
+        """Explicitly free the model and CUDA context (safe to call when already unloaded)."""
+        with self._lock:
+            self._unload_locked()
+
+    def start_watchdog(self):
+        """Start the idle-unload background thread (idempotent)."""
+        if self._watchdog is not None and self._watchdog.is_alive():
+            return
+        self._stop_watchdog.clear()
+        self._watchdog = threading.Thread(
+            target=self._watchdog_loop,
+            name="vms_whisper_watchdog",
+            daemon=True,
+        )
+        self._watchdog.start()
+
+    def stop_watchdog(self):
+        """Stop the idle-unload watchdog (called on bot shutdown)."""
+        self._stop_watchdog.set()
+
+    # ── Internal ────────────────────────────────────────────────────────────
+
+    def _load_locked(self, size: str):
+        """Must be called with self._lock held."""
         try:
             import whisper
             try:
                 import torch
-                _whisper_device = "cuda" if torch.cuda.is_available() else "cpu"
+                self._device = "cuda" if torch.cuda.is_available() else "cpu"
             except ImportError:
-                _whisper_device = "cpu"
+                self._device = "cpu"
             model_dir = str(_whisper_model_dir())
-            print(f"[{MODULE_NAME}] Loading Whisper '{WHISPER_MODEL_SIZE}' "
-                  f"on {_whisper_device} (cache: {model_dir})\u2026")
-            _whisper_model = whisper.load_model(
-                WHISPER_MODEL_SIZE,
-                device=_whisper_device,
-                download_root=model_dir,
-            )
-            print(f"[{MODULE_NAME}] Whisper loaded on {_whisper_device}")
+            print(f"[{MODULE_NAME}] Loading Whisper '{size}' "
+                  f"on {self._device} (cache: {model_dir})\u2026")
+            m = whisper.load_model(size, device=self._device, download_root=model_dir)
+            m._vms_size  = size
+            self._model  = m
+            self._last_use = time.time()
+            print(f"[{MODULE_NAME}] Whisper '{size}' loaded on {self._device}")
         except ImportError:
-            print(f"[{MODULE_NAME}] openai-whisper not installed — transcription disabled")
-            _whisper_load_failed = True
+            print(f"[{MODULE_NAME}] openai-whisper not installed \u2014 transcription disabled")
+            self._load_failed = True
         except Exception as exc:
             print(f"[{MODULE_NAME}] Whisper load error: {exc}")
-            _whisper_load_failed = True
-    return _whisper_model
+            self._load_failed = True
+
+    def _unload_locked(self):
+        """Free the model and CUDA context. Must be called with self._lock held."""
+        if self._model is None:
+            return
+        print(f"[{MODULE_NAME}] Unloading Whisper model (idle for "
+              f"{int(time.time() - self._last_use)}s)\u2026")
+        try:
+            # Move tensors off GPU before dropping the reference so PyTorch
+            # can release the CUDA context immediately rather than waiting
+            # for the garbage collector.
+            if self._device == "cuda":
+                try:
+                    import torch
+                    self._model.cpu()
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self._model  = None
+        self._device = "cpu"
+        print(f"[{MODULE_NAME}] Whisper model unloaded")
+
+    def _watchdog_loop(self):
+        """Background thread: unload model after WHISPER_IDLE_UNLOAD_SECS of inactivity."""
+        while not self._stop_watchdog.is_set():
+            self._stop_watchdog.wait(timeout=30)   # check every 30 s
+            if self._stop_watchdog.is_set():
+                break
+            with self._lock:
+                if self._model is None:
+                    continue
+                idle = time.time() - self._last_use
+                if idle >= WHISPER_IDLE_UNLOAD_SECS:
+                    self._unload_locked()
+
+
+# Module-level singleton — all code that previously used _whisper_model
+# directly now goes through this object.
+_whisper_mgr = _WhisperManager()
+
+# ── Compatibility shims for code that calls _load_whisper() / _whisper_lock ──
+# These preserve the existing call-sites without any further changes.
+
+_whisper_lock = _whisper_mgr._lock   # BulkProcessor/backfill use this for size-swap guard
+
+
+def _load_whisper() -> Optional[object]:
+    """Load Whisper via the lifecycle manager (lazy, idle-unloading)."""
+    model = _whisper_mgr.load()
+    if model is not None:
+        _whisper_mgr.start_watchdog()
+    return model
 
 def _quarantine_file(filepath: str) -> str:
     """Move a corrupt OGG to the broken dir. Returns the filename."""
@@ -432,6 +539,7 @@ def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool, 
             options  = _whisper.DecodingOptions(fp16=False)
             result   = _whisper.decode(model, mel, options)
             transcript = (result.text or "").strip() or None
+            _whisper_mgr.touch()   # reset idle-unload timer
             return transcript, duration, waveform, False, Path(filepath).name
 
         except (RuntimeError, ValueError) as exc:
@@ -458,29 +566,14 @@ def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool, 
 
 def _transcribe_with_model(filepath: str, model_size: str) -> Tuple[Optional[str], float, bool]:
     """Transcribe with a specific model size. Returns (transcript, duration, is_broken). Does not touch the DB."""
-    global _whisper_model, _whisper_device, _whisper_load_failed
-
     try:
         duration = _get_ogg_duration(filepath)
         import whisper as _whisper
-        try:
-            import torch
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        except ImportError:
-            device = "cpu"
 
-        model_dir = str(_whisper_model_dir())
-        with _whisper_lock:
-            if _whisper_model is None or getattr(_whisper_model, '_vms_size', None) != model_size:
-                try:
-                    m = _whisper.load_model(model_size, device=device, download_root=model_dir)
-                    m._vms_size = model_size
-                    _whisper_model  = m
-                    _whisper_device = device
-                    _whisper_load_failed = False
-                except Exception:
-                    return None, duration, True
-            model = _whisper_model
+        # Load (or swap to) the requested model size via the lifecycle manager.
+        model = _whisper_mgr.load(model_size)
+        if model is None:
+            return None, duration, True
 
         audio = _whisper.load_audio(filepath)
         if not _is_audio_valid(audio):
@@ -491,6 +584,7 @@ def _transcribe_with_model(filepath: str, model_size: str) -> Tuple[Optional[str
         _, _   = model.detect_language(mel)
         opts   = _whisper.DecodingOptions(fp16=False)
         result = _whisper.decode(model, mel, opts)
+        _whisper_mgr.touch()   # reset idle-unload timer
         return (result.text or "").strip() or None, duration, False
 
     except Exception:
@@ -1878,6 +1972,37 @@ class VMSManager:
         await self.run_archive_if_due()
         self.bot.logger.log(MODULE_NAME, "VMS startup complete")
 
+    async def shutdown(self):
+        """Gracefully shut down all background workers, executors, and the Whisper model."""
+        self.bot.logger.log(MODULE_NAME, "VMS shutting down…")
+
+        # Cancel the live transcription queue worker
+        if self._queue_task is not None and not self._queue_task.done():
+            self._queue_task.cancel()
+            try:
+                await self._queue_task
+            except asyncio.CancelledError:
+                pass
+            self._queue_task = None
+
+        # Stop the BulkProcessor
+        if self._bulk_proc is not None and self._bulk_proc.is_running():
+            self._bulk_proc.stop()
+
+        # Shut down thread-pool executors (wait for in-flight work to finish)
+        self._executor.shutdown(wait=True)
+        self._scan_executor.shutdown(wait=True)
+
+        # Unload Whisper and stop its idle-watchdog thread
+        _whisper_mgr.stop_watchdog()
+        _whisper_mgr.unload()
+
+        # Close the aiohttp session
+        if self._session and not self._session.closed:
+            await self._session.close()
+
+        self.bot.logger.log(MODULE_NAME, "VMS shutdown complete")
+
 
 # ==================== EXTERNAL TRANSCRIPTION QUEUE ====================
 
@@ -2080,7 +2205,7 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
     )
 
     # — Fun facts
-    peak_hour_fmt = datetime.strptime(str(peak_hour), "%H").strftime("%-I %p")
+    peak_hour_fmt = datetime.strptime(str(peak_hour), "%H").strftime("%I %p").lstrip("0")
     facts = [
         f"🏆 Chattiest sender: **{top_user}** with {top_user_count} VMs" if top_user else None,
         f"📺 Busiest channel: <#{top_channel_id}>" if top_channel_id else None,
@@ -2371,6 +2496,11 @@ def setup(bot):
                 else:
                     bot.logger.log(MODULE_NAME,
                         f"Playback triggered ({mode}) but no eligible VMs found")
+
+    @bot.listen()
+    async def on_close():
+        """Ensure all VMS background workers and the Whisper model are cleaned up on shutdown."""
+        await manager.shutdown()
 
     bot.logger.log(MODULE_NAME, "VMS module setup complete")
 

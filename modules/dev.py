@@ -30,7 +30,7 @@ EXCLUDE_FILES = [
     '*.pyo',
     '*.pyd'
 ]
-EXCLUDE_DIRS = ['Winpython64', 'python-3', 'venv', 'env', '.git', '__pycache__', 'cache', 'db', 'logs', 'icons', 'config']
+EXCLUDE_DIRS = ['.venv', 'venv', 'env', '.git', '__pycache__', 'cache', 'db', 'logs', 'icons', 'config']
 
 # Enhanced semantic versioning thresholds (actual lines changed, not estimated)
 BREAKING_THRESHOLD = 500    # Breaking changes (major version bump)
@@ -269,11 +269,10 @@ config.ini
 secrets.json
 
 # Music library (if you don't want to track it)
-# D:/Media/Music/
+# /path/to/your/music/
 
-# Windows Python distributions
-Winpython64/
-python-3/
+# uv virtual environment
+.venv/
 
 # Large data directories
 icons/

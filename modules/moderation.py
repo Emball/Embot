@@ -620,6 +620,16 @@ class AppealVoteView(ui.View):
         super().__init__(timeout=None)
         self.moderation = moderation_system
         self.appeal_id  = appeal_id
+        # Embed appeal_id in each custom_id so Discord can route interactions
+        # to the correct view instance after a bot restart.
+        yes_btn = ui.Button(label="Vote Yes", style=discord.ButtonStyle.green,
+                            emoji="✅", custom_id=f"appeal_accept:{appeal_id}")
+        no_btn  = ui.Button(label="Vote No",  style=discord.ButtonStyle.red,
+                            emoji="❌", custom_id=f"appeal_deny:{appeal_id}")
+        yes_btn.callback = self._accept_callback
+        no_btn.callback  = self._deny_callback
+        self.add_item(yes_btn)
+        self.add_item(no_btn)
 
     def _updated_embed(self, message: discord.Message,
                         votes_for: list, votes_against: list) -> discord.Embed:
@@ -644,9 +654,7 @@ class AppealVoteView(ui.View):
             embed.set_footer(text=old.footer.text)
         return embed
 
-    @ui.button(label="Vote Yes", style=discord.ButtonStyle.green,
-               emoji="✅", custom_id="appeal_accept")
-    async def accept_button(self, interaction: discord.Interaction, button: ui.Button):
+    async def _accept_callback(self, interaction: discord.Interaction):
         cfg = self.moderation.cfg
         if not has_elevated_role(interaction.user, cfg):
             await interaction.response.send_message(
@@ -675,9 +683,7 @@ class AppealVoteView(ui.View):
         updated_embed = self._updated_embed(interaction.message, votes_for, votes_against)
         await interaction.response.edit_message(embed=updated_embed, view=self)
 
-    @ui.button(label="Vote No", style=discord.ButtonStyle.red,
-               emoji="❌", custom_id="appeal_deny")
-    async def deny_button(self, interaction: discord.Interaction, button: ui.Button):
+    async def _deny_callback(self, interaction: discord.Interaction):
         cfg = self.moderation.cfg
         if not has_elevated_role(interaction.user, cfg):
             await interaction.response.send_message(
@@ -965,10 +971,16 @@ class ModerationSystem:
         self._bot_log_cache_size             = BOT_LOG_CACHE_SIZE
         self._deletion_warnings: Dict[int, str] = {}
 
-        # Message cache for context (guild_id -> channel_id -> list)
+        # Message cache for context (guild_id -> channel_id -> list[msg_data])
+        # Bounded: max 200 channels per guild, 100 messages per channel.
+        MESSAGE_CACHE_MAX_CHANNELS = 200
+        self._msg_cache_max_channels = MESSAGE_CACHE_MAX_CHANNELS
         self.message_cache = {}
 
-        # Media cache index: message_id -> {'files': [...], 'author_id', 'guild_id'}
+        # Media cache index: message_id -> {'files': [...], 'author_id', 'guild_id', 'cached_at'}
+        # TTL: entries older than MEDIA_CACHE_TTL_SECS are evicted by the cleanup task.
+        MEDIA_CACHE_TTL_SECS = 3600   # 1 hour
+        self._media_cache_ttl = MEDIA_CACHE_TTL_SECS
         self.media_cache = {}
 
         # Tracked embeds for deletion monitoring
@@ -982,6 +994,7 @@ class ModerationSystem:
         # Background tasks
         self.check_expired_mutes.start()
         self.cleanup_invites.start()
+        self.cleanup_media_cache.start()
         self.send_daily_report.start()
         self.resolve_expired_appeals.start()
 
@@ -1121,7 +1134,18 @@ class ModerationSystem:
             return
         guild_id   = str(message.guild.id)
         channel_id = str(message.channel.id)
-        self.message_cache.setdefault(guild_id, {}).setdefault(channel_id, [])
+        guild_cache = self.message_cache.setdefault(guild_id, {})
+
+        # ── Channel cap: if this guild already has too many cached channels,
+        #    evict the one that hasn't received a message longest (first key).
+        if channel_id not in guild_cache and len(guild_cache) >= self._msg_cache_max_channels:
+            evict_ch = next(iter(guild_cache))
+            evicted_msgs = guild_cache.pop(evict_ch, [])
+            for m in evicted_msgs:
+                if m.get('id'):
+                    self._delete_media_files(m['id'])
+
+        guild_cache.setdefault(channel_id, [])
 
         downloaded = []
         for idx, att in enumerate(message.attachments):
@@ -1144,6 +1168,7 @@ class ModerationSystem:
                 'files':     downloaded,
                 'author_id': message.author.id,
                 'guild_id':  message.guild.id,
+                'cached_at': datetime.now(timezone.utc).timestamp(),
             }
 
         msg_data = {
@@ -1155,7 +1180,7 @@ class ModerationSystem:
             'attachments': [att.url for att in message.attachments],
             'embeds':      len(message.embeds),
         }
-        cache_list = self.message_cache[guild_id][channel_id]
+        cache_list = guild_cache[channel_id]
         cache_list.append(msg_data)
         if len(cache_list) > 100:
             evicted = cache_list.pop(0)
@@ -1214,7 +1239,10 @@ class ModerationSystem:
             draw.text((padding, y + 20), content, fill='#dcddde', font=font)
             y += line_height
         buffer = io.BytesIO()
-        img.save(buffer, format='PNG')
+        try:
+            img.save(buffer, format='PNG')
+        finally:
+            img.close()   # free PIL backing store; BytesIO stays alive for the caller
         buffer.seek(0)
         return buffer
 
@@ -1701,13 +1729,20 @@ class ModerationSystem:
         row = self._get_appeal(appeal_id)
         if not row:
             return False
+        # Always delete the appeal record first so a partial failure never causes a retry loop.
+        self._exec("DELETE FROM mod_appeals WHERE appeal_id=?", (appeal_id,))
         try:
             guild = self.bot.get_guild(row["guild_id"])
             if not guild:
                 return False
-            user        = await self.bot.fetch_user(row["user_id"])
+            user = await self.bot.fetch_user(row["user_id"])
+            # Attempt unban — user may already be unbanned; treat NotFound as a no-op.
+            try:
+                await guild.unban(user, reason="Appeal approved")
+            except discord.NotFound:
+                self.bot.logger.log(MODULE_NAME,
+                    f"Appeal {appeal_id}: user {row['user_id']} was not banned — skipping unban")
             invite_link = await self._create_ban_reversal_invite(guild, row["user_id"])
-            await guild.unban(user, reason="Appeal approved")
             try:
                 embed = discord.Embed(
                     title="Ban Appeal Approved",
@@ -1729,7 +1764,6 @@ class ModerationSystem:
                 log_embed.add_field(name="Appeal Text",
                                     value=row["appeal_text"][:1024], inline=False)
                 await self.send_bot_log(guild, log_embed)
-            self._exec("DELETE FROM mod_appeals WHERE appeal_id=?", (appeal_id,))
             return True
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, f"Failed to approve appeal {appeal_id}", e)
@@ -1988,6 +2022,28 @@ class ModerationSystem:
 
     @cleanup_invites.before_loop
     async def before_cleanup_invites(self):
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(minutes=15)
+    async def cleanup_media_cache(self):
+        """Evict media_cache entries whose TTL has expired."""
+        try:
+            cutoff = datetime.now(timezone.utc).timestamp() - self._media_cache_ttl
+            expired = [
+                mid for mid, entry in list(self.media_cache.items())
+                if entry.get('cached_at', 0) < cutoff
+            ]
+            for mid in expired:
+                self._delete_media_files(mid)
+            if expired:
+                self.bot.logger.log(
+                    MODULE_NAME,
+                    f"media_cache TTL eviction: removed {len(expired)} stale entry/entries")
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "media_cache cleanup error", e)
+
+    @cleanup_media_cache.before_loop
+    async def before_cleanup_media_cache(self):
         await self.bot.wait_until_ready()
 
     @tasks.loop(hours=24)
@@ -2632,7 +2688,10 @@ def setup(bot):
 
     # Re-register persistent views so buttons work after bot restarts
     bot.add_view(BanAppealView(guild_id=0))
-    bot.add_view(AppealVoteView(moderation_system=mod_system, appeal_id="__placeholder__"))
+    # Re-register one AppealVoteView per live appeal — custom_ids are per-appeal
+    # so a single placeholder view cannot cover them all after a restart.
+    for appeal_row in mod_system._all("SELECT appeal_id FROM mod_appeals WHERE status='pending'"):
+        bot.add_view(AppealVoteView(moderation_system=mod_system, appeal_id=appeal_row["appeal_id"]))
     # Re-register one ActionReviewView per pending action so owner DM buttons still work
     for row in mod_system._all("SELECT * FROM mod_pending_actions WHERE status='pending'"):
         action = mod_system._row_to_action(row)

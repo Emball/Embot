@@ -617,4 +617,19 @@ def setup(bot):
         await interaction.response.send_message("👋 Disconnected from voice channel")
         bot.logger.log(MODULE_NAME, f"Left voice channel in guild {guild_id}")
 
+    @bot.listen()
+    async def on_close():
+        """Clean up any lingering MusicPlayer instances on shutdown."""
+        for guild_id, player in list(bot.music_players.items()):
+            try:
+                player.stop()
+                if player.disconnect_timer and not player.disconnect_timer.done():
+                    player.disconnect_timer.cancel()
+                if player.voice_client and player.voice_client.is_connected():
+                    await player.voice_client.disconnect(force=True)
+            except Exception:
+                pass
+        bot.music_players.clear()
+        bot.logger.log(MODULE_NAME, "Player shutdown complete")
+
     bot.logger.log(MODULE_NAME, "Player module setup complete")

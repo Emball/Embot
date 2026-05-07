@@ -48,9 +48,15 @@ uv sync --frozen --python 3.11
 echo "[start.sh] Starting Embot (press Ctrl+C to stop)..."
 while true; do
     # Runs Embot.py using the project's managed Python 3.11 environment.
-    uv run python "$SCRIPT_DIR/Embot.py" -dev || true
+    uv run python "$SCRIPT_DIR/Embot.py" -dev
+    EXIT_CODE=$?
+    
+    if [ $EXIT_CODE -eq 42 ]; then
+        echo "[start.sh] Auto-update completed, restarting immediately..."
+        continue
+    fi
     
     echo
-    echo "[start.sh] Embot exited. Press Enter to restart, or Ctrl+C to stop."
-    read -r || break
+    echo "[start.sh] Embot exited (code $EXIT_CODE). Restarting in 3s (Ctrl+C to stop)..."
+    sleep 3 || break
 done

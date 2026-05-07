@@ -44,7 +44,11 @@ echo [start.bat] Starting Embot (press Ctrl+C to stop)...
 
 :restart
 uv run python "%SCRIPT_DIR%Embot.py" -dev
+if %errorlevel% equ 42 (
+    echo [start.bat] Auto-update completed, restarting immediately...
+    goto restart
+)
 echo.
-echo [start.bat] Embot exited. Press Enter to restart, or Ctrl+C to stop.
-pause >nul
-goto restart
+echo [start.bat] Embot exited (code %errorlevel%). Restarting in 3s (Ctrl+C to stop)...
+timeout /t 3 /nobreak
+if %errorlevel% equ 0 goto restart

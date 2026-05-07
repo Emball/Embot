@@ -749,6 +749,58 @@ icons/
         
         return info
 
+async def _auto_update_loop(bot, dev_manager):
+    """Periodically check remote git for updates. If behind, pull and restart."""
+    interval = bot.config.get("network", {}).get("auto_update_interval_minutes", 5) * 60
+    if not bot.config.get("network", {}).get("auto_update", True):
+        return
+    if not dev_manager.git_enabled:
+        return
+
+    await bot.wait_until_ready()
+    await asyncio.sleep(30)  # Let startup settle
+
+    git_env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GCM_INTERACTIVE': 'never'}
+
+    while not bot.is_closed():
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                'git', '-c', 'credential.helper=', 'rev-parse', 'HEAD',
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env=git_env
+            )
+            stdout, _ = await proc.communicate()
+            local_head = stdout.decode().strip()
+
+            proc = await asyncio.create_subprocess_exec(
+                'git', '-c', 'credential.helper=', 'ls-remote', 'origin', 'HEAD',
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env=git_env
+            )
+            stdout, _ = await proc.communicate()
+            remote_head = stdout.decode().strip().split()[0] if stdout else ""
+
+            if local_head and remote_head and local_head != remote_head:
+                bot.logger.log(MODULE_NAME,
+                    f"Remote has newer commits ({remote_head[:8]} vs {local_head[:8]}), pulling...")
+                proc = await asyncio.create_subprocess_exec(
+                    'git', '-c', 'credential.helper=', 'pull', '--rebase', 'origin', 'main',
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    env=git_env
+                )
+                _, stderr = await proc.communicate()
+                if proc.returncode == 0:
+                    bot.logger.log(MODULE_NAME, "Git pull successful — exiting for restart")
+                    await bot.close()
+                    sys.exit(42)  # Special exit code: auto-update restart
+                else:
+                    bot.logger.log(MODULE_NAME,
+                        f"Auto-update pull failed: {stderr.decode().strip()[:200]}", "WARNING")
+        except Exception as e:
+            bot.logger.log(MODULE_NAME, f"Auto-update check error: {e}", "WARNING")
+
+        await asyncio.sleep(interval)
+
 def setup(bot, register_console_command):
     """Setup function called by main bot to initialize this module"""
     bot.logger.log(MODULE_NAME, "Setting up DEV module (development mode)")
@@ -781,6 +833,7 @@ def setup(bot, register_console_command):
             bot.logger.log(MODULE_NAME, f"Version check complete - v{bot.version} (no changes)")
     
     asyncio.create_task(initial_version_check())
+    asyncio.create_task(_auto_update_loop(bot, dev_manager))
     
     # Register development console commands
     def setup_dev_console_commands():

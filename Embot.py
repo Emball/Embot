@@ -19,7 +19,23 @@ import signal
 parser = argparse.ArgumentParser(description='Embot Discord Bot')
 parser.add_argument('-dev', '--development', action='store_true', 
                     help='Enable development mode (hot-reload, versioning, git integration)')
+parser.add_argument('-c', '--console', type=str, nargs='?', const='__auto__',
+                    help='Connect to a remote embot instance for console relay (host or host:port)')
+parser.add_argument('-t', '--test', type=str, nargs='?', const='__auto__',
+                    help='Test mode: use remote files and pause the primary instance (host or host:port)')
 args = parser.parse_args()
+
+REMOTE_HOST = None
+REMOTE_PORT = None
+if args.console or args.test:
+    target = args.console or args.test
+    if target == '__auto__':
+        REMOTE_HOST = '__auto__'
+    elif ':' in target:
+        REMOTE_HOST, port_str = target.rsplit(':', 1)
+        REMOTE_PORT = int(port_str)
+    else:
+        REMOTE_HOST = target
 
 # Get script directory and create logs folder
 script_dir = Path(__file__).parent.absolute()
@@ -32,6 +48,14 @@ _CONFIG_DEFAULTS = {
     "home_guild_id":              0,
     "latency_warning_threshold":  1.0,
     "heartbeat_interval_seconds": 60,
+    "network": {
+        "enabled": True,
+        "host": "0.0.0.0",
+        "port": 9876,
+        "remote_host": "10.0.0.5",
+        "auto_update": True,
+        "auto_update_interval_minutes": 5,
+    },
 }
 
 def load_config() -> dict:
@@ -711,9 +735,21 @@ def _register_events():
 
 def run_bot(token):
     """Start the bot with the given token. Callable from external launchers."""
-    global bot, _cfg, args, data_dir, script_dir
+    global bot, _cfg, args, data_dir, script_dir, REMOTE_HOST, REMOTE_PORT
 
     bot.config = _cfg
+
+    # Resolve remote host/port from config if using --console/-t without explicit host
+    if REMOTE_HOST == '__auto__':
+        net = _cfg.get("network", {})
+        REMOTE_HOST = net.get("remote_host", "localhost")
+    if REMOTE_PORT is None:
+        REMOTE_PORT = _cfg.get("network", {}).get("port", 9876)
+
+    # --console mode: connect to remote console
+    if args.console or args.test:
+        asyncio.run(_run_remote_mode(token))
+        return
 
     home_guild_id = int(_cfg.get("home_guild_id") or 0)
     if not home_guild_id:
@@ -740,7 +776,104 @@ def run_bot(token):
         bot.logger.error("MAIN", "Failed to start bot", e)
         sys.exit(1)
 
+async def _run_remote_mode(token):
+    from network import NetworkClient
+    client = NetworkClient(bot, REMOTE_HOST, REMOTE_PORT)
+    await client.connect(mode="test" if args.test else "console")
+
+    if args.console:
+        await _run_console_client(client)
+    else:
+        await _run_test_mode(client, token)
+
+async def _run_console_client(client):
+    """--console mode: relay stdin/stdout to remote server."""
+    await client.subscribe_console()
+    print(f"Connected to remote console at {REMOTE_HOST}:{REMOTE_PORT}")
+    print("Type 'exit' to disconnect.\n")
+
+    async def read_remote():
+        while client.connected:
+            msg = await client.recv()
+            if msg is None:
+                break
+            if msg.get("type") == "console_output":
+                sys.stdout.write(msg["data"])
+                sys.stdout.flush()
+        client._connected = False
+
+    task = asyncio.create_task(read_remote())
+
+    try:
+        while client.connected:
+            line = await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
+            if not line:
+                break
+            if line.strip().lower() == 'exit':
+                break
+            await client.send_console_input(line)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        task.cancel()
+        await client.close()
+        print("\nDisconnected.")
+
+async def _run_test_mode(client, token):
+    """--test mode: claim dominance, sync remote files, run bot."""
+    resp = await client.claim_dominance("test")
+    if resp and resp.get("paused"):
+        bot.logger.log("MAIN", "Primary instance paused — test mode active")
+
+    # Download critical files from remote server
+    await _sync_remote_files(client)
+
+    home_guild_id = int(_cfg.get("home_guild_id") or 0)
+    if not home_guild_id:
+        bot.logger.error("MAIN", "home_guild_id is not set in config/embot.json!")
+        bot.logger.log("MAIN", f"Edit {_CONFIG_PATH} and set home_guild_id to your server's ID.")
+        sys.exit(1)
+
+    bot.home_guild_id = home_guild_id
+    _register_events()
+
+    try:
+        if hasattr(signal, 'SIGTERM'):
+            signal.signal(signal.SIGTERM, handle_signal)
+        signal.signal(signal.SIGINT, handle_signal)
+        setup_console_commands()
+
+        bot.logger.log("MAIN", f"Starting Embot v{load_version()} in test mode (synced files)...")
+        await bot.start(token)
+    finally:
+        await client.release_dominance()
+        await client.close()
+        bot.logger.log("MAIN", "Test mode ended — primary instance resumed")
+
+
+async def _sync_remote_files(client):
+    """Download config, db, and cache files from remote server."""
+    dirs_to_sync = ["config", "db", "cache"]
+    for dir_name in dirs_to_sync:
+        local_dir = script_dir / dir_name
+        local_dir.mkdir(parents=True, exist_ok=True)
+        entries = await client.list_files(dir_name)
+        for entry in entries:
+            if entry.get("is_dir"):
+                continue
+            remote_path = f"{dir_name}/{entry['name']}"
+            data = await client.read_file(remote_path)
+            if data is not None:
+                dest = local_dir / entry['name']
+                dest.write_bytes(data)
+    bot.logger.log("MAIN", "Synced config, db, and cache from remote server")
+
 if __name__ == "__main__":
+    # --console mode doesn't need a token
+    if args.console:
+        asyncio.run(_run_remote_mode(""))
+        sys.exit(0)
+
     TOKEN_FILE = (script_dir / "config" / "token") if (script_dir / "config" / "token").exists() else (script_dir / "token.json")
     TOKEN = ""
     if TOKEN_FILE.exists():

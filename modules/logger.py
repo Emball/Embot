@@ -2,6 +2,7 @@ import discord
 from discord import app_commands
 from datetime import datetime, timezone
 from typing import Optional
+from pathlib import Path
 import json
 import os
 
@@ -12,7 +13,6 @@ class EventLogger:
     
     def __init__(self, bot):
         self.bot = bot
-        from pathlib import Path
         config_dir = Path(__file__).parent.parent / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
         self.config_file = str(config_dir / "logger_config.json")

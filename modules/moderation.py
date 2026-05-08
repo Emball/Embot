@@ -2108,8 +2108,7 @@ async def _do_ban(ctx: ModContext, mod: ModerationSystem,
 async def _do_unban(ctx: ModContext, mod: ModerationSystem,
                     user_id: str, reason: str = "No reason provided", fake: bool = False):
     cfg = mod.cfg
-    if not ctx.author.guild_permissions.ban_members and \
-            not has_elevated_role(ctx.author, cfg):
+    if not has_elevated_role(ctx.author, cfg):
         return await ctx.error(ERROR_NO_PERMISSION)
     try:
         user = await ctx.bot.fetch_user(int(user_id))
@@ -2228,115 +2227,8 @@ async def _do_timeout(ctx: ModContext, mod: ModerationSystem,
 async def _do_untimeout(ctx: ModContext, mod: ModerationSystem,
                          member: discord.Member, fake: bool = False):
     cfg = mod.cfg
-    if not ctx.author.guild_permissions.moderate_members and \
-            not has_elevated_role(ctx.author, cfg):
-        return await ctx.error("You don't have permission to moderate members.")
-    if member == ctx.author:
-        return await ctx.error(ERROR_CANNOT_ACTION_SELF)
-    if member == ctx.bot.user:
-        return await ctx.error(ERROR_CANNOT_ACTION_BOT)
-    try:
-        if not fake:
-            await member.timeout(None, reason=f"Timeout removed by {ctx.author}")
-        embed = discord.Embed(
-            title="Timeout Removed",
-            description=f"{member.mention}'s timeout has been removed.",
-            color=0x2ecc71, timestamp=datetime.now(timezone.utc))
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        await ctx.reply(embed=embed)
-        ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} removed timeout from {member}")
-    except Exception as e:
-        await ctx.error("An error occurred while trying to remove the timeout.")
-        ctx.bot.logger.error(MODULE_NAME, "Untimeout failed", e)
-
-async def _do_mute(ctx: ModContext, mod: ModerationSystem,
-                   member: discord.Member, reason: str = "No reason provided",
-                   duration: Optional[str] = None, fake: bool = False):
-    cfg = mod.cfg
-    if not ctx.author.guild_permissions.manage_roles and \
-            not has_elevated_role(ctx.author, cfg):
-        return await ctx.error("You don't have permission to mute members.")
-    if member == ctx.author:
-        return await ctx.error(ERROR_CANNOT_ACTION_SELF)
-    if member == ctx.bot.user:
-        return await ctx.error(ERROR_CANNOT_ACTION_BOT)
-
-    duration_seconds, duration_str = parse_duration(duration or "")
-    try:
-        muted_role = discord.utils.get(ctx.guild.roles, name=cfg.muted_role_name)
-        if not muted_role:
-            muted_role = await ctx.guild.create_role(
-                name=cfg.muted_role_name, color=discord.Color.dark_gray(),
-                reason="Creating Muted role for moderation")
-            for ch in ctx.guild.channels:
-                try:
-                    await ch.set_permissions(
-                        muted_role, send_messages=False, speak=False)
-                except Exception:
-                    pass
-        if not fake:
-            await member.add_roles(muted_role, reason=reason)
-            mod.add_mute(ctx.guild.id, member.id, reason, ctx.author, duration_seconds)
-        try:
-            dm = discord.Embed(
-                title="You Have Been Muted",
-                description=f"You have been muted in **{ctx.guild.name}**.",
-                color=0xf39c12, timestamp=datetime.now(timezone.utc))
-            dm.add_field(name="Reason",    value=reason,          inline=False)
-            dm.add_field(name="Duration",  value=duration_str,    inline=True)
-            dm.add_field(name="Moderator", value=str(ctx.author), inline=True)
-            await member.send(embed=dm)
-        except discord.Forbidden:
-            pass
-        embed = discord.Embed(
-            title="Member Muted",
-            description=f"{member.mention} has been muted.",
-            color=0xf39c12, timestamp=datetime.now(timezone.utc))
-        embed.add_field(name="Reason",    value=reason,             inline=False)
-        embed.add_field(name="Duration",  value=duration_str,       inline=True)
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        await ctx.reply(embed=embed)
-        el = get_event_logger(ctx.bot)
-        if el:
-            await el.log_mute(
-                ctx.guild, member, ctx.author, reason, duration_str, ctx.channel)
-        ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} muted {member} for {duration_str}")
-    except discord.Forbidden:
-        await ctx.error("I don't have permission to mute this member.")
-    except Exception as e:
-        await ctx.error("An error occurred while trying to mute the member.")
-        ctx.bot.logger.error(MODULE_NAME, "Mute failed", e)
-
-async def _do_unmute(ctx: ModContext, mod: ModerationSystem,
-                     member: discord.Member, fake: bool = False):
-    cfg = mod.cfg
-    if not ctx.author.guild_permissions.manage_roles and \
-            not has_elevated_role(ctx.author, cfg):
-        return await ctx.error("You don't have permission to manage roles.")
-    muted_role = discord.utils.get(ctx.guild.roles, name=cfg.muted_role_name)
-    if not muted_role or muted_role not in member.roles:
-        return await ctx.error("This member is not muted.")
-    try:
-        if not fake:
-            await member.remove_roles(muted_role, reason=f"Unmuted by {ctx.author}")
-            mod.remove_mute(ctx.guild.id, member.id)
-        embed = discord.Embed(
-            title="Member Unmuted",
-            description=f"{member.mention} has been unmuted.",
-            color=0x2ecc71, timestamp=datetime.now(timezone.utc))
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        await ctx.reply(embed=embed)
-        ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} unmuted {member}")
-    except Exception as e:
-        await ctx.error("An error occurred while trying to unmute the member.")
-        ctx.bot.logger.error(MODULE_NAME, "Unmute failed", e)
-
-async def _do_softban(ctx: ModContext, mod: ModerationSystem,
-                      member: discord.Member, reason: str,
-                      delete_days: int = 7, fake: bool = False):
-    cfg = mod.cfg
     if not has_elevated_role(ctx.author, cfg):
-        return await ctx.error(ERROR_NO_PERMISSION)
+        return await ctx.error(ERROR_NO_PERMISSION)  # timeout
     ok, err = validate_reason(reason, cfg.min_reason_length)
     if not ok:
         return await ctx.error(err)
@@ -2427,8 +2319,7 @@ async def _do_warn(ctx: ModContext, mod: ModerationSystem,
         ctx.bot.logger.error(MODULE_NAME, "Warn failed", e)
 
 async def _do_warnings(ctx: ModContext, mod: ModerationSystem, member: discord.Member):
-    if not ctx.author.guild_permissions.manage_messages and \
-            not has_elevated_role(ctx.author, mod.cfg):
+    if not has_elevated_role(ctx.author, mod.cfg):
         return await ctx.error("You don't have permission to view warnings.")
     strikes = mod.get_strike_details(member.id)
     if not strikes:
@@ -2447,8 +2338,8 @@ async def _do_warnings(ctx: ModContext, mod: ModerationSystem, member: discord.M
     await ctx.reply(embed=embed, ephemeral=True)
 
 async def _do_clearwarnings(ctx: ModContext, mod: ModerationSystem, member: discord.Member):
-    if not ctx.author.guild_permissions.administrator:
-        return await ctx.error("You need Administrator permission to clear warnings.")
+    if not has_elevated_role(ctx.author, mod.cfg):
+        return await ctx.error(ERROR_NO_PERMISSION)
     if mod.clear_strikes(member.id):
         embed = discord.Embed(
             title="Warnings Cleared",
@@ -2517,8 +2408,9 @@ async def _do_purge(ctx: ModContext, mod: ModerationSystem,
 
 async def _do_slowmode(ctx: ModContext, mod: ModerationSystem,
                        seconds: int, channel: Optional[discord.TextChannel] = None):
-    if not ctx.author.guild_permissions.manage_channels:
-        return await ctx.error("You don't have permission to manage channels.")
+    cfg = mod.cfg
+    if not has_elevated_role(ctx.author, cfg):
+        return await ctx.error(ERROR_NO_PERMISSION)
     if not (0 <= seconds <= 21600):
         return await ctx.error("Slowmode must be between 0 and 21600 seconds.")
     target = channel or ctx.channel
@@ -2587,8 +2479,9 @@ async def _do_lock(ctx: ModContext, mod: ModerationSystem,
 
 async def _do_unlock(ctx: ModContext, mod: ModerationSystem,
                      channel: Optional[discord.TextChannel] = None):
-    if not ctx.author.guild_permissions.manage_channels:
-        return await ctx.error("You don't have permission to manage channels.")
+    cfg = mod.cfg
+    if not has_elevated_role(ctx.author, cfg):
+        return await ctx.error(ERROR_NO_PERMISSION)
     target = channel or ctx.channel
     try:
         await target.set_permissions(

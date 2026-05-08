@@ -402,22 +402,17 @@ async def _check_for_update(bot) -> bool:
         if remote_ver < local_ver:
             bot.logger.log("AUTO-UPDATE", "Remote is older — skipping")
         return False
-    bot.logger.log("AUTO-UPDATE", "Remote is newer — pulling...")
-    await asyncio.create_subprocess_exec(
-        'git', '-C', str(script_dir), '-c', 'credential.helper=',
-        'reset', '--hard', 'HEAD',
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=git_env
-    )
+    bot.logger.log("AUTO-UPDATE", "Remote is newer — fast-forwarding...")
     proc = await asyncio.create_subprocess_exec(
         'git', '-C', str(script_dir), '-c', 'credential.helper=',
-        'pull', '--rebase', 'origin', 'main',
+        'merge', '--ff-only', 'origin/main',
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=git_env
     )
     _, stderr = await proc.communicate()
     if proc.returncode == 0:
-        bot.logger.log("AUTO-UPDATE", "Pull successful — restart required")
+        bot.logger.log("AUTO-UPDATE", "Fast-forwarded — restart required")
         return True
-    bot.logger.log("AUTO-UPDATE", f"Pull failed: {stderr.decode()[:200]}", "WARNING")
+    bot.logger.log("AUTO-UPDATE", f"Merge failed: {stderr.decode()[:200]}", "WARNING")
     return False
 
 async def _auto_update_loop(bot):

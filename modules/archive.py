@@ -51,9 +51,7 @@ except FileNotFoundError as _e:
 
 FORMATS = ["FLAC", "MP3"]
 CACHE_CHANNEL_NAME = "songcache"
-INDEX_FILE = str(Path(__file__).parent.parent / "cache"/ "archive"/ "song_index.json")
-CACHE_DB = str(Path(__file__).parent.parent / "db"/ "archive_cache.db")
-Path(__file__).parent.parent.joinpath("cache", "archive").mkdir(parents=True, exist_ok=True)
+DB_PATH = str(Path(__file__).parent.parent / "db" / "archive.db")
 Path(__file__).parent.parent.joinpath("db").mkdir(parents=True, exist_ok=True)
 VERSION_KEYWORDS = ['live', 'remix', 'demo', 'acoustic', 'version', 'edit', 'radio']
 SPECIAL_FOLDERS = {
@@ -180,7 +178,9 @@ def normalize_title(title):
 
 async def build_song_index(bot):
     bot.logger.log(MODULE_NAME, "Building song index...")
-    song_index = {fmt: defaultdict(list) for fmt in FORMATS}
+    with _db_conn() as c:
+        c.execute("DELETE FROM song_index")
+        c.commit()
     total = 0
     for fmt in FORMATS:
         fmt_path = EMINEM_ROOT / fmt
@@ -192,7 +192,6 @@ async def build_song_index(bot):
         for root, _, files in os.walk(fmt_path):
             root_path = Path(root)
             folder = root_path.name
-            # category = immediate child of fmt_path (e.g. "1 - Solo")
             try:
                 category = root_path.relative_to(fmt_path).parts[0]
             except (ValueError, IndexError):
@@ -206,7 +205,7 @@ async def build_song_index(bot):
         for i in range(0, len(all_files), batch_size):
             batch = all_files[i:i + batch_size]
             batch_tasks = [
-                process_single_file(bot, full_path, folder, category, song_index, fmt)
+                process_single_file(bot, full_path, folder, category, fmt)
                 for full_path, folder, category in batch
             ]
             results = await asyncio.gather(*batch_tasks, return_exceptions=True)
@@ -215,23 +214,10 @@ async def build_song_index(bot):
                 await asyncio.sleep(0.1)
             bot.logger.log(MODULE_NAME,
                 f"Processed {min(i + batch_size, len(all_files))}/{len(all_files)} files...")
-    tmp = INDEX_FILE + ".tmp"
-    try:
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump({
-                'version': 6,
-                'created_at': datetime.utcnow().isoformat(),
-                'songs': {k: dict(v) for k, v in song_index.items()}
-            }, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, INDEX_FILE)
-        bot.logger.log(MODULE_NAME, f"Indexed {total} songs total")
-    except Exception as e:
-        bot.logger.error(MODULE_NAME, "Failed to save index file", e)
-        if os.path.exists(tmp):
-            os.remove(tmp)
-    return song_index
+    bot.logger.log(MODULE_NAME, f"Indexed {total} songs total")
+    return _load_song_index_from_db()
 
-async def process_single_file(bot, full_path, folder, category, song_index, fmt):
+async def process_single_file(bot, full_path, folder, category, fmt):
     try:
         md = await extract_metadata_async(str(full_path))
         if any(k in folder for k in SPECIAL_FOLDERS):
@@ -239,30 +225,44 @@ async def process_single_file(bot, full_path, folder, category, song_index, fmt)
         if not md:
             md = {'title': full_path.stem, 'album': folder, 'artist': 'Eminem', 'year': ''}
         key = normalize_title(md['title'])
-        song_index[fmt][key].append({
-            'path': str(full_path),
-            'original_title': full_path.stem,
-            'folder': folder,
-            'category': category,
-            'metadata': md
-        })
+        with _db_conn() as c:
+            c.execute(
+                "INSERT OR REPLACE INTO song_index "
+                "(format, normalized_key, file_path, original_title, folder, category, metadata_json) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (fmt, key, str(full_path), full_path.stem, folder, category, json.dumps(md))
+            )
+            c.commit()
         return True
     except Exception as e:
         bot.logger.error(MODULE_NAME, f"Error processing {full_path}", e)
         return None
 
+def _load_song_index_from_db() -> dict:
+    """Reconstruct the in-memory song_index dict from the DB."""
+    from collections import defaultdict
+    idx = {fmt: defaultdict(list) for fmt in FORMATS}
+    with _db_conn() as c:
+        rows = c.execute("SELECT * FROM song_index").fetchall()
+    for r in rows:
+        idx[r["format"]][r["normalized_key"]].append({
+            'path': r["file_path"],
+            'original_title': r["original_title"],
+            'folder': r["folder"],
+            'category': r["category"],
+            'metadata': json.loads(r["metadata_json"]),
+        })
+    return idx
+
 def load_song_index(bot):
-    if not Path(INDEX_FILE).exists():
-        bot.logger.log(MODULE_NAME, "Index file not found", "WARNING")
-        return None
     try:
-        with open(INDEX_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        if data.get('version', 0) < 6:
-            bot.logger.log(MODULE_NAME, "Outdated index version", "WARNING")
+        with _db_conn() as c:
+            count = c.execute("SELECT COUNT(*) FROM song_index").fetchone()[0]
+        if count == 0:
+            bot.logger.log(MODULE_NAME, "Song index empty — needs building", "WARNING")
             return None
-        bot.logger.log(MODULE_NAME, "Loaded index from cache")
-        return data['songs']
+        bot.logger.log(MODULE_NAME, f"Loaded song index ({count} entries)")
+        return _load_song_index_from_db()
     except Exception as e:
         bot.logger.error(MODULE_NAME, "Error loading index", e)
     return None
@@ -293,9 +293,21 @@ def select_best_candidate(cands, version=None):
     scored.sort(key=lambda x: (x[0], x[1]))
     return scored[0][2] if scored else None
 
-#  CACHE DB
+#  DATABASE
 
-CACHE_SCHEMA = """
+DB_SCHEMA = """
+CREATE TABLE IF NOT EXISTS song_index (
+    format          TEXT NOT NULL,
+    normalized_key  TEXT NOT NULL,
+    file_path       TEXT NOT NULL,
+    original_title  TEXT NOT NULL,
+    folder          TEXT NOT NULL,
+    category        TEXT NOT NULL,
+    metadata_json   TEXT NOT NULL,
+    PRIMARY KEY (format, normalized_key, file_path)
+);
+CREATE INDEX IF NOT EXISTS idx_song_format_key ON song_index(format, normalized_key);
+
 CREATE TABLE IF NOT EXISTS song_cache (
     file_path   TEXT PRIMARY KEY,
     cdn_url     TEXT NOT NULL,
@@ -308,28 +320,23 @@ CREATE TABLE IF NOT EXISTS song_cache (
 );
 """
 
-def _cache_db_path() -> Path:
-    return Path(__file__).parent.parent / "db" / "archive_cache.db"
-
-def _cache_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(_cache_db_path()))
+def _db_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
-def _cache_init() -> None:
-    with _cache_conn() as c:
-        c.executescript(CACHE_SCHEMA)
+def _db_init() -> None:
+    with _db_conn() as c:
+        c.executescript(DB_SCHEMA)
         c.commit()
 
 def _cache_lookup(file_path: str) -> Optional[dict]:
     key = str(Path(file_path).resolve())
-    with _cache_conn() as c:
-        row = c.execute(
-            "UPDATE song_cache SET accessed_at=? WHERE file_path=?",
-            (datetime.utcnow().isoformat(), key)
-        )
+    with _db_conn() as c:
+        c.execute("UPDATE song_cache SET accessed_at=? WHERE file_path=?",
+                  (datetime.utcnow().isoformat(), key))
         c.commit()
         row = c.execute("SELECT * FROM song_cache WHERE file_path=?", (key,)).fetchone()
     return dict(row) if row else None
@@ -338,7 +345,7 @@ def _cache_store(file_path: str, cdn_url: str, message_id: str, channel_id: str,
                  file_name: str, file_size: int) -> None:
     key = str(Path(file_path).resolve())
     now = datetime.utcnow().isoformat()
-    with _cache_conn() as c:
+    with _db_conn() as c:
         c.execute(
             "INSERT OR REPLACE INTO song_cache "
             "(file_path, cdn_url, message_id, channel_id, file_name, file_size, cached_at, accessed_at) "
@@ -742,7 +749,7 @@ class ARCHIVEManager:
 
     async def initialize(self):
         self.bot.logger.log(MODULE_NAME, "Starting song index initialization...")
-        _cache_init()
+        _db_init()
         self.initialization_task = asyncio.create_task(self._initialize_background())
 
     async def _initialize_background(self):

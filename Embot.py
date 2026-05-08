@@ -340,10 +340,14 @@ def _ensure_git_for_update(bot, logger) -> bool:
                     "Not a git repo and no auto_update_git_remote — auto-update disabled", "WARNING")
                 return False
             logger.log("AUTO-UPDATE", "Initialising git repository for auto-update...")
-            subprocess.run(['git', '-C', str(script_dir), 'init'],
+            r1 = subprocess.run(['git', '-C', str(script_dir), 'init'],
                           capture_output=True, text=True, timeout=10)
-            subprocess.run(['git', '-C', str(script_dir), 'remote', 'add', 'origin', remote_url],
+            r2 = subprocess.run(['git', '-C', str(script_dir), 'remote', 'add', 'origin', remote_url],
                           capture_output=True, text=True, timeout=10)
+            if r1.returncode != 0 or r2.returncode != 0:
+                logger.log("AUTO-UPDATE",
+                    f"Git init/remote failed (init={r1.returncode}, remote={r2.returncode})", "WARNING")
+                return False
             logger.log("AUTO-UPDATE", f"Git repo initialised with remote: {remote_url}")
         else:
             result = subprocess.run(

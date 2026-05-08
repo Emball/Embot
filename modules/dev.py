@@ -260,6 +260,15 @@ temp/
 config/auth.json
 .python-version
 
+# ── Instance-specific config (auto-generated, don't commit) ────────────────────
+config/embot.json
+config/dev.json
+config/archive_config.json
+
+# ── Launcher scripts (per-machine, don't commit) ───────────────────────────────
+start.bat
+start.sh
+
 # ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db

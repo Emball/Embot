@@ -403,9 +403,14 @@ async def _check_for_update(bot) -> bool:
             bot.logger.log("AUTO-UPDATE", "Remote is older — skipping")
         return False
     bot.logger.log("AUTO-UPDATE", "Remote is newer — pulling...")
+    await asyncio.create_subprocess_exec(
+        'git', '-C', str(script_dir), '-c', 'credential.helper=',
+        'reset', '--hard', 'HEAD',
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=git_env
+    )
     proc = await asyncio.create_subprocess_exec(
         'git', '-C', str(script_dir), '-c', 'credential.helper=',
-        'pull', '--rebase', '--autostash', 'origin', 'main',
+        'pull', '--rebase', 'origin', 'main',
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=git_env
     )
     _, stderr = await proc.communicate()

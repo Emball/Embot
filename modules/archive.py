@@ -37,9 +37,11 @@ def _load_eminem_root() -> Path:
                 return Path(data["eminem_root"])
         except Exception:
             pass
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(_json.dumps({"eminem_root": "."}, indent=2), encoding="utf-8")
     raise FileNotFoundError(
         "EMINEM_ROOT is not configured. Set the EMINEM_ROOT environment variable "
-        "or add 'eminem_root' to config/archive_config.json."
+        "or edit config/archive_config.json and set 'eminem_root' to your Eminem music folder."
     )
 
 

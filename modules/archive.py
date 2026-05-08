@@ -347,13 +347,7 @@ async def get_cached_url(bot, file_path):
 
 #  DELIVERY  — ephemeral CDN link → DM fallback
 async def _deliver_song(bot, interaction: discord.Interaction, candidate: dict) -> None:
-    """
-    Deliver a song via its cached CDN URL.
-    Primary: ephemeral followup with hyperlink.
-    Fallback: DM the link if ephemeral fails.
-    """
     p = Path(candidate['path'])
-
     url = await get_cached_url(bot, str(p))
     if url == "FILE_TOO_LARGE":
         await interaction.followup.send(LARGE_FILE_MSG, ephemeral=True)
@@ -361,42 +355,8 @@ async def _deliver_song(bot, interaction: discord.Interaction, candidate: dict) 
     if not url:
         await interaction.followup.send("Failed to retrieve song.", ephemeral=True)
         return
-
-    try:
-        await interaction.followup.send(f"[{p.name}]({url})", ephemeral=True)
-        bot.logger.log(MODULE_NAME, f"Delivered '{p.name}' via ephemeral CDN link")
-        return
-    except discord.HTTPException as e:
-        bot.logger.log(MODULE_NAME,
-            f"Ephemeral delivery failed (HTTP {e.status}), falling back to DM", "WARNING")
-    except Exception as e:
-        bot.logger.log(MODULE_NAME, f"Ephemeral delivery error ({e}), falling back to DM", "WARNING")
-
-    try:
-        dm_ch = await interaction.user.create_dm()
-        await dm_ch.send(f"[{p.name}]({url})")
-        bot.logger.log(MODULE_NAME, f"Delivered '{p.name}' via DM")
-    except discord.Forbidden:
-        bot.logger.log(MODULE_NAME, f"Could not DM {interaction.user} — notifying in off-topic",
-                       "WARNING")
-        ot_ch = await _get_offtopic_channel(bot)
-        if ot_ch:
-            await ot_ch.send(
-                f"{interaction.user.mention} — I couldn't send you a DM! "
-                "Please enable DMs from server members and try again."
-            )
-        await interaction.followup.send(
-            "I couldn't reach your DMs. Please enable DMs and try again — "
-            "I've pinged you in off-topic.",
-            ephemeral=True,
-        )
-
-async def _get_offtopic_channel(bot) -> Optional[discord.TextChannel]:
-    for guild in bot.guilds:
-        for ch in guild.text_channels:
-            if ch.name == "off-topic":
-                return ch
-    return None
+    await interaction.followup.send(f"[{p.name}]({url})", ephemeral=True)
+    bot.logger.log(MODULE_NAME, f"Delivered '{p.name}'")
 
 #  FED CHECK
 def _is_fed(interaction: discord.Interaction) -> bool:

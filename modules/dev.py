@@ -517,6 +517,12 @@ fix_spaces.py
                 return False
             self.bot.logger.log(MODULE_NAME, f"Committed: {message}")
             proc = await asyncio.create_subprocess_exec(
+                'git', '-c', 'credential.helper=', 'pull', '--rebase', 'origin', 'main',
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env=git_env
+            )
+            await proc.communicate()
+            proc = await asyncio.create_subprocess_exec(
                 'git', '-c', 'credential.helper=', 'push', 'origin', 'main',
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 env=git_env

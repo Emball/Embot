@@ -10,6 +10,7 @@ from typing import Optional, Dict, List
 import sqlite3
 import json
 import os
+import sys
 from pathlib import Path
 import io
 from PIL import Image, ImageDraw, ImageFont
@@ -3297,6 +3298,17 @@ def setup(bot):
         else:
             await interaction.followup.send(
                 "ℹ Rules embed is already up to date.", ephemeral=True)
+
+    @bot.tree.command(name="restart",
+                      description="[Admin] Restart the bot process")
+    @app_commands.default_permissions(administrator=True)
+    async def slash_restart(interaction: discord.Interaction):
+        if not has_elevated_role(interaction.user, _cfg):
+            await interaction.response.send_message(ERROR_NO_PERMISSION, ephemeral=True)
+            return
+        await interaction.response.send_message("Restarting...", ephemeral=True)
+        await asyncio.sleep(1)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
     _setup_suspicion(bot, _mod, _cfg)
     bot.logger.log(MODULE_NAME, "Moderation setup complete")

@@ -33,7 +33,3 @@ start.sh
 .DS_Store
 Thumbs.db
 desktop.ini
-
-clean_comments.py
-check_broken.py
-fix_spaces.py

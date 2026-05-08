@@ -3,7 +3,7 @@ import re
 import json
 import atexit
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Optional
 from mutagen.flac import FLAC
 from mutagen.id3 import ID3
@@ -57,7 +57,6 @@ CACHE_CHANNEL_NAME = "songcache"
 INDEX_FILE = str(Path(__file__).parent.parent / "cache"/ "archive"/ "song_index.json")
 CACHE_INDEX = str(Path(__file__).parent.parent / "cache"/ "archive"/ "cache_index.json")
 Path(__file__).parent.parent.joinpath("cache", "archive").mkdir(parents=True, exist_ok=True)
-INDEX_REFRESH_HOURS = 24
 VERSION_KEYWORDS = ['live', 'remix', 'demo', 'acoustic', 'version', 'edit', 'radio']
 SPECIAL_FOLDERS = {
     "8 - Features": "Feature",
@@ -181,52 +180,6 @@ def normalize_title(title):
     t = re.sub(r'\s+', '', t).strip()
     return t.casefold()
 
-async def check_file_modifications(bot):
-    if not Path(INDEX_FILE).exists():
-        return True
-    try:
-        last_index_time = datetime.fromtimestamp(Path(INDEX_FILE).stat().st_mtime, timezone.utc)
-        if datetime.now(timezone.utc) - last_index_time > timedelta(hours=INDEX_REFRESH_HOURS):
-            bot.logger.log(MODULE_NAME, f"Index older than {INDEX_REFRESH_HOURS} hours, needs refresh")
-            return True
-        try:
-            with open(INDEX_FILE, 'r', encoding='utf-8') as f:
-                index_data = json.load(f)
-                songs = index_data.get('songs', {})
-        except Exception as e:
-            bot.logger.log(MODULE_NAME, f"Could not read index file: {e}", "WARNING")
-            return True
-        current_file_count = 0
-        loop = asyncio.get_event_loop()
-        def _count_files():
-            count = 0
-            for fmt in FORMATS:
-                fmt_path = EMINEM_ROOT / fmt
-                if not fmt_path.exists():
-                    continue
-                for root, _, files in os.walk(fmt_path):
-                    for file in files:
-                        if file.lower().endswith(('.flac', '.mp3')):
-                            count += 1
-            return count
-        current_file_count = await loop.run_in_executor(None, _count_files)
-        index_file_count = 0
-        for fmt in FORMATS:
-            if fmt in songs:
-                for entries in songs[fmt].values():
-                    index_file_count += len(entries)
-        if current_file_count != index_file_count:
-            bot.logger.log(MODULE_NAME,
-                f"File count changed: {index_file_count} -> {current_file_count}, rebuilding index")
-            return True
-        bot.logger.log(MODULE_NAME,
-            f"Index up-to-date: {current_file_count} files, "
-            f"age: {(datetime.now(timezone.utc) - last_index_time).total_seconds()/3600:.1f}h")
-        return False
-    except Exception as e:
-        bot.logger.error(MODULE_NAME, "Error checking file modifications", e)
-        return False
-
 async def build_song_index(bot):
     bot.logger.log(MODULE_NAME, "Building song index...")
     song_index = {fmt: defaultdict(list) for fmt in FORMATS}
@@ -310,11 +263,8 @@ def load_song_index(bot):
         if data.get('version', 0) < 6:
             bot.logger.log(MODULE_NAME, "Outdated index version", "WARNING")
             return None
-        created = datetime.fromisoformat(data['created_at'])
-        if datetime.utcnow() - created < timedelta(hours=INDEX_REFRESH_HOURS):
-            bot.logger.log(MODULE_NAME, "Loaded index from cache")
-            return data['songs']
-        bot.logger.log(MODULE_NAME, "Index is outdated, needs refresh")
+        bot.logger.log(MODULE_NAME, "Loaded index from cache")
+        return data['songs']
     except Exception as e:
         bot.logger.error(MODULE_NAME, "Error loading index", e)
     return None

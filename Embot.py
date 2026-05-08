@@ -473,7 +473,7 @@ async def on_ready():
             if getattr(args, 'test', False):
                 bot.logger.log("MAIN", f"TEST PASSED — {len(synced)} commands synced. Shutting down.")
                 await bot.close()
-                sys.exit(0)
+                os._exit(0)
         except HTTPException as e:
             if e.status == 429 and e.code == 30034:
                 bot.logger.log("MAIN", "Daily command sync limit reached (200/200). Commands will sync tomorrow.", "WARNING")
@@ -879,9 +879,9 @@ def run_bot(token):
         # Auto-update check runs before Discord connection (git-only, no rate limits)
         if bot.config.get("network", {}).get("auto_update", True):
             if _ensure_git_for_update(bot, bot.logger):
-                if asyncio.run(_check_for_update(bot)):
-                    bot.logger.log("MAIN", "Update pulled during pre-flight — restarting")
-                    sys.exit(42)
+                    if asyncio.run(_check_for_update(bot)):
+                        bot.logger.log("MAIN", "Update pulled during pre-flight — restarting")
+                        os._exit(42)
 
         if args.development:
             bot.logger.log("MAIN", "Pre-flight: running dev version check...")

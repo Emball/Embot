@@ -228,24 +228,24 @@ class DevManager:
             self.bot.logger.log(MODULE_NAME, ".gitignore already exists")
             return
         
-        gitignore_content = r"""# ── Python ────────────────────────────────────────────────────────────────────
+        gitignore_content = r"""# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 
-# ── Virtual environments ───────────────────────────────────────────────────────
+# Virtual environments
 .venv/
 venv/
 env/
 Winpython64*/
 
-# ── Project tooling (managed externally) ───────────────────────────────────────
+# Project tooling
 .git/
 pyproject.toml
 uv.lock
 
-# ── Runtime data (never commit) ───────────────────────────────────────────────
+# Runtime data
 logs/
 cache/
 db/
@@ -255,26 +255,24 @@ temp/
 *.sqlite
 *.tmp
 
-# ── Secrets & environment ─────────────────────────────────────────────────────
+# Secrets
 .env
 config/auth.json
 .python-version
 
-# ── Instance-specific config (auto-generated, don't commit) ────────────────────
-config/embot.json
-config/dev.json
-config/archive_config.json
+# Instance config (auto-generated)
+config/*.json
 
-# ── Launcher scripts (per-machine, don't commit) ───────────────────────────────
+# Launcher scripts (per-machine)
 start.bat
 start.sh
 
-# ── OS ────────────────────────────────────────────────────────────────────────
+# OS
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# ── Temp / helper scripts (not part of the bot) ───────────────────────────────
+# Temp scripts
 clean_comments.py
 check_broken.py
 fix_spaces.py

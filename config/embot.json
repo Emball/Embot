@@ -1,14 +1,14 @@
 {
-    "command_prefixes": ["!", "?"],
+    "command_prefixes": [
+        "!",
+        "?"
+    ],
     "home_guild_id": 1229868495307669605,
     "latency_warning_threshold": 1.0,
     "heartbeat_interval_seconds": 60,
     "network": {
-        "enabled": true,
-        "host": "0.0.0.0",
-        "port": 9876,
-        "remote_host": "10.0.0.126",
         "auto_update": true,
-        "auto_update_interval_minutes": 5
+        "auto_update_interval_minutes": 5,
+        "auto_update_git_remote": ""
     }
 }

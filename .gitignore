@@ -1,21 +1,17 @@
-# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 
-# ── Virtual environments ───────────────────────────────────────────────────────
 .venv/
 venv/
 env/
 Winpython64*/
 
-# ── Project tooling (managed externally) ───────────────────────────────────────
 .git/
 pyproject.toml
 uv.lock
 
-# ── Runtime data (never commit) ───────────────────────────────────────────────
 logs/
 cache/
 db/
@@ -25,26 +21,19 @@ temp/
 *.sqlite
 *.tmp
 
-# ── Secrets & environment ─────────────────────────────────────────────────────
 .env
 config/auth.json
 .python-version
 
-# ── Instance-specific config (auto-generated, don't commit) ────────────────────
-config/embot.json
-config/dev.json
-config/archive_config.json
+config/*.json
 
-# ── Launcher scripts (per-machine, don't commit) ───────────────────────────────
 start.bat
 start.sh
 
-# ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# ── Temp / helper scripts (not part of the bot) ───────────────────────────────
 clean_comments.py
 check_broken.py
 fix_spaces.py

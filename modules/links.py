@@ -18,15 +18,16 @@ class LinkManager:
         self.prefix = "?" # Default prefix for link commands
     
     def load_links(self):
-        """Load links from config/links_config.json. Raises FileNotFoundError if missing."""
+        """Load links config, auto-creating defaults if missing."""
         try:
             with open(self.config_file, 'r') as f:
                 return json.load(f)
         except FileNotFoundError:
-            raise FileNotFoundError(
-                f"Missing required config file: {self.config_file}\n"
-                "Ensure config/links_config.json is present (it should be committed to the repo)."
-            )
+            defaults = {}
+            Path(self.config_file).parent.mkdir(parents=True, exist_ok=True)
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(defaults, f, indent=2)
+            return defaults
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to load links config", e)
             return {}

@@ -174,13 +174,18 @@ def _config_path() -> Path:
     return p / "moderation.json"
 
 def _load_config() -> dict:
-    """Load config/moderation.json. Raises FileNotFoundError if missing."""
+    """Load config/moderation.json, auto-creating defaults if missing."""
     path = _config_path()
     if not path.exists():
-        raise FileNotFoundError(
-            f"Missing required config file: {path}\n"
-            "Ensure config/moderation.json is present (it should be committed to the repo)."
-        )
+        defaults = {
+            "strike_thresholds": {"warn": 3, "mute": 5, "kick": 7, "ban": 10},
+            "rules": "",
+            "invite_labels": {},
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        import json as _json
+        path.write_text(_json.dumps(defaults, indent=2), encoding="utf-8")
+        return defaults
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 

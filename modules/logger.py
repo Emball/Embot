@@ -22,15 +22,16 @@ class EventLogger:
         self._scanner = None  # MediaScanner, set lazily
         
     def load_config(self):
-        """Load logger configuration. Raises FileNotFoundError if config/logger_config.json is missing."""
+        """Load logger configuration, auto-creating defaults if missing."""
         try:
             with open(self.config_file, 'r') as f:
                 return json.load(f)
         except FileNotFoundError:
-            raise FileNotFoundError(
-                f"Missing required config file: {self.config_file}\n"
-                "Ensure config/logger_config.json is present (it should be committed to the repo)."
-            )
+            defaults = {"log_channels": {}, "ignored_channels": []}
+            Path(self.config_file).parent.mkdir(parents=True, exist_ok=True)
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(defaults, f, indent=2)
+            return defaults
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to load logger config", e)
             return {}

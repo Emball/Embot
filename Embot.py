@@ -312,6 +312,15 @@ def start_console_thread():
     console_thread.start()
     bot.logger.log("MAIN", "Console thread started")
 
+def _restart():
+    """Replace current process with a fresh instance (in-place restart)."""
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+async def _restart_async(bot):
+    """Close bot then restart in-place."""
+    await bot.close()
+    _restart()
+
 def _parse_version_tuple(v: str):
     """Parse '4.2.1.1' into (4,2,1,1). Returns (0,0,0,0) on failure."""
     try:
@@ -431,9 +440,8 @@ async def _auto_update_loop(bot):
     while not bot.is_closed():
         try:
             if await _check_for_update(bot):
-                bot.logger.log("AUTO-UPDATE", "Update pulled — restarting")
-                await bot.close()
-                os._exit(42)
+                bot.logger.log("AUTO-UPDATE", "Update pulled — restarting...")
+                await _restart_async(bot)
         except Exception as e:
             bot.logger.log("AUTO-UPDATE", f"Check error: {e}", "WARNING")
         await asyncio.sleep(interval)
@@ -880,8 +888,8 @@ def run_bot(token):
         if bot.config.get("network", {}).get("auto_update", True):
             if _ensure_git_for_update(bot, bot.logger):
                     if asyncio.run(_check_for_update(bot)):
-                        bot.logger.log("MAIN", "Update pulled during pre-flight — restarting")
-                        os._exit(42)
+                        bot.logger.log("MAIN", "Update pulled — restarting...")
+                        _restart()
 
         if args.development:
             bot.logger.log("MAIN", "Pre-flight: running dev version check...")

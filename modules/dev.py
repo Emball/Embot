@@ -330,17 +330,20 @@ fix_spaces.py
         
         return f"{major}.{minor}.{patch}.{micro}", change_type
 
-    async def _get_git_diff_lines(self, working_tree: bool = False) -> int:
-        """Get total insertions+deletions from git diff.
+    async def _get_git_diff_lines(self, working_tree: bool = False) -> tuple[int, list[dict]]:
+        """Returns (total_lines, file_details). file_details is a list of {path, added, removed}.
         If working_tree=True, diffs working tree vs HEAD. Otherwise HEAD~1..HEAD."""
         git_env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GCM_INTERACTIVE': 'never'}
         try:
             if working_tree:
-                args = ['git', '-c', 'credential.helper=', 'diff', '--numstat', 'HEAD']
+                numstat_args = ['git', '-c', 'credential.helper=', 'diff', '--numstat', 'HEAD']
+                stat_args = ['git', '-c', 'credential.helper=', 'diff', '--stat', 'HEAD']
             else:
-                args = ['git', '-c', 'credential.helper=', 'diff', 'HEAD~1', 'HEAD', '--numstat']
+                numstat_args = ['git', '-c', 'credential.helper=', 'diff', 'HEAD~1', 'HEAD', '--numstat']
+                stat_args = ['git', '-c', 'credential.helper=', 'diff', 'HEAD~1', 'HEAD', '--stat']
+
             proc = await asyncio.create_subprocess_exec(
-                *args,
+                *numstat_args,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 env=git_env
             )
@@ -354,21 +357,26 @@ fix_spaces.py
                 )
                 stdout, _ = await proc.communicate()
                 if proc.returncode != 0:
-                    return 0
+                    return 0, []
+
             total = 0
+            files = []
             for line in stdout.decode().strip().split('\n'):
                 if not line.strip():
                     continue
                 parts = line.split('\t')
-                if len(parts) >= 2:
+                if len(parts) >= 3:
                     try:
-                        total += int(parts[0]) + int(parts[1])
+                        added = int(parts[0])
+                        removed = int(parts[1])
+                        total += added + removed
+                        files.append({'path': parts[2], 'added': added, 'removed': removed})
                     except ValueError:
                         pass
-            return total
+            return total, files
         except Exception as e:
             self.bot.logger.log(MODULE_NAME, f"Git diff failed: {e}", "WARNING")
-            return 0
+            return 0, []
 
     async def _is_head_version_bump(self) -> bool:
         """Check if HEAD commit message looks like a version bump (e.g. 'v4.2.1.1')."""
@@ -389,15 +397,14 @@ fix_spaces.py
             self.bot.logger.log(MODULE_NAME, f"Checking version (current: v{current_version})...")
 
             # First, check for uncommitted changes
-            lines_changed = await self._get_git_diff_lines(working_tree=True)
+            lines_changed, files = await self._get_git_diff_lines(working_tree=True)
             is_working_tree = True
 
             if lines_changed == 0 and self.git_enabled:
-                # No working-tree changes — check the last commit
                 if await self._is_head_version_bump():
                     self.bot.logger.log(MODULE_NAME, "HEAD is already a version bump — skipping")
                     return None
-                lines_changed = await self._get_git_diff_lines(working_tree=False)
+                lines_changed, files = await self._get_git_diff_lines(working_tree=False)
                 is_working_tree = False
 
             if lines_changed == 0:
@@ -405,7 +412,10 @@ fix_spaces.py
                 return None
 
             self.bot.logger.log(MODULE_NAME,
-                f"{'Working-tree' if is_working_tree else 'Commit'} diff: {lines_changed} lines")
+                f"{'Working-tree' if is_working_tree else 'Commit'} diff: {len(files)} files, {lines_changed} lines")
+            for f in files[:20]:
+                self.bot.logger.log(MODULE_NAME,
+                    f"  {f['path']}: +{f['added']} -{f['removed']}")
 
             if not self.auto_versioning_enabled:
                 self.bot.logger.log(MODULE_NAME, "Auto-versioning disabled, skipping")
@@ -424,6 +434,7 @@ fix_spaces.py
                 'change_type': change_type,
                 'timestamp': datetime.utcnow().isoformat(),
                 'lines_changed': lines_changed,
+                'files': files,
             }
             self.version_history.append(history_entry)
             if len(self.version_history) > 100:

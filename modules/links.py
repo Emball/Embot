@@ -103,13 +103,16 @@ def setup(bot):
         url="URL to link to",
         description="Optional description for the link"
     )
-    @app_commands.default_permissions(administrator=True)
     async def link_set(
         interaction: discord.Interaction,
         name: str,
         url: str,
         description: Optional[str] = None
     ):
+        from moderation import is_owner
+        if not is_owner(interaction.user):
+            await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
+            return
         """Set or update a link command"""
         # Sanitize name (remove ? if present)
         name = name.lower().replace("?", "")
@@ -149,8 +152,11 @@ def setup(bot):
     
     @bot.tree.command(name="linkremove", description="[Admin] Remove a quick-link command")
     @app_commands.describe(name="Name of the link command to remove (without ?)")
-    @app_commands.default_permissions(administrator=True)
     async def link_remove(interaction: discord.Interaction, name: str):
+        from moderation import is_owner
+        if not is_owner(interaction.user):
+            await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
+            return
         """Remove a link command"""
         # Sanitize name
         name = name.lower().replace("?", "")
@@ -176,8 +182,11 @@ def setup(bot):
     
     @bot.tree.command(name="linktoggle", description="[Admin] Enable or disable a quick-link command")
     @app_commands.describe(name="Name of the link command to toggle (without ?)")
-    @app_commands.default_permissions(administrator=True)
     async def link_toggle(interaction: discord.Interaction, name: str):
+        from moderation import is_owner
+        if not is_owner(interaction.user):
+            await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
+            return
         """Toggle a link command on/off"""
         # Sanitize name
         name = name.lower().replace("?", "")

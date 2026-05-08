@@ -1410,7 +1410,6 @@ def setup(bot):
         announcements_channel="The #announcements channel",
         spotlight_exclude_user="User ID to exclude from Spotlight Friday (server owner)",
     )
-    @app_commands.default_permissions(administrator=True)
     async def community_setup(
         interaction: discord.Interaction,
         projects_channel: Optional[discord.TextChannel] = None,
@@ -1418,6 +1417,10 @@ def setup(bot):
         announcements_channel: Optional[discord.TextChannel] = None,
         spotlight_exclude_user: Optional[str] = None,
     ):
+        from moderation import is_owner
+        if not is_owner(interaction.user):
+            await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
+            return
         changed = []
         if projects_channel:
             names = cs._get_submission_channel_names()
@@ -1533,8 +1536,11 @@ def setup(bot):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @bot.tree.command(name="spotlight_preview", description="[Admin] Preview this week's Spotlight Friday winner")
-    @app_commands.default_permissions(administrator=True)
     async def spotlight_preview(interaction: discord.Interaction):
+        from moderation import is_owner
+        if not is_owner(interaction.user):
+            await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
+            return
         exclude = cs.db.get_config("spotlight_exclude_user_id")
         top = cs.db.top_submission_this_week(exclude_user=exclude)
         if not top:
@@ -1555,8 +1561,11 @@ def setup(bot):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @bot.tree.command(name="spotlight_run", description="[Admin] Force-run Spotlight Friday now")
-    @app_commands.default_permissions(administrator=True)
     async def spotlight_run(interaction: discord.Interaction):
+        from moderation import is_owner
+        if not is_owner(interaction.user):
+            await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
+            return
         await interaction.response.defer(ephemeral=True)
         await cs.run_spotlight(interaction.guild)
         await interaction.followup.send("Spotlight task executed.", ephemeral=True)

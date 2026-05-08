@@ -1039,8 +1039,11 @@ def setup(bot):
     # Commands to configure logger
     @bot.tree.command(name="setjoinlogs", description="Set the channel for join/leave logs")
     @app_commands.describe(channel="Channel to send join/leave logs to")
-    @app_commands.default_permissions(administrator=True)
     async def set_join_logs(interaction: discord.Interaction, channel: discord.TextChannel):
+        from moderation import is_owner
+        if not is_owner(interaction.user):
+            await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
+            return
         """Set the join logs channel"""
         event_logger.config["join_logs_channel_id"] = channel.id
         event_logger.save_config()
@@ -1056,8 +1059,11 @@ def setup(bot):
     
     @bot.tree.command(name="setbotlogs", description="Set the channel for bot/moderation logs")
     @app_commands.describe(channel="Channel to send bot/moderation logs to")
-    @app_commands.default_permissions(administrator=True)
     async def set_bot_logs(interaction: discord.Interaction, channel: discord.TextChannel):
+        from moderation import is_owner
+        if not is_owner(interaction.user):
+            await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
+            return
         """Set the bot logs channel"""
         event_logger.config["bot_logs_channel_id"] = channel.id
         event_logger.save_config()
@@ -1072,8 +1078,11 @@ def setup(bot):
         bot.logger.log(MODULE_NAME, f"Bot logs channel set to {channel.name} by {interaction.user}")
     
     @bot.tree.command(name="logconfig", description="View or toggle logging settings")
-    @app_commands.default_permissions(administrator=True)
     async def log_config(interaction: discord.Interaction):
+        from moderation import is_owner
+        if not is_owner(interaction.user):
+            await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
+            return
         """View logging configuration"""
         join_channel = event_logger.get_join_logs_channel(interaction.guild)
         bot_channel = event_logger.get_bot_logs_channel(interaction.guild)

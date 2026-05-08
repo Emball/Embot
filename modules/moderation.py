@@ -425,6 +425,16 @@ def has_owner_role(member: discord.Member, cfg: ModConfig) -> bool:
         return True
     return any(role.name == "Owner" for role in member.roles)
 
+# Public API for other modules
+
+def is_mod(member: discord.Member) -> bool:
+    """True if the member passes the elevated-role check."""
+    return has_elevated_role(member, _cfg)
+
+def is_owner(member: discord.Member) -> bool:
+    """True if the member is an owner (Owner role / guild owner / owner_id)."""
+    return has_owner_role(member, _cfg)
+
 def validate_reason(reason: Optional[str], min_len: int) -> tuple:
     if not reason or reason.strip() == ""or reason == "No reason provided":
         return False, ERROR_REASON_REQUIRED

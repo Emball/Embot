@@ -818,9 +818,9 @@ def setup(bot):
 
     @bot.tree.command(name="rebuild_index", description="[Admin] Rebuild the song index cache")
     async def rebuild_index(interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message(
-                "You need administrator permissions to use this command.", ephemeral=True)
+        from moderation import is_owner
+        if not is_owner(interaction.user):
+            await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return
         await interaction.response.send_message("Rebuilding song index...", ephemeral=True)
         try:

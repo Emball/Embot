@@ -27,7 +27,21 @@ class EventLogger:
             with open(self.config_file, 'r') as f:
                 return json.load(f)
         except FileNotFoundError:
-            defaults = {"log_channels": {}, "ignored_channels": []}
+            defaults = {
+                "join_logs_channel_id": 0,
+                "bot_logs_channel_id": 0,
+                "log_message_edits": True,
+                "log_message_deletes": True,
+                "log_member_joins": True,
+                "log_member_leaves": True,
+                "log_bans": True,
+                "log_unbans": True,
+                "log_role_changes": True,
+                "log_channel_changes": True,
+                "log_voice_changes": True,
+                "log_invite_changes": True,
+                "log_nickname_changes": True,
+            }
             Path(self.config_file).parent.mkdir(parents=True, exist_ok=True)
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(defaults, f, indent=2)

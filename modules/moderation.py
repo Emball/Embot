@@ -178,8 +178,18 @@ def _load_config() -> dict:
     path = _config_path()
     if not path.exists():
         defaults = {
-            "strike_thresholds": {"warn": 3, "mute": 5, "kick": 7, "ban": 10},
+            "owner_id": 0,
+            "join_logs_channel_id": 0,
+            "bot_logs_channel_id": 0,
+            "rules_channel_name": "rules",
+            "min_reason_length": 10,
+            "muted_role_name": "Muted",
+            "report_time_cst": "00:00",
+            "context_message_count": 30,
+            "invite_cleanup_days": 7,
+            "elevated_roles": [],
             "rules": "",
+            "strike_thresholds": {"warn": 3, "mute": 5, "kick": 7, "ban": 10},
             "invite_labels": {},
         }
         path.parent.mkdir(parents=True, exist_ok=True)

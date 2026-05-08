@@ -13,7 +13,7 @@ import asyncio
 import difflib
 from discord import app_commands
 import discord
-from discord.ext import tasks
+
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
@@ -42,34 +42,6 @@ def _load_eminem_root() -> Path:
         "or add 'eminem_root' to config/archive_config.json."
     )
 
-def _load_archive_config() -> dict:
-    config_file = Path(__file__).parent.parent / "config"/ "archive_config.json"
-    defaults = {
-        "info_channel_name": "info",
-        "info_embed_msg_id": None,
-    }
-    if config_file.exists():
-        try:
-            data = _json.loads(config_file.read_text(encoding="utf-8"))
-            defaults.update(data)
-        except Exception:
-            pass
-    return defaults
-
-def _save_archive_config(data: dict) -> None:
-    config_file = Path(__file__).parent.parent / "config"/ "archive_config.json"
-    config_file.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        existing = {}
-        if config_file.exists():
-            existing = _json.loads(config_file.read_text(encoding="utf-8"))
-        existing.update(data)
-        tmp = str(config_file) + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            _json.dump(existing, f, indent=2, ensure_ascii=False)
-        os.replace(tmp, str(config_file))
-    except Exception as e:
-        print(f"[ARCHIVE] Failed to save config: {e}")
 
 try:
     EMINEM_ROOT = _load_eminem_root()
@@ -84,7 +56,6 @@ INDEX_FILE = str(Path(__file__).parent.parent / "cache"/ "archive"/ "song_index.
 CACHE_INDEX = str(Path(__file__).parent.parent / "cache"/ "archive"/ "cache_index.json")
 Path(__file__).parent.parent.joinpath("cache", "archive").mkdir(parents=True, exist_ok=True)
 INDEX_REFRESH_HOURS = 24
-CACHE_EXPIRE_DAYS = 7
 VERSION_KEYWORDS = ['live', 'remix', 'demo', 'acoustic', 'version', 'edit', 'radio']
 SPECIAL_FOLDERS = {
     "8 - Features": "Feature",
@@ -388,10 +359,8 @@ async def get_cached_url(bot, file_path):
             cache = {}
         now = datetime.utcnow()
         if key in cache:
-            cache_time = datetime.fromisoformat(cache[key]['timestamp'])
-            if now - cache_time < timedelta(days=CACHE_EXPIRE_DAYS):
-                bot.logger.log(MODULE_NAME, f"Using cached URL for {p.name}")
-                return cache[key]['url']
+            bot.logger.log(MODULE_NAME, f"Using cached URL for {p.name}")
+            return cache[key]['url']
         chan = discord.utils.get(bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
         if not chan:
             bot.logger.log(MODULE_NAME, f"Missing channel {CACHE_CHANNEL_NAME}", "WARNING")
@@ -424,28 +393,58 @@ async def get_cached_url(bot, file_path):
             bot.logger.error(MODULE_NAME, "Unexpected upload error", e)
             return None
 
-#  DELIVERY  — ephemeral direct upload → DM cache fallback
+#  DELIVERY  — ephemeral CDN link → DM fallback
 async def _deliver_song(bot, interaction: discord.Interaction, candidate: dict) -> None:
     """
-    Send "Uploading…"ephemeral, upload to #songcache, then edit that same
-    message to just a CDN hyperlink. One ephemeral, no clutter.
+    Deliver a song via its cached CDN URL.
+    Primary: ephemeral followup with hyperlink.
+    Fallback: DM the link if ephemeral fails.
     """
     p = Path(candidate['path'])
-    md = candidate['metadata']
-
-    # Send the waiting message and keep the message object so we can edit it
-    msg = await interaction.followup.send("Uploading file, please wait…", ephemeral=True, wait=True)
 
     url = await get_cached_url(bot, str(p))
     if url == "FILE_TOO_LARGE":
-        await msg.edit(content=LARGE_FILE_MSG)
+        await interaction.followup.send(LARGE_FILE_MSG, ephemeral=True)
         return
     if not url:
-        await msg.edit(content="Failed to retrieve song.")
+        await interaction.followup.send("Failed to retrieve song.", ephemeral=True)
         return
 
-    await msg.edit(content=f"[{p.name}]({url})")
-    bot.logger.log(MODULE_NAME, f"Delivered '{p.name}' via CDN link")
+    try:
+        await interaction.followup.send(f"[{p.name}]({url})", ephemeral=True)
+        bot.logger.log(MODULE_NAME, f"Delivered '{p.name}' via ephemeral CDN link")
+        return
+    except discord.HTTPException as e:
+        bot.logger.log(MODULE_NAME,
+            f"Ephemeral delivery failed (HTTP {e.status}), falling back to DM", "WARNING")
+    except Exception as e:
+        bot.logger.log(MODULE_NAME, f"Ephemeral delivery error ({e}), falling back to DM", "WARNING")
+
+    try:
+        dm_ch = await interaction.user.create_dm()
+        await dm_ch.send(f"[{p.name}]({url})")
+        bot.logger.log(MODULE_NAME, f"Delivered '{p.name}' via DM")
+    except discord.Forbidden:
+        bot.logger.log(MODULE_NAME, f"Could not DM {interaction.user} — notifying in off-topic",
+                       "WARNING")
+        ot_ch = await _get_offtopic_channel(bot)
+        if ot_ch:
+            await ot_ch.send(
+                f"{interaction.user.mention} — I couldn't send you a DM! "
+                "Please enable DMs from server members and try again."
+            )
+        await interaction.followup.send(
+            "I couldn't reach your DMs. Please enable DMs and try again — "
+            "I've pinged you in off-topic.",
+            ephemeral=True,
+        )
+
+async def _get_offtopic_channel(bot) -> Optional[discord.TextChannel]:
+    for guild in bot.guilds:
+        for ch in guild.text_channels:
+            if ch.name == "off-topic":
+                return ch
+    return None
 
 #  FED CHECK
 def _is_fed(interaction: discord.Interaction) -> bool:
@@ -736,265 +735,7 @@ class ArchiveNavigatorView(discord.ui.LayoutView):
     async def on_timeout(self):
         self.clear_items()
 
-#  INFO MESSAGE  (pinned in #info) — Components v2
-class _ArchiveInfoView(discord.ui.LayoutView):
-    """
-    Persistent Components v2 view pinned in #info.
-    All navigation (format → folder → song) happens by editing THIS message in-place.
-    Only the final file delivery is ephemeral.
-    """
 
-    def __init__(self, bot):
-        super().__init__(timeout=None)
-        self._bot = bot
-        self._fmt: Optional[str] = None
-        self._category: Optional[str] = None
-        self._categories: list = []
-        self._folder: Optional[str] = None
-        self._folders: list = []
-        self._songs: list = []
-        self._category_page = 0
-        self._folder_page = 0
-        self._song_page = 0
-        self._render_home()
-
-    def _render_home(self):
-        self.clear_items()
-        self._fmt = None
-        self._category = None
-        self._categories = []
-        self._folder = None
-        self._folders = []
-        self._songs = []
-        self._category_page = 0
-        self._folder_page = 0
-        self._song_page = 0
-        self.add_item(discord.ui.TextDisplay(
-            "## Eminem Archive\n"
-            "Download songs from the full Eminem archive in FLAC or MP3.\n\n"
-            "`/archive [flac/mp3] [song title] [version (optional)]`\n"
-            "Example: `/archive flac antichrist 2005 version`\n\n"
-            "Or use the menu below to browse and select a file:"
-        ))
-        self.add_item(discord.ui.Separator())
-        row = discord.ui.ActionRow()
-        sel = discord.ui.Select(
-            placeholder="Choose a format to start browsing…",
-            options=[discord.SelectOption(label=fmt, value=fmt) for fmt in FORMATS],
-            custom_id="archive_info_fmt",
-        )
-        sel.callback = self._on_format
-        row.add_item(sel)
-        self.add_item(row)
-
-    def _render_category_step(self):
-        self.clear_items()
-        opts, _, _ = _folder_options_for_page(self._categories, self._category_page)
-        pages = (len(self._categories) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
-        page_hint = f" ·  page {self._category_page + 1}/{pages}"if pages > 1 else ""
-        self.add_item(discord.ui.TextDisplay(
-            f"## Eminem Archive  ·  {self._fmt}\n"
-            f"{len(self._categories)} categories{page_hint}"
-        ))
-        row = discord.ui.ActionRow()
-        sel = discord.ui.Select(placeholder=f"Choose a category…{page_hint}"[:150],
-                                options=opts, custom_id="archive_info_category")
-        sel.callback = self._on_category
-        row.add_item(sel)
-        self.add_item(row)
-        back_row = discord.ui.ActionRow()
-        back = discord.ui.Button(label="← Back to Format", style=discord.ButtonStyle.secondary,
-                                 custom_id="archive_info_b_fmt")
-        back.callback = self._on_back_to_home
-        back_row.add_item(back)
-        self.add_item(back_row)
-
-    def _render_folder_step(self):
-        self.clear_items()
-        opts, has_prev, has_next = _folder_options_for_page(self._folders, self._folder_page)
-        pages = (len(self._folders) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
-        page_hint = f" ·  page {self._folder_page + 1}/{pages}"if pages > 1 else ""
-        self.add_item(discord.ui.TextDisplay(
-            f"## {self._category}\n"
-            f"{len(self._folders)} albums{page_hint}"
-        ))
-        row = discord.ui.ActionRow()
-        ph = f"Choose an album…{page_hint}"
-        sel = discord.ui.Select(placeholder=ph[:150], options=opts, custom_id="archive_info_folder")
-        sel.callback = self._on_folder
-        row.add_item(sel)
-        self.add_item(row)
-        back_row = discord.ui.ActionRow()
-        back = discord.ui.Button(label="← Back to Categories", style=discord.ButtonStyle.secondary,
-                                 custom_id="archive_info_b_category")
-        back.callback = self._on_back_to_category
-        back_row.add_item(back)
-        self.add_item(back_row)
-
-    def _render_song_step(self):
-        self.clear_items()
-        opts, has_prev, has_next = _song_options_for_page(self._songs, self._song_page)
-        pages = (len(self._songs) + NAV_PAGE_SIZE - 1) // NAV_PAGE_SIZE
-        page_hint = f" ·  page {self._song_page + 1}/{pages}"if pages > 1 else ""
-        self.add_item(discord.ui.TextDisplay(
-            f"## {_clean_folder_name(self._folder)}\n"
-            f"{len(self._songs)} songs{page_hint}"
-        ))
-        row = discord.ui.ActionRow()
-        ph = f"Choose a song…{page_hint}"
-        sel = discord.ui.Select(placeholder=ph[:150], options=opts, custom_id="archive_info_song")
-        sel.callback = self._on_song
-        row.add_item(sel)
-        self.add_item(row)
-        back_row = discord.ui.ActionRow()
-        back = discord.ui.Button(label="← Back to Folders", style=discord.ButtonStyle.secondary,
-                                 custom_id="archive_info_b_folder")
-        back.callback = self._on_back_to_folder
-        back_row.add_item(back)
-        self.add_item(back_row)
-
-    async def _on_format(self, interaction: discord.Interaction):
-        if _is_fed(interaction):
-            await interaction.response.send_message(
-                "This didn't work. Please try again later.", ephemeral=True)
-            return
-        manager = getattr(self._bot, "ARCHIVE_manager", None)
-        if not manager or not manager.song_index_ready.is_set():
-            await interaction.response.send_message(
-                "Archive is still initialising — please try again in a moment.", ephemeral=True)
-            return
-        self._fmt = interaction.data["values"][0]
-        self._categories = _get_categories_for_format(manager.song_index, self._fmt)
-        self._category_page = 0
-        self._render_category_step()
-        await interaction.response.edit_message(view=self)
-
-    async def _on_category(self, interaction: discord.Interaction):
-        if _is_fed(interaction):
-            await interaction.response.send_message(
-                "This didn't work. Please try again later.", ephemeral=True)
-            return
-        manager = getattr(self._bot, "ARCHIVE_manager", None)
-        val = interaction.data["values"][0]
-        if val == "__prev__":
-            self._category_page = max(0, self._category_page - 1)
-            self._render_category_step()
-            await interaction.response.edit_message(view=self)
-            return
-        if val == "__next__":
-            self._category_page += 1
-            self._render_category_step()
-            await interaction.response.edit_message(view=self)
-            return
-        self._category = self._categories[int(val)]
-        self._folders = _get_folders_for_category(manager.song_index, self._fmt, self._category)
-        self._folder_page = 0
-        self._render_folder_step()
-        await interaction.response.edit_message(view=self)
-
-    async def _on_folder(self, interaction: discord.Interaction):
-        if _is_fed(interaction):
-            await interaction.response.send_message(
-                "This didn't work. Please try again later.", ephemeral=True)
-            return
-        manager = getattr(self._bot, "ARCHIVE_manager", None)
-        val = interaction.data["values"][0]
-        if val == "__prev__":
-            self._folder_page = max(0, self._folder_page - 1)
-            self._render_folder_step()
-            await interaction.response.edit_message(view=self)
-            return
-        if val == "__next__":
-            self._folder_page += 1
-            self._render_folder_step()
-            await interaction.response.edit_message(view=self)
-            return
-        self._folder = self._folders[int(val)]
-        self._songs = _get_songs_in_folder(manager.song_index, self._fmt, self._folder)
-        self._song_page = 0
-        self._render_song_step()
-        await interaction.response.edit_message(view=self)
-
-    async def _on_song(self, interaction: discord.Interaction):
-        if _is_fed(interaction):
-            await interaction.response.send_message(
-                "This didn't work. Please try again later.", ephemeral=True)
-            return
-        val = interaction.data["values"][0]
-        if val == "__prev__":
-            self._song_page = max(0, self._song_page - 1)
-            self._render_song_step()
-            await interaction.response.edit_message(view=self)
-            return
-        if val == "__next__":
-            self._song_page += 1
-            self._render_song_step()
-            await interaction.response.edit_message(view=self)
-            return
-        candidate = self._songs[int(val)] if val.isdigit() else None
-        if not candidate:
-            await interaction.response.send_message("Song not found.", ephemeral=True)
-            return
-        # Defer the ephemeral delivery, then restore the info embed to home
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        await _deliver_song(self._bot, interaction, candidate)
-        await _log_delivery(self._bot, interaction.user, candidate, source="navigator")
-        # Reset navigator back to home state via followup edit
-        self._render_home()
-        try:
-            await interaction.message.edit(view=self)
-        except Exception:
-            pass
-
-    async def _on_back_to_home(self, interaction: discord.Interaction):
-        self._render_home()
-        await interaction.response.edit_message(view=self)
-
-    async def _on_back_to_category(self, interaction: discord.Interaction):
-        self._folder = None
-        self._folders = []
-        self._folder_page = 0
-        self._render_category_step()
-        await interaction.response.edit_message(view=self)
-
-    async def _on_back_to_folder(self, interaction: discord.Interaction):
-        self._folder = None
-        self._songs = []
-        self._song_page = 0
-        self._render_folder_step()
-        await interaction.response.edit_message(view=self)
-
-async def _get_info_channel(bot) -> Optional[discord.TextChannel]:
-    cfg = _load_archive_config()
-    name = cfg.get("info_channel_name", "info")
-    for guild in bot.guilds:
-        for ch in guild.text_channels:
-            if ch.name == name:
-                return ch
-    return None
-
-async def post_or_refresh_info_embed(bot, force: bool = False) -> None:
-    """Post the archive info message to #info. Skips if it already exists unless force=True."""
-    cfg = _load_archive_config()
-    info_ch = await _get_info_channel(bot)
-    if not info_ch:
-        bot.logger.log(MODULE_NAME, "info channel not found — skipping archive embed post", "WARNING")
-        return
-    view = _ArchiveInfoView(bot)
-    existing_id = cfg.get("info_embed_msg_id")
-    if existing_id and not force:
-        try:
-            await info_ch.fetch_message(int(existing_id))
-            bot.logger.log(MODULE_NAME, "Archive info embed already present, skipping")
-            return
-        except (discord.NotFound, discord.Forbidden):
-            pass
-    try:
-        msg = await info_ch.send(view=view)
-        _save_archive_config({"info_embed_msg_id": str(msg.id)})
-        bot.logger.log(MODULE_NAME, f"Archive info embed posted (msg {msg.id})")
-    except discord.Forbidden:
-        bot.logger.log(MODULE_NAME, "Missing permissions to post in #info", "WARNING")
 
 #  LOGGING
 async def _log_delivery(bot, user, candidate: dict, source: str = "command"):
@@ -1056,34 +797,12 @@ class ARCHIVEManager:
                 self.song_index = await build_song_index(self.bot)
             self.song_index_ready.set()
             self.bot.logger.log(MODULE_NAME, "Song index ready")
-            self.cache_purge_loop.start()
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Background initialization failed", e)
 
     async def ensure_ready(self):
         if not self.song_index_ready.is_set() and self.initialization_task:
             await self.song_index_ready.wait()
-
-    @tasks.loop(hours=CACHE_EXPIRE_DAYS * 24)
-    async def cache_purge_loop(self):
-        self.bot.logger.log(MODULE_NAME, "Running cache purge task")
-        try:
-            chan = discord.utils.get(self.bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
-            if chan:
-                cutoff = datetime.now(timezone.utc) - timedelta(days=CACHE_EXPIRE_DAYS)
-                await chan.purge(before=cutoff, limit=None)
-                self.bot.logger.log(MODULE_NAME, "Cache purged")
-            if await check_file_modifications(self.bot):
-                self.bot.logger.log(MODULE_NAME, "File modifications detected, rebuilding index")
-                self.song_index_ready.clear()
-                self.song_index = await build_song_index(self.bot)
-                self.song_index_ready.set()
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Purge task error", e)
-
-    @cache_purge_loop.before_loop
-    async def before_cache_purge(self):
-        await self.bot.wait_until_ready()
 
 #  SETUP
 def setup(bot):
@@ -1092,15 +811,7 @@ def setup(bot):
     ARCHIVE_manager = ARCHIVEManager(bot)
     bot.ARCHIVE_manager = ARCHIVE_manager
 
-    # Register persistent info view so Browse button survives restarts
-    bot.add_view(_ArchiveInfoView(bot))
-
     asyncio.create_task(ARCHIVE_manager.initialize())
-
-    @bot.listen("on_ready")
-    async def _archive_on_ready():
-        await ARCHIVE_manager.ensure_ready()
-        await post_or_refresh_info_embed(bot, force=False)
 
     @bot.tree.command(name="archive", description="Get a song from Eminem's archive")
     @app_commands.describe(
@@ -1159,15 +870,5 @@ def setup(bot):
         except Exception as e:
             bot.logger.error(MODULE_NAME, "Index rebuild failed", e)
             await interaction.followup.send("Failed to rebuild index.", ephemeral=True)
-
-    async def handle_postinfo_archive(_args: str):
-        bot.logger.log(MODULE_NAME, "Force-refreshing archive info embed...")
-        await post_or_refresh_info_embed(bot, force=True)
-        print(" Archive info embed refreshed.\n")
-
-    bot.console_commands["postinfo_archive"] = {
-        "description": "Force-refresh the archive browse embed in #info",
-        "handler": handle_postinfo_archive,
-    }
 
     bot.logger.log(MODULE_NAME, "ARCHIVE module setup complete")

@@ -6,9 +6,9 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent.absolute()
 sys.path.insert(0, str(SCRIPT_DIR))
 
-TOKEN_FILE = SCRIPT_DIR / "config" / "token"
+TOKEN_FILE = SCRIPT_DIR / "config" / "auth.json"
 if not TOKEN_FILE.exists():
-    sys.exit(f"Token file not found: {TOKEN_FILE}")
+    sys.exit(f"Auth file not found: {TOKEN_FILE}")
 with open(TOKEN_FILE, 'r', encoding='utf-8') as f:
     data = json.load(f)
 TOKEN = data.get("bot_token", "")

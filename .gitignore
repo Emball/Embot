@@ -27,10 +27,7 @@ temp/
 
 # ── Secrets & environment ─────────────────────────────────────────────────────
 .env
-config/token
-config/token.json
-config/token.example
-token.json
+config/auth.json
 .python-version
 
 # ── OS ────────────────────────────────────────────────────────────────────────
@@ -42,7 +39,3 @@ desktop.ini
 clean_comments.py
 check_broken.py
 fix_spaces.py
-
-# ── JSON safety net (config/*.json is committed explicitly) ───────────────────
-*.json
-!config/*.json

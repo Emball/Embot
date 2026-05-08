@@ -10,6 +10,7 @@ from datetime import datetime
 import importlib
 import argparse
 import threading
+import subprocess
 from pathlib import Path
 import json 
 import re
@@ -18,24 +19,10 @@ import signal
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='Embot Discord Bot')
 parser.add_argument('-dev', '--development', action='store_true', 
-                    help='Enable development mode (hot-reload, versioning, git integration)')
-parser.add_argument('-c', '--console', type=str, nargs='?', const='__auto__',
-                    help='Connect to a remote embot instance for console relay (host or host:port)')
-parser.add_argument('-t', '--test', type=str, nargs='?', const='__auto__',
-                    help='Test mode: use remote files and pause the primary instance (host or host:port)')
+                    help='Enable development mode (versioning, git integration)')
+parser.add_argument('-t', '--test', action='store_true',
+                    help='Dry-run: validate startup, sync commands, then exit')
 args = parser.parse_args()
-
-REMOTE_HOST = None
-REMOTE_PORT = None
-if args.console or args.test:
-    target = args.console or args.test
-    if target == '__auto__':
-        REMOTE_HOST = '__auto__'
-    elif ':' in target:
-        REMOTE_HOST, port_str = target.rsplit(':', 1)
-        REMOTE_PORT = int(port_str)
-    else:
-        REMOTE_HOST = target
 
 # Get script directory and create logs folder
 script_dir = Path(__file__).parent.absolute()
@@ -49,12 +36,9 @@ _CONFIG_DEFAULTS = {
     "latency_warning_threshold":  1.0,
     "heartbeat_interval_seconds": 60,
     "network": {
-        "enabled": True,
-        "host": "0.0.0.0",
-        "port": 9876,
-        "remote_host": "10.0.0.5",
         "auto_update": True,
         "auto_update_interval_minutes": 5,
+        "auto_update_git_remote": "",
     },
 }
 
@@ -328,6 +312,128 @@ def start_console_thread():
     console_thread.start()
     bot.logger.log("MAIN", "Console thread started")
 
+def _parse_version_tuple(v: str):
+    """Parse '4.2.1.1' into (4,2,1,1). Returns (0,0,0,0) on failure."""
+    try:
+        parts = v.strip().split('.')
+        return tuple(int(p) for p in parts[:4])
+    except Exception:
+        return (0, 0, 0, 0)
+
+def _ensure_git_for_update(bot, logger) -> bool:
+    """Ensure git is installed and the working directory is a proper git repo with a remote."""
+    try:
+        result = subprocess.run(
+            ['git', '--version'], capture_output=True, text=True, timeout=5
+        )
+        if result.returncode != 0:
+            logger.log("AUTO-UPDATE", "Git is not installed — auto-update disabled", "WARNING")
+            return False
+        result = subprocess.run(
+            ['git', '-C', str(script_dir), 'rev-parse', '--git-dir'],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode != 0:
+            remote_url = bot.config.get("network", {}).get("auto_update_git_remote", "")
+            if not remote_url:
+                logger.log("AUTO-UPDATE",
+                    "Not a git repo and no auto_update_git_remote — auto-update disabled", "WARNING")
+                return False
+            logger.log("AUTO-UPDATE", "Initialising git repository for auto-update...")
+            subprocess.run(['git', '-C', str(script_dir), 'init'],
+                          capture_output=True, text=True, timeout=10)
+            subprocess.run(['git', '-C', str(script_dir), 'remote', 'add', 'origin', remote_url],
+                          capture_output=True, text=True, timeout=10)
+            logger.log("AUTO-UPDATE", f"Git repo initialised with remote: {remote_url}")
+        else:
+            result = subprocess.run(
+                ['git', '-C', str(script_dir), 'remote', 'get-url', 'origin'],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode != 0:
+                remote_url = bot.config.get("network", {}).get("auto_update_git_remote", "")
+                if remote_url:
+                    logger.log("AUTO-UPDATE", f"Adding remote origin: {remote_url}")
+                    subprocess.run(
+                        ['git', '-C', str(script_dir), 'remote', 'add', 'origin', remote_url],
+                        capture_output=True, text=True, timeout=10
+                    )
+                else:
+                    logger.log("AUTO-UPDATE",
+                        "No remote origin and no auto_update_git_remote — auto-update disabled", "WARNING")
+                    return False
+        return True
+    except Exception as e:
+        logger.log("AUTO-UPDATE", f"Git pre-flight check failed: {e}", "WARNING")
+        return False
+
+async def _check_for_update(bot) -> bool:
+    """One-shot: fetch remote, compare _version.py versions, pull if newer.
+    Returns True if a pull happened (bot should restart)."""
+    git_env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GCM_INTERACTIVE': 'never'}
+    local_ver = _parse_version_tuple(bot.version if hasattr(bot, 'version') else load_version())
+    bot.logger.log("AUTO-UPDATE", f"Pre-flight: local v{'.'.join(map(str,local_ver))}")
+    proc = await asyncio.create_subprocess_exec(
+        'git', '-C', str(script_dir), '-c', 'credential.helper=',
+        'fetch', 'origin', 'main',
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=git_env
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        bot.logger.log("AUTO-UPDATE", f"Fetch failed (rc={proc.returncode}): {stderr.decode()[:200]}", "WARNING")
+        return False
+    proc = await asyncio.create_subprocess_exec(
+        'git', '-C', str(script_dir), '-c', 'credential.helper=',
+        'show', 'FETCH_HEAD:_version.py',
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=git_env
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        bot.logger.log("AUTO-UPDATE",
+            f"Could not read remote _version.py (rc={proc.returncode}): {stderr.decode()[:200]}", "WARNING")
+        return False
+    match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', stdout.decode())
+    if not match:
+        bot.logger.log("AUTO-UPDATE", "Remote _version.py has no version string", "WARNING")
+        return False
+    remote_ver = _parse_version_tuple(match.group(1))
+    bot.logger.log("AUTO-UPDATE", f"Remote v{match.group(1)}")
+    if remote_ver <= local_ver:
+        if remote_ver < local_ver:
+            bot.logger.log("AUTO-UPDATE", "Remote is older — skipping")
+        return False
+    bot.logger.log("AUTO-UPDATE", "Remote is newer — pulling...")
+    proc = await asyncio.create_subprocess_exec(
+        'git', '-C', str(script_dir), '-c', 'credential.helper=',
+        'pull', '--rebase', 'origin', 'main',
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=git_env
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode == 0:
+        bot.logger.log("AUTO-UPDATE", "Pull successful — restart required")
+        return True
+    bot.logger.log("AUTO-UPDATE", f"Pull failed: {stderr.decode()[:200]}", "WARNING")
+    return False
+
+async def _auto_update_loop(bot):
+    interval = bot.config.get("network", {}).get("auto_update_interval_minutes", 5) * 60
+    if not bot.config.get("network", {}).get("auto_update", True):
+        bot.logger.log("AUTO-UPDATE", "Disabled by config")
+        return
+    await bot.wait_until_ready()
+    if not _ensure_git_for_update(bot, bot.logger):
+        return
+    await asyncio.sleep(interval)
+    while not bot.is_closed():
+        try:
+            if await _check_for_update(bot):
+                bot.logger.log("AUTO-UPDATE", "Update pulled — restarting")
+                await bot.close()
+                sys.exit(42)
+        except Exception as e:
+            bot.logger.log("AUTO-UPDATE", f"Check error: {e}", "WARNING")
+        await asyncio.sleep(interval)
+
 @bot.event
 async def on_ready():
     # Only run initialization on first ready, not on reconnects
@@ -346,6 +452,9 @@ async def on_ready():
         # Start a background task to monitor heartbeat
         bot.heartbeat_monitor = bot.loop.create_task(monitor_heartbeat())
         
+        # Start auto-update loop (git-based, works without --dev)
+        bot.auto_update_task = bot.loop.create_task(_auto_update_loop(bot))
+        
         # Load modules
         load_modules()
         
@@ -356,6 +465,11 @@ async def on_ready():
         try:
             synced = await bot.tree.sync()
             bot.logger.log("MAIN", f"Commands synced successfully: {len(synced)} commands")
+            
+            if getattr(args, 'test', False):
+                bot.logger.log("MAIN", f"TEST PASSED — {len(synced)} commands synced. Shutting down.")
+                await bot.close()
+                sys.exit(0)
         except HTTPException as e:
             if e.status == 429 and e.code == 30034:
                 bot.logger.log("MAIN", "Daily command sync limit reached (200/200). Commands will sync tomorrow.", "WARNING")
@@ -738,21 +852,9 @@ def _register_events():
 
 def run_bot(token):
     """Start the bot with the given token. Callable from external launchers."""
-    global bot, _cfg, args, data_dir, script_dir, REMOTE_HOST, REMOTE_PORT
+    global bot, _cfg, args, data_dir, script_dir
 
     bot.config = _cfg
-
-    # Resolve remote host/port from config if using --console/-t without explicit host
-    if REMOTE_HOST == '__auto__':
-        net = _cfg.get("network", {})
-        REMOTE_HOST = net.get("remote_host", "localhost")
-    if REMOTE_PORT is None:
-        REMOTE_PORT = _cfg.get("network", {}).get("port", 9876)
-
-    # --console mode: connect to remote console
-    if args.console or args.test:
-        asyncio.run(_run_remote_mode(token))
-        return
 
     home_guild_id = int(_cfg.get("home_guild_id") or 0)
     if not home_guild_id:
@@ -770,120 +872,41 @@ def run_bot(token):
 
         setup_console_commands()
 
-        mode_str = "with development mode"if args.development else ""
-        bot.logger.log("MAIN", f"Starting Embot v{load_version()}{mode_str}...")
-        bot.logger.log("MAIN", f"Log files will be saved to: {data_dir}")
-        bot.logger.log("MAIN", "Signal handlers registered for graceful shutdown")
+        # Auto-update check runs before Discord connection (git-only, no rate limits)
+        if bot.config.get("network", {}).get("auto_update", True):
+            if _ensure_git_for_update(bot, bot.logger):
+                if asyncio.run(_check_for_update(bot)):
+                    bot.logger.log("MAIN", "Update pulled during pre-flight — restarting")
+                    sys.exit(42)
+
+        if args.development:
+            bot.logger.log("MAIN", "Pre-flight: running dev version check...")
+            from modules.dev import DevManager
+            dm = DevManager(bot)
+            bot.dev_manager = dm
+            result = asyncio.run(dm.check_and_update_version(auto_commit=True))
+            bot.version = dm._get_version_from_file()
+            if result:
+                bot.logger.log("MAIN", f"Pre-flight bumped to v{result['version']}")
+            else:
+                bot.logger.log("MAIN", f"Pre-flight complete — v{bot.version} (no change)")
+
+        if args.development:
+            mode_str = "DEVELOPMENT MODE"
+        elif args.test:
+            mode_str = "DRY-RUN TEST MODE"
+        else:
+            mode_str = "PRODUCTION MODE"
+        bot.logger.log("MAIN", f"Starting Embot v{load_version()} — {mode_str}")
+        bot.logger.log("MAIN", f"Log files: {data_dir}")
+
         bot.run(token)
     except Exception as e:
         bot.logger.error("MAIN", "Failed to start bot", e)
         sys.exit(1)
 
-async def _run_remote_mode(token):
-    sys.path.insert(0, str(script_dir / "modules"))
-    from network import NetworkClient
-    client = NetworkClient(bot, REMOTE_HOST, REMOTE_PORT)
-    await client.connect(mode="test" if args.test else "console")
-
-    if args.console:
-        await _run_console_client(client)
-    else:
-        await _run_test_mode(client, token)
-
-async def _run_console_client(client):
-    """--console mode: relay stdin/stdout to remote server."""
-    await client.subscribe_console()
-    print(f"Connected to remote console at {REMOTE_HOST}:{REMOTE_PORT}")
-    print("Type 'exit' to disconnect.\n")
-
-    async def read_remote():
-        while client.connected:
-            msg = await client.recv()
-            if msg is None:
-                break
-            if msg.get("type") == "console_output":
-                sys.stdout.write(msg["data"])
-                sys.stdout.flush()
-        client._connected = False
-
-    task = asyncio.create_task(read_remote())
-
-    try:
-        while client.connected:
-            line = await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
-            if not line:
-                break
-            if line.strip().lower() == 'exit':
-                break
-            await client.send_console_input(line)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        task.cancel()
-        await client.close()
-        print("\nDisconnected.")
-
-async def _run_test_mode(client, token):
-    """--test mode: claim dominance, sync remote files, run bot."""
-    resp = await client.claim_dominance("test")
-    if resp and resp.get("paused"):
-        bot.logger.log("MAIN", "Primary instance paused — test mode active")
-
-    # Download critical files from remote server
-    await _sync_remote_files(client)
-
-    home_guild_id = int(_cfg.get("home_guild_id") or 0)
-    if not home_guild_id:
-        bot.logger.error("MAIN", "home_guild_id is not set in config/embot.json!")
-        bot.logger.log("MAIN", f"Edit {_CONFIG_PATH} and set home_guild_id to your server's ID.")
-        sys.exit(1)
-
-    bot.home_guild_id = home_guild_id
-    _register_events()
-
-    try:
-        if hasattr(signal, 'SIGTERM'):
-            signal.signal(signal.SIGTERM, handle_signal)
-        signal.signal(signal.SIGINT, handle_signal)
-        setup_console_commands()
-
-        bot.logger.log("MAIN", f"Starting Embot v{load_version()} in test mode (synced files)...")
-        await bot.start(token)
-    finally:
-        await client.release_dominance()
-        await client.close()
-        bot.logger.log("MAIN", "Test mode ended — primary instance resumed")
-
-
-async def _sync_remote_files(client):
-    """Download config, db, and cache files from remote server."""
-    dirs_to_sync = ["config", "db", "cache"]
-    for dir_name in dirs_to_sync:
-        local_dir = script_dir / dir_name
-        local_dir.mkdir(parents=True, exist_ok=True)
-        entries = await client.list_files(dir_name)
-        for entry in entries:
-            if entry.get("is_dir"):
-                continue
-            remote_path = f"{dir_name}/{entry['name']}"
-            data = await client.read_file(remote_path)
-            if data is not None:
-                dest = local_dir / entry['name']
-                dest.write_bytes(data)
-    bot.logger.log("MAIN", "Synced config, db, and cache from remote server")
-
 if __name__ == "__main__":
-    # --console mode doesn't need a token
-    if args.console:
-        if REMOTE_HOST == '__auto__':
-            net = _cfg.get("network", {})
-            REMOTE_HOST = net.get("remote_host", "localhost")
-        if REMOTE_PORT is None:
-            REMOTE_PORT = _cfg.get("network", {}).get("port", 9876)
-        asyncio.run(_run_remote_mode(""))
-        sys.exit(0)
-
-    TOKEN_FILE = (script_dir / "config" / "token") if (script_dir / "config" / "token").exists() else (script_dir / "token.json")
+    TOKEN_FILE = script_dir / "config" / "auth.json"
     TOKEN = ""
     if TOKEN_FILE.exists():
         try:
@@ -895,8 +918,8 @@ if __name__ == "__main__":
             TOKEN = TOKEN_FILE.read_text().strip()
 
     if not TOKEN:
-        bot.logger.error("MAIN", f"Token file not found or empty: {TOKEN_FILE}")
-        bot.logger.log("MAIN", "Create config/token with your Discord bot token.")
+        bot.logger.error("MAIN", f"Auth file not found or empty: {TOKEN_FILE}")
+        bot.logger.log("MAIN", "Create config/auth.json with your Discord bot token.")
         sys.exit(1)
 
     run_bot(TOKEN)

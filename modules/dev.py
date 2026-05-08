@@ -338,33 +338,28 @@ fix_spaces.py
         return f"{major}.{minor}.{patch}.{micro}", change_type
 
     async def _get_git_diff_lines(self, working_tree: bool = False) -> tuple[int, list[dict]]:
-        """Returns (total_lines, file_details). file_details is a list of {path, added, removed}.
-        If working_tree=True, diffs working tree vs HEAD. Otherwise HEAD~1..HEAD."""
+        """Returns (total_lines, file_details).
+        If working_tree=True, diffs working tree vs HEAD.
+        Otherwise diffs from the last version-bump commit to HEAD."""
         git_env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GCM_INTERACTIVE': 'never'}
         try:
             if working_tree:
                 numstat_args = ['git', '-c', 'credential.helper=', 'diff', '--numstat', 'HEAD']
-                stat_args = ['git', '-c', 'credential.helper=', 'diff', '--stat', 'HEAD']
             else:
-                numstat_args = ['git', '-c', 'credential.helper=', 'diff', 'HEAD~1', 'HEAD', '--numstat']
-                stat_args = ['git', '-c', 'credential.helper=', 'diff', 'HEAD~1', 'HEAD', '--stat']
+                base = await self._get_last_version_bump_commit()
+                if base:
+                    numstat_args = ['git', '-c', 'credential.helper=', 'diff', '--numstat', base, 'HEAD']
+                else:
+                    numstat_args = ['git', '-c', 'credential.helper=', 'diff', '--numstat', '--root', 'HEAD']
 
             proc = await asyncio.create_subprocess_exec(
                 *numstat_args,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 env=git_env
             )
-            stdout, stderr = await proc.communicate()
-            if proc.returncode != 0 and not working_tree:
-                proc = await asyncio.create_subprocess_exec(
-                    'git', '-c', 'credential.helper=', 'diff',
-                    '--numstat', '--root', 'HEAD',
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                    env=git_env
-                )
-                stdout, _ = await proc.communicate()
-                if proc.returncode != 0:
-                    return 0, []
+            stdout, _ = await proc.communicate()
+            if proc.returncode != 0:
+                return 0, []
 
             total = 0
             files = []
@@ -384,6 +379,27 @@ fix_spaces.py
         except Exception as e:
             self.bot.logger.log(MODULE_NAME, f"Git diff failed: {e}", "WARNING")
             return 0, []
+
+    async def _get_last_version_bump_commit(self) -> str:
+        """Get the hash of the most recent commit matching vX.X.X.X. Returns empty string if none."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                'git', '-c', 'credential.helper=', 'log', '--oneline', '-20',
+                '--grep=^v[0-9]',
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
+            )
+            stdout, _ = await proc.communicate()
+            for line in stdout.decode().strip().split('\n'):
+                if not line.strip():
+                    continue
+                parts = line.split(' ', 1)
+                msg = parts[1] if len(parts) > 1 else ''
+                if re.match(r'^v\d+\.\d+\.\d+\.\d+$', msg.strip()):
+                    return parts[0]
+            return ''
+        except Exception:
+            return ''
 
     async def _is_head_version_bump(self) -> bool:
         """Check if HEAD commit message looks like a version bump (e.g. 'v4.2.1.1')."""

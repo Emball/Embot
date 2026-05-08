@@ -138,6 +138,23 @@ class EventLogger:
         image_exts = ('.png', '.jpg', '.jpeg', '.gif', '.webp')
         audio_exts = ('.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.opus', '.mp4', '.mov', '.webm')
 
+        if not rehosted_files:
+            mod_sys = getattr(self.bot, '_mod_system', None)
+            if mod_sys and message.id in mod_sys.media_cache:
+                cached = mod_sys.media_cache[message.id]
+                rehosted_files = []
+                for f in cached['files']:
+                    try:
+                        data = mod_sys._decrypt_from_disk(f['path'])
+                        rehosted_files.append({'filename': f['filename'], 'data': data})
+                    except FileNotFoundError:
+                        pass
+                    except Exception as e:
+                        self.bot.logger.log(
+                            MODULE_NAME,
+                            f"Failed to decrypt {f['filename']} for deletion log: {e}",
+                            "WARNING")
+
         if rehosted_files:
             # Scan through MediaScanner before uploading to Discord CDN
             scanner = self._get_scanner()

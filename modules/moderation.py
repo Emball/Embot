@@ -417,6 +417,14 @@ def has_elevated_role(member: discord.Member, cfg: ModConfig) -> bool:
     elevated = cfg.get_elevated_roles()
     return any(role.name in elevated for role in member.roles)
 
+def has_owner_role(member: discord.Member, cfg: ModConfig) -> bool:
+    """True if member is guild owner, has the 'Owner' role, or matches owner_id."""
+    if member.guild.owner_id == member.id:
+        return True
+    if member.id == cfg.get_owner_id():
+        return True
+    return any(role.name == "Owner" for role in member.roles)
+
 def validate_reason(reason: Optional[str], min_len: int) -> tuple:
     if not reason or reason.strip() == ""or reason == "No reason provided":
         return False, ERROR_REASON_REQUIRED
@@ -2338,7 +2346,7 @@ async def _do_warnings(ctx: ModContext, mod: ModerationSystem, member: discord.M
     await ctx.reply(embed=embed, ephemeral=True)
 
 async def _do_clearwarnings(ctx: ModContext, mod: ModerationSystem, member: discord.Member):
-    if not has_elevated_role(ctx.author, mod.cfg):
+    if not has_owner_role(ctx.author, mod.cfg):
         return await ctx.error(ERROR_NO_PERMISSION)
     if mod.clear_strikes(member.id):
         embed = discord.Embed(
@@ -3182,7 +3190,7 @@ def setup(bot):
                       description="[Admin] Force-refresh the #rules channel embed")
     @app_commands.default_permissions(administrator=True)
     async def slash_updaterules(interaction: discord.Interaction):
-        if not has_elevated_role(interaction.user, _cfg):
+        if not has_owner_role(interaction.user, _cfg):
             await interaction.response.send_message(ERROR_NO_PERMISSION, ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
@@ -3198,7 +3206,7 @@ def setup(bot):
                       description="[Admin] Restart the bot process")
     @app_commands.default_permissions(administrator=True)
     async def slash_restart(interaction: discord.Interaction):
-        if not has_elevated_role(interaction.user, _cfg):
+        if not has_owner_role(interaction.user, _cfg):
             await interaction.response.send_message(ERROR_NO_PERMISSION, ephemeral=True)
             return
         await interaction.response.send_message("Restarting...", ephemeral=True)
@@ -3664,7 +3672,7 @@ def _setup_suspicion(bot: commands.Bot, _mod: "ModerationSystem", _cfg: "ModConf
                       description="[Admin] Re-score all members in the server")
     @app_commands.default_permissions(administrator=True)
     async def slash_fedscan(interaction: discord.Interaction):
-        if not has_elevated_role(interaction.user, _cfg):
+        if not has_owner_role(interaction.user, _cfg):
             await interaction.response.send_message(ERROR_NO_PERMISSION, ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)

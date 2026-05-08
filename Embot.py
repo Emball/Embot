@@ -433,7 +433,7 @@ async def _auto_update_loop(bot):
             if await _check_for_update(bot):
                 bot.logger.log("AUTO-UPDATE", "Update pulled — restarting")
                 await bot.close()
-                sys.exit(42)
+                os._exit(42)
         except Exception as e:
             bot.logger.log("AUTO-UPDATE", f"Check error: {e}", "WARNING")
         await asyncio.sleep(interval)

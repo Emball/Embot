@@ -2107,8 +2107,10 @@ async def _do_ban(ctx: ModContext, mod: ModerationSystem,
 
 async def _do_unban(ctx: ModContext, mod: ModerationSystem,
                     user_id: str, reason: str = "No reason provided", fake: bool = False):
-    if not ctx.author.guild_permissions.ban_members:
-        return await ctx.error("You don't have permission to unban members.")
+    cfg = mod.cfg
+    if not ctx.author.guild_permissions.ban_members and \
+            not has_elevated_role(ctx.author, cfg):
+        return await ctx.error(ERROR_NO_PERMISSION)
     try:
         user = await ctx.bot.fetch_user(int(user_id))
         if not fake:

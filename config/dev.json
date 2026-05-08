@@ -1,8 +1,0 @@
-{
-    "breaking_threshold": 500,
-    "major_threshold": 100,
-    "minor_threshold": 20,
-    "patch_threshold": 1,
-    "auto_commit": true,
-    "auto_versioning": true
-}

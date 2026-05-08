@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import sqlite3
 import atexit
 from pathlib import Path
 from datetime import datetime
@@ -21,10 +22,6 @@ METADATA_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 atexit.register(METADATA_EXECUTOR.shutdown, wait=False)
 MODULE_NAME = "ARCHIVE"
 
-_cache_lock = asyncio.Lock()
-
-import json as _json
-
 def _load_eminem_root() -> Path:
     env_val = os.environ.get("EMINEM_ROOT")
     if env_val:
@@ -32,13 +29,13 @@ def _load_eminem_root() -> Path:
     config_file = Path(__file__).parent.parent / "config"/ "archive_config.json"
     if config_file.exists():
         try:
-            data = _json.loads(config_file.read_text(encoding="utf-8"))
+            data = json.loads(config_file.read_text(encoding="utf-8"))
             if "eminem_root"in data:
                 return Path(data["eminem_root"])
         except Exception:
             pass
     config_file.parent.mkdir(parents=True, exist_ok=True)
-    config_file.write_text(_json.dumps({"eminem_root": "."}, indent=2), encoding="utf-8")
+    config_file.write_text(json.dumps({"eminem_root": "."}, indent=2), encoding="utf-8")
     raise FileNotFoundError(
         "EMINEM_ROOT is not configured. Set the EMINEM_ROOT environment variable "
         "or edit config/archive_config.json and set 'eminem_root' to your Eminem music folder."
@@ -55,8 +52,9 @@ except FileNotFoundError as _e:
 FORMATS = ["FLAC", "MP3"]
 CACHE_CHANNEL_NAME = "songcache"
 INDEX_FILE = str(Path(__file__).parent.parent / "cache"/ "archive"/ "song_index.json")
-CACHE_INDEX = str(Path(__file__).parent.parent / "cache"/ "archive"/ "cache_index.json")
+CACHE_DB = str(Path(__file__).parent.parent / "db"/ "archive_cache.db")
 Path(__file__).parent.parent.joinpath("cache", "archive").mkdir(parents=True, exist_ok=True)
+Path(__file__).parent.parent.joinpath("db").mkdir(parents=True, exist_ok=True)
 VERSION_KEYWORDS = ['live', 'remix', 'demo', 'acoustic', 'version', 'edit', 'radio']
 SPECIAL_FOLDERS = {
     "8 - Features": "Feature",
@@ -295,67 +293,112 @@ def select_best_candidate(cands, version=None):
     scored.sort(key=lambda x: (x[0], x[1]))
     return scored[0][2] if scored else None
 
-#  CACHE (DM fallback CDN URLs)
-async def get_cached_url(bot, file_path):
-    """Upload to #songcache and return a CDN URL. Used only as DM fallback."""
-    p = Path(file_path)
-    key = str(p.resolve())
-    async with _cache_lock:
-        try:
-            with open(CACHE_INDEX, 'r', encoding='utf-8') as f:
-                cache = json.load(f)
-        except FileNotFoundError:
-            cache = {}
-        except Exception as e:
-            bot.logger.error(MODULE_NAME, "Error loading cache index", e)
-            cache = {}
-        now = datetime.utcnow()
-        if key in cache:
-            bot.logger.log(MODULE_NAME, f"Using cached URL for {p.name}")
-            return cache[key]['url']
-        chan = discord.utils.get(bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
-        if not chan:
-            bot.logger.log(MODULE_NAME, f"Missing channel {CACHE_CHANNEL_NAME}", "WARNING")
-            return None
-        if not p.exists():
-            bot.logger.error(MODULE_NAME, f"File not found: {file_path}")
-            return None
-        try:
-            bot.logger.log(MODULE_NAME, f"Uploading {p.name} to cache channel")
-            mf = discord.File(p, filename=p.name)
-            msg = await chan.send(file=mf)
-            url = msg.attachments[0].url
-            cache[key] = {'url': url, 'timestamp': now.isoformat(), 'message_id': msg.id}
-            try:
-                tmp = CACHE_INDEX + ".tmp"
-                with open(tmp, 'w', encoding='utf-8') as f:
-                    json.dump(cache, f, ensure_ascii=False, indent=2)
-                os.replace(tmp, CACHE_INDEX)
-                bot.logger.log(MODULE_NAME, f"Cached new URL for {p.name}")
-            except Exception as e:
-                bot.logger.error(MODULE_NAME, "Failed to save cache index", e)
-            return url
-        except discord.HTTPException as e:
-            if e.status == 413:
-                bot.logger.log(MODULE_NAME, f"File too large: {p.name}", "WARNING")
-                return "FILE_TOO_LARGE"
-            bot.logger.error(MODULE_NAME, "Upload failed", e)
-            return None
-        except Exception as e:
-            bot.logger.error(MODULE_NAME, "Unexpected upload error", e)
-            return None
+#  CACHE DB
 
-#  DELIVERY  — ephemeral CDN link → DM fallback
+CACHE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS song_cache (
+    file_path   TEXT PRIMARY KEY,
+    cdn_url     TEXT NOT NULL,
+    message_id  TEXT NOT NULL,
+    channel_id  TEXT NOT NULL,
+    file_name   TEXT NOT NULL,
+    file_size   INTEGER NOT NULL DEFAULT 0,
+    cached_at   TEXT NOT NULL,
+    accessed_at TEXT NOT NULL
+);
+"""
+
+def _cache_db_path() -> Path:
+    return Path(__file__).parent.parent / "db" / "archive_cache.db"
+
+def _cache_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(str(_cache_db_path()))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+def _cache_init() -> None:
+    with _cache_conn() as c:
+        c.executescript(CACHE_SCHEMA)
+        c.commit()
+
+def _cache_lookup(file_path: str) -> Optional[dict]:
+    key = str(Path(file_path).resolve())
+    with _cache_conn() as c:
+        row = c.execute(
+            "UPDATE song_cache SET accessed_at=? WHERE file_path=?",
+            (datetime.utcnow().isoformat(), key)
+        )
+        c.commit()
+        row = c.execute("SELECT * FROM song_cache WHERE file_path=?", (key,)).fetchone()
+    return dict(row) if row else None
+
+def _cache_store(file_path: str, cdn_url: str, message_id: str, channel_id: str,
+                 file_name: str, file_size: int) -> None:
+    key = str(Path(file_path).resolve())
+    now = datetime.utcnow().isoformat()
+    with _cache_conn() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO song_cache "
+            "(file_path, cdn_url, message_id, channel_id, file_name, file_size, cached_at, accessed_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (key, cdn_url, str(message_id), str(channel_id), file_name, file_size, now, now)
+        )
+        c.commit()
+
+async def _get_or_upload_cache(bot, file_path: str) -> Optional[str]:
+    """Look up cached CDN URL, or upload to #songcache and store in DB.
+    If cache entry exists but Discord CDN is dead, re-upload using stored message_id."""
+    p = Path(file_path)
+    cached = _cache_lookup(file_path)
+    if cached:
+        bot.logger.log(MODULE_NAME, f"Cache hit: {p.name}")
+        return cached["cdn_url"]
+
+    chan = discord.utils.get(bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
+    if not chan:
+        bot.logger.log(MODULE_NAME, f"Missing channel {CACHE_CHANNEL_NAME}", "WARNING")
+        return None
+    if not p.exists():
+        bot.logger.error(MODULE_NAME, f"File not found: {file_path}")
+        return None
+
+    try:
+        bot.logger.log(MODULE_NAME, f"Uploading {p.name} to {CACHE_CHANNEL_NAME}")
+        mf = discord.File(p, filename=p.name)
+        msg = await chan.send(file=mf)
+        url = msg.attachments[0].url
+        _cache_store(file_path, url, msg.id, chan.id, p.name,
+                     p.stat().st_size if p.exists() else 0)
+        bot.logger.log(MODULE_NAME, f"Cached: {p.name}")
+        return url
+    except discord.HTTPException as e:
+        if e.status == 413:
+            bot.logger.log(MODULE_NAME, f"File too large: {p.name}", "WARNING")
+            return "FILE_TOO_LARGE"
+        bot.logger.error(MODULE_NAME, f"Upload failed", e)
+        return None
+    except Exception as e:
+        bot.logger.error(MODULE_NAME, f"Upload error", e)
+        return None
+
+#  DELIVERY
+
 async def _deliver_song(bot, interaction: discord.Interaction, candidate: dict) -> None:
     p = Path(candidate['path'])
-    url = await get_cached_url(bot, str(p))
+    url = await _get_or_upload_cache(bot, str(p))
     if url == "FILE_TOO_LARGE":
         await interaction.followup.send(LARGE_FILE_MSG, ephemeral=True)
         return
     if not url:
         await interaction.followup.send("Failed to retrieve song.", ephemeral=True)
         return
-    await interaction.followup.send(f"[{p.name}]({url})", ephemeral=True)
+
+    if interaction.guild is None:
+        await interaction.followup.send(f"[{p.name}]({url})")
+    else:
+        await interaction.followup.send(f"[{p.name}]({url})", ephemeral=True)
     bot.logger.log(MODULE_NAME, f"Delivered '{p.name}'")
 
 #  FED CHECK
@@ -699,6 +742,7 @@ class ARCHIVEManager:
 
     async def initialize(self):
         self.bot.logger.log(MODULE_NAME, "Starting song index initialization...")
+        _cache_init()
         self.initialization_task = asyncio.create_task(self._initialize_background())
 
     async def _initialize_background(self):

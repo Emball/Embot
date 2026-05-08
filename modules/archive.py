@@ -785,13 +785,12 @@ def setup(bot):
     @app_commands.choices(format=[app_commands.Choice(name=fmt, value=fmt) for fmt in FORMATS])
     async def ARCHIVE(interaction: discord.Interaction, format: str, song_name: str,
                       version: Optional[str] = None):
-        command_data = {'format': format, 'song_name': song_name, 'version': version or 'N/A'}
+        await interaction.response.defer(ephemeral=True, thinking=True)
         await ARCHIVE_manager.ensure_ready()
         if not ARCHIVE_manager.song_index_ready.is_set():
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Initializing — please try again shortly.", ephemeral=True)
             return
-        await interaction.response.defer(ephemeral=True, thinking=True)
         if _is_fed(interaction):
             await interaction.followup.send("Failed to retrieve song.", ephemeral=True)
             return
@@ -802,7 +801,7 @@ def setup(bot):
             await send_bot_log(bot, {
                 'user': str(interaction.user), 'user_id': interaction.user.id,
                 'success': False, 'error': 'Song not found', 'action': 'ARCHIVE',
-                'params': command_data,
+                'params': {'format': format, 'song_name': song_name, 'version': version or 'N/A'},
             })
             return
         candidates = ARCHIVE_manager.song_index[format][key]

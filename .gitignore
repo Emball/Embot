@@ -17,6 +17,7 @@ cache/
 db/
 temp/
 *.log
+main.py
 *.db
 *.sqlite
 *.tmp

@@ -202,12 +202,7 @@ def setup(bot: discord.Client):
         bot.logger.log(MODULE_NAME, "helpdoc_channel_id not set in config — module inactive", "WARNING")
         return
 
-    @bot.listen("on_ready")
-    async def _on_ready():
-        await bot.wait_until_ready()
-        await sync_helpdoc(bot, channel_id)
-
-    @bot.tree.command(name="helpdoc_sync", description="[Owner only] Force re-sync the help doc in #info")
+    @bot.tree.command(name="helpdoc_sync", description="[Owner only] Re-sync the help doc in #info")
     @app_commands.guild_only()
     async def helpdoc_sync_cmd(interaction: discord.Interaction):
         if interaction.user.id != interaction.guild.owner_id:

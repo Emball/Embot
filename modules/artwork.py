@@ -1,8 +1,8 @@
-import asyncio
 import discord
 import aiohttp
 import re
 import json
+from difflib import SequenceMatcher
 from discord import app_commands
 
 MODULE_NAME = "ARTWORK"
@@ -15,38 +15,79 @@ def art_url(raw: str, size: int = ART_SIZE) -> str:
     return re.sub(r"\d+x\d+bb", f"{size}x{size}bb", raw)
 
 
-async def _itunes(session: aiohttp.ClientSession, term: str, attribute: str, limit: int) -> list[dict]:
-    params = {"term": term, "entity": "album", "attribute": attribute, "limit": limit}
+def _artist_score(query: str, name: str) -> float:
+    q = query.casefold()
+    a = name.casefold()
+    if a.startswith(q):
+        return 2.0 + SequenceMatcher(None, q, a).ratio()
+    q_words = set(q.split())
+    a_words = set(a.split())
+    overlap = q_words & a_words
+    if overlap:
+        return 1.0 + len(overlap) / len(q_words) + SequenceMatcher(None, q, a).ratio() * 0.1
+    return SequenceMatcher(None, q, a).ratio()
+
+
+def _album_score(query: str, name: str) -> float:
+    al = query.casefold()
+    nm = name.casefold()
+    ratio = SequenceMatcher(None, al, nm).ratio()
+    al_words = set(al.split())
+    nm_words = set(nm.split())
+    return ratio + len(al_words & nm_words) * 0.5
+
+
+async def _resolve_artist(session: aiohttp.ClientSession, query: str) -> dict | None:
+    params = {"term": query, "entity": "musicArtist", "limit": 25}
+    async with session.get(ITUNES_SEARCH, params=params) as resp:
+        if resp.status != 200:
+            return None
+        results = json.loads(await resp.text()).get("results", [])
+    if not results:
+        return None
+    best = None
+    best_score = -1.0
+    for r in results:
+        s = _artist_score(query, r.get("artistName", ""))
+        if s > best_score:
+            best_score = s
+            best = r
+    return best
+
+
+async def _artist_albums(session: aiohttp.ClientSession, name: str, artist_id: int) -> list[dict]:
+    params = {"term": name, "entity": "album", "attribute": "artistTerm", "limit": 50}
     async with session.get(ITUNES_SEARCH, params=params) as resp:
         if resp.status != 200:
             return []
-        return json.loads(await resp.text()).get("results", [])
+        results = json.loads(await resp.text()).get("results", [])
+    return [a for a in results if a.get("artistId") == artist_id]
 
 
 async def search_itunes(artist: str, album: str) -> dict | None:
     headers = {"User-Agent": "Mozilla/5.0"}
     async with aiohttp.ClientSession(headers=headers) as session:
-        if album:
-            artist_results, album_results = await asyncio.gather(
-                _itunes(session, artist, "artistTerm", 50),
-                _itunes(session, album,  "albumTerm",  50),
-            )
-            # Intersect: albums that appear in both artist and album searches
-            artist_ids = {r["collectionId"] for r in artist_results}
-            intersect  = [r for r in album_results if r["collectionId"] in artist_ids]
-            if intersect:
-                return intersect[0]
-            # Fallback: artist results, sorted by how many album words appear in collection name
-            if artist_results:
-                al = album.casefold()
-                artist_results.sort(
-                    key=lambda r: -sum(w in r.get("collectionName", "").casefold() for w in al.split())
-                )
-                return artist_results[0]
+        artist_info = await _resolve_artist(session, artist)
+        if not artist_info:
             return None
-        else:
-            results = await _itunes(session, artist, "artistTerm", 10)
-            return results[0] if results else None
+
+        artist_name = artist_info["artistName"]
+        artist_id = artist_info["artistId"]
+        albums = await _artist_albums(session, artist_name, artist_id)
+        if not albums:
+            return None
+
+        if not album:
+            return albums[0]
+
+        best = None
+        best_score = -1.0
+        for a in albums:
+            s = _album_score(album, a.get("collectionName", ""))
+            if s > best_score:
+                best_score = s
+                best = a
+        return best
 
 
 def setup(bot):

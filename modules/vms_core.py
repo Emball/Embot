@@ -649,7 +649,7 @@ def setup(bot):
         run_archive_if_due, purge_bot_vms, ARCHIVE_JOB_INTERVAL_HOURS,
     )
     from vms_playback import (
-        GENERAL_CHANNEL_NAME, send_vm, select_contextual, select_random,
+        send_vm, select_contextual, select_random,
         get_counter, inc_counter, reset_counter, ping_allowed,
         set_ping_cooldown, recent_messages,
     )

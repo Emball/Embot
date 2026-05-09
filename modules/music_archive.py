@@ -476,57 +476,107 @@ class ARCHIVEManager:
             self.bot.logger.log(MODULE_NAME, f"Cannot backfill — no #{CACHE_CHANNEL_NAME} channel", "WARNING")
             return
         max_bytes = getattr(chan.guild, 'filesize_limit', 25 * 1024 * 1024)
+
         seen = set()
-        total = 0
         for fmt in FORMATS:
             for entries in self.song_index.get(fmt, {}).values():
                 for e in entries:
                     fp = e['path']
                     if fp not in seen:
                         seen.add(fp)
-                        total += 1
-        cached = 0
-        uploaded = 0
-        skipped = 0
-        errors = 0
-        self.bot.logger.log(MODULE_NAME,
-            f"Cache backfill: {total} unique files to check (max {max_bytes // 1024 // 1024}MB per file)")
-        for i, fp in enumerate(sorted(seen), 1):
+        total = len(seen)
+
+        pending = []
+        for fp in sorted(seen):
             try:
                 if _cache_lookup(fp):
-                    cached += 1
                     continue
                 p = Path(fp)
                 if not p.exists():
-                    skipped += 1
                     continue
-                if p.stat().st_size > max_bytes:
+                sz = p.stat().st_size
+                if sz > max_bytes:
                     self.bot.logger.log(MODULE_NAME,
-                        f"Skipping {p.name} ({p.stat().st_size // 1024 // 1024}MB exceeds limit)", "WARNING")
-                    skipped += 1
+                        f"Skipping {p.name} ({sz // 1024 // 1024}MB exceeds {max_bytes // 1024 // 1024}MB limit)", "WARNING")
                     continue
-                url = await _get_or_upload_cache(self.bot, fp)
-                if url and url != "FILE_TOO_LARGE":
-                    uploaded += 1
-                elif url == "FILE_TOO_LARGE":
-                    skipped += 1
-                else:
-                    errors += 1
-            except asyncio.CancelledError:
-                self.bot.logger.log(MODULE_NAME, "Cache backfill cancelled", "WARNING")
-                return
+                pending.append((fp, p, sz))
             except Exception as exc:
-                self.bot.logger.log(MODULE_NAME, f"Backfill error on {Path(fp).name}: {exc}", "WARNING")
-                errors += 1
-            done = uploaded + cached + skipped
-            if done % 25 == 0 or i == total:
-                self.bot.logger.log(MODULE_NAME,
-                    f"Cache backfill: {uploaded} uploaded, {cached} cached, "
-                    f"{skipped} skipped, {errors} errors — {i}/{total}")
-            await asyncio.sleep(2)
+                self.bot.logger.log(MODULE_NAME, f"Backfill check error on {fp}: {exc}", "WARNING")
+
         self.bot.logger.log(MODULE_NAME,
-            f"Cache backfill complete: {uploaded} uploaded, {cached} cached, "
-            f"{skipped} skipped, {errors} errors")
+            f"Cache backfill: {len(pending)}/{total} files need upload "
+            f"(max {max_bytes // 1024 // 1024}MB per message)")
+
+        if not pending:
+            self.bot.logger.log(MODULE_NAME, "Cache backfill: nothing to upload")
+            return
+
+        cached = total - len(pending)
+        uploaded = 0
+        errors = 0
+
+        batch = []
+        batch_size = 0
+        sent_batches = 0
+
+        for fp, p, sz in pending:
+            if batch and batch_size + sz > max_bytes:
+                ok = await self._send_batch(chan, batch)
+                if ok:
+                    uploaded += len(batch)
+                else:
+                    errors += len(batch)
+                sent_batches += 1
+                batch = []
+                batch_size = 0
+                await asyncio.sleep(2)
+                log_every = max(1, len(pending) // 20)
+                if uploaded % log_every == 0:
+                    self.bot.logger.log(MODULE_NAME,
+                        f"Cache backfill: {uploaded} uploaded, {cached} cached, "
+                        f"{errors} errors ({uploaded + cached + errors}/{total})")
+            batch.append((fp, p, sz))
+            batch_size += sz
+
+        if batch:
+            ok = await self._send_batch(chan, batch)
+            if ok:
+                uploaded += len(batch)
+            else:
+                errors += len(batch)
+            sent_batches += 1
+
+        self.bot.logger.log(MODULE_NAME,
+            f"Cache backfill complete: {uploaded} uploaded in {sent_batches} batch(es), "
+            f"{cached} cached, {errors} errors")
+
+    async def _send_batch(self, chan, batch) -> bool:
+        files = []
+        for fp, p, sz in batch:
+            files.append(discord.File(p, filename=p.name))
+        try:
+            timeout = 120 + 30 * len(batch)
+            msg = await asyncio.wait_for(chan.send(files=files), timeout=timeout)
+        except asyncio.TimeoutError:
+            self.bot.logger.log(MODULE_NAME, f"Batch upload timed out ({len(batch)} files)", "WARNING")
+            return False
+        except discord.HTTPException as e:
+            self.bot.logger.log(MODULE_NAME, f"Batch upload failed ({len(batch)} files): {e}", "WARNING")
+            return False
+        except Exception as e:
+            self.bot.logger.log(MODULE_NAME, f"Batch upload error ({len(batch)} files): {e}", "WARNING")
+            return False
+        att_map = {att.filename: att for att in msg.attachments}
+        ok = True
+        for fp, p, sz in batch:
+            att = att_map.get(p.name)
+            if att:
+                _cache_store(fp, att.url, att.id, chan.id, p.name, sz)
+                self.bot.logger.log(MODULE_NAME, f"Cached: {p.name}")
+            else:
+                self.bot.logger.log(MODULE_NAME, f"Batch missing attachment for {p.name}", "WARNING")
+                ok = False
+        return ok
 
 def setup(bot):
     bot.logger.log(MODULE_NAME, "Setting up ARCHIVE module")

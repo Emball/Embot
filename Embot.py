@@ -77,23 +77,39 @@ class ConsoleLogger:
         self.lock = threading.Lock()
         self.session_id = self._generate_session_id()
         self.log_file = None
+        self.session_number = 0
         self._init_log_file()
         self._cleanup_old_logs(retention_days=30)
 
     def _generate_session_id(self) -> str:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"session_{timestamp}"
+        return f"session_{datetime.now().strftime('%Y%m%d')}"
+
+    def _count_sessions(self, filepath):
+        if not filepath.exists():
+            return 0
+        count = 0
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.startswith('--- Session'):
+                        count += 1
+        except Exception:
+            pass
+        return count
 
     def _init_log_file(self):
         log_filename = f"{self.session_id}.log"
         self.log_file = data_dir / log_filename
+        file_exists = self.log_file.exists()
+        self.session_number = self._count_sessions(self.log_file) + 1
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        with open(self.log_file, 'w', encoding='utf-8') as f:
-            f.write(f"=== Embot Session Log - {self.session_id} ===\n")
-            f.write(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write("="* 50 + "\n\n")
+        with open(self.log_file, 'a', encoding='utf-8') as f:
+            if not file_exists:
+                f.write(f"=== Embot Log — {datetime.now().strftime('%Y-%m-%d')} ===\n\n")
+            f.write(f"--- Session {self.session_number} — {now_str} UTC ---\n\n")
 
-        print(f"[LOGGER] Session log started: {self.log_file.name}")
+        print(f"[LOGGER] Day log: {self.log_file.name} (session #{self.session_number})")
 
     def _cleanup_old_logs(self, retention_days=30):
         try:
@@ -662,7 +678,9 @@ def setup_console_commands():
     async def handle_logs(args):
         if hasattr(bot.logger, 'log_file') and bot.logger.log_file.exists():
             file_size = bot.logger.log_file.stat().st_size
-            print(f"\n Current log file: {bot.logger.log_file.name}")
+            session_count = bot.logger._count_sessions(bot.logger.log_file)
+            print(f"\n Day log: {bot.logger.log_file.name}")
+            print(f"  Sessions today: {session_count} (current: #{bot.logger.session_number})")
             print(f"  Size: {file_size:,} bytes")
             print(f"  Location: {bot.logger.log_file}")
 

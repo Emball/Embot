@@ -24,13 +24,12 @@ All run from the project root:
 | `uv run python modules/remote_debug.py status` | Bot vitals (version, latency, uptime, guilds, log file) |
 | `uv run python modules/remote_debug.py guilds` | List all guilds with id, name, members, channels, roles |
 | `uv run python modules/remote_debug.py modules` | List loaded module names |
-| `uv run python modules/remote_debug.py logs` | Fetch last 200 lines of console log |
-| `uv run python modules/remote_debug.py logs --file session_20250101_120000.log` | Fetch from a specific log file |
+| `uv run python modules/remote_debug.py logs` | Fetch last 200 lines of today's log |
+| `uv run python modules/remote_debug.py logs --file session_20250101.log` | Fetch from a specific day file |
+| `uv run python modules/remote_debug.py logs --session 2` | Fetch a specific session within today's log |
 | `uv run python modules/remote_debug.py logs --lines 1000` | Fetch last N lines |
-| `uv run python modules/remote_debug.py logs-list` | List all session log files |
+| `uv run python modules/remote_debug.py logs-list` | List all day log files with session counts |
 | `uv run python modules/remote_debug.py logs-search <pattern>` | Regex search across all log files |
-| `uv run python modules/remote_debug.py logs --lines 1000` | Fetch last N lines |
-| `uv run python modules/remote_debug.py logs-list` | List all session log files |
 | `uv run python modules/remote_debug.py stream` | Live tail the console log (Ctrl+C to stop) |
 | `uv run python modules/remote_debug.py db-download <name>` | Download a .db file to temp/ |
 | `uv run python modules/remote_debug.py db-query <name> "<SQL>"` | Run a SELECT/PRAGMA query |

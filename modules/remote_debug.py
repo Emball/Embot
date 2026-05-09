@@ -191,10 +191,19 @@ class RemoteDebugServer:
             return web.json_response([], status=200)
         files = []
         for fp in sorted(logs_dir.glob("session_*.log"), key=lambda x: x.stat().st_mtime, reverse=True):
+            session_count = 0
+            try:
+                with open(fp, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if line.startswith("--- Session"):
+                            session_count += 1
+            except Exception:
+                pass
             files.append({
                 "name": fp.name,
                 "size": fp.stat().st_size,
                 "mtime": datetime.fromtimestamp(fp.stat().st_mtime).isoformat(),
+                "sessions": session_count,
             })
         return web.json_response(files)
 
@@ -257,7 +266,7 @@ class RemoteDebugServer:
         if not self._check_auth(request) or not self._check_ip(request):
             return self._fail()
         name = request.match_info["name"]
-        if not re.match(r'^session_\d{8}_\d{6}\.log$', name):
+        if not re.match(r'^session_\d{8}(?:_\d{6})?\.log$', name):
             return self._fail("invalid log name", 400)
         log_path = self._logs_dir() / name
         if not log_path.exists():
@@ -278,7 +287,7 @@ class RemoteDebugServer:
             return self._fail()
         log_name = request.query.get("file", "")
         if log_name:
-            if not re.match(r'^session_\d{8}_\d{6}\.log$', log_name):
+            if not re.match(r'^session_\d{8}(?:_\d{6})?\.log$', log_name):
                 return self._fail("invalid log name", 400)
             log_path = self._logs_dir() / log_name
         else:
@@ -291,10 +300,39 @@ class RemoteDebugServer:
             lines = min(int(request.query.get("lines", "200")), 20000)
         except ValueError:
             lines = 200
+        session_num = request.query.get("session", "")
         with open(log_path, "r", encoding="utf-8") as f:
             all_lines = f.readlines()
+        if session_num and session_num != "all":
+            try:
+                session_num = int(session_num)
+            except ValueError:
+                return self._fail("session must be a number or 'all'", 400)
+            start = None
+            end = None
+            header_re = re.compile(r'^--- Session (\d+) ')
+            for i, line in enumerate(all_lines):
+                m = header_re.match(line)
+                if m:
+                    if int(m.group(1)) == session_num:
+                        start = i
+                    elif start is not None:
+                        end = i
+                        break
+            if start is None:
+                return web.json_response(
+                    {"error": f"session {session_num} not found"}, status=404)
+            out = all_lines[start:end]
+            if lines and lines < len(out):
+                out = out[-lines:]
+        elif session_num == "all":
+            out = all_lines
+            if lines and lines < len(out):
+                out = out[-lines:]
+        else:
+            out = all_lines[-lines:]
         return web.Response(
-            text="".join(all_lines[-lines:]),
+            text="".join(out),
             content_type="text/plain; charset=utf-8",
         )
 
@@ -518,10 +556,12 @@ def _cmd_modules(cfg):
     print(json.dumps(_client_request(cfg, "/modules"), indent=2))
 
 
-def _cmd_logs(cfg, lines=200, file=None):
+def _cmd_logs(cfg, lines=200, file=None, session=None):
     path = f"/logs?lines={lines}"
     if file:
         path += f"&file={urllib.parse.quote(file)}"
+    if session:
+        path += f"&session={urllib.parse.quote(str(session))}"
     data = _client_request(cfg, path, raw=True)
     sys.stdout.buffer.write(data + b"\n")
 
@@ -603,7 +643,8 @@ def main():
 
     logs_parser = sub.add_parser("logs", help="Fetch recent logs")
     logs_parser.add_argument("--lines", type=int, default=200)
-    logs_parser.add_argument("--file", default=None, help="Specific log file to read (default: current session)")
+    logs_parser.add_argument("--file", default=None, help="Day log file (default: today)")
+    logs_parser.add_argument("--session", default=None, help="Session number within day file (or 'all')")
 
     sub.add_parser("logs-list", help="List all log files")
 
@@ -642,7 +683,7 @@ def main():
     elif args.command == "modules":
         _cmd_modules(run_cfg)
     elif args.command == "logs":
-        _cmd_logs(run_cfg, args.lines, args.file)
+        _cmd_logs(run_cfg, args.lines, args.file, args.session)
     elif args.command == "logs-list":
         _cmd_logs_list(run_cfg)
     elif args.command == "logs-search":

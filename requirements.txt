@@ -6,6 +6,9 @@ pytz
 # HTTP
 aiohttp
 
+# YouTube
+yt-dlp
+
 # Audio processing
 mutagen
 pydub

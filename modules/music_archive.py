@@ -3,6 +3,7 @@ import re
 import json
 import sqlite3
 import atexit
+import time
 from pathlib import Path
 from typing import Optional
 from _utils import script_dir, _now
@@ -487,33 +488,47 @@ class ARCHIVEManager:
         total = len(seen)
 
         pending = []
+        already_cached = 0
+        skipped = 0
         for fp in sorted(seen):
             try:
                 if _cache_lookup(fp):
+                    already_cached += 1
                     continue
                 p = Path(fp)
                 if not p.exists():
+                    skipped += 1
                     continue
                 sz = p.stat().st_size
                 if sz > max_bytes:
                     self.bot.logger.log(MODULE_NAME,
                         f"Skipping {p.name} ({sz // 1024 // 1024}MB exceeds {max_bytes // 1024 // 1024}MB limit)", "WARNING")
+                    skipped += 1
                     continue
                 pending.append((fp, p, sz))
             except Exception as exc:
                 self.bot.logger.log(MODULE_NAME, f"Backfill check error on {fp}: {exc}", "WARNING")
+                skipped += 1
 
         self.bot.logger.log(MODULE_NAME,
             f"Cache backfill: {len(pending)}/{total} files need upload "
             f"(max {max_bytes // 1024 // 1024}MB per message)")
 
         if not pending:
-            self.bot.logger.log(MODULE_NAME, "Cache backfill: nothing to upload")
+            await chan.send(embed=discord.Embed(
+                title="📦 Cache Backfill",
+                description="All files already cached. Nothing to do.",
+                color=0x2ecc71))
             return
 
-        cached = total - len(pending)
+        cached = already_cached
         uploaded = 0
         errors = 0
+        uploaded_bytes = 0
+        total_bytes = sum(sz for _, _, sz in pending)
+        start = time.time()
+        status_msg = None
+        current_name = "Scanning..."
 
         batch = []
         batch_size = 0
@@ -523,37 +538,85 @@ class ARCHIVEManager:
             if _cache_lookup(fp):
                 cached += 1
                 continue
+            current_name = p.name
             if batch and batch_size + sz > max_bytes:
+                status_msg = await self._update_backfill_embed(
+                    chan, status_msg, start, total, cached, uploaded, errors,
+                    uploaded_bytes, total_bytes, f"Uploading batch ({len(batch)} files)...")
                 ok = await self._send_batch(chan, batch)
                 if ok:
                     uploaded += len(batch)
+                    uploaded_bytes += sum(s for _, _, s in batch)
                 else:
                     errors += len(batch)
                 sent_batches += 1
                 batch = []
                 batch_size = 0
                 await asyncio.sleep(2)
-                log_every = max(1, len(pending) // 20)
-                if uploaded % log_every == 0:
-                    self.bot.logger.log(MODULE_NAME,
-                        f"Cache backfill: {uploaded} uploaded, {cached} cached, "
-                        f"{errors} errors ({uploaded + cached + errors}/{total})")
             batch.append((fp, p, sz))
             batch_size += sz
 
         if batch:
             batch = [(fp, p, sz) for fp, p, sz in batch if not _cache_lookup(fp)]
             if batch:
+                status_msg = await self._update_backfill_embed(
+                    chan, status_msg, start, total, cached, uploaded, errors,
+                    uploaded_bytes, total_bytes, f"Uploading batch ({len(batch)} files)...")
                 ok = await self._send_batch(chan, batch)
                 if ok:
                     uploaded += len(batch)
+                    uploaded_bytes += sum(s for _, _, s in batch)
                 else:
                     errors += len(batch)
                 sent_batches += 1
 
+        status_msg = await self._update_backfill_embed(
+            chan, status_msg, start, total, cached, uploaded, errors,
+            uploaded_bytes, total_bytes, None)
         self.bot.logger.log(MODULE_NAME,
             f"Cache backfill complete: {uploaded} uploaded in {sent_batches} batch(es), "
             f"{cached} cached, {errors} errors")
+
+    async def _update_backfill_embed(self, chan, msg, start, total, cached, uploaded, errors, uploaded_bytes, total_bytes, current_name):
+        elapsed = time.time() - start
+        done = uploaded + cached
+        pct = done / total * 100 if total else 0
+
+        bar_len = 12
+        filled = int(bar_len * done / total) if total else 0
+        bar = "▓" * filled + "░" * (bar_len - filled)
+
+        if elapsed > 0 and uploaded > 0:
+            rate = uploaded_bytes / elapsed
+            remaining = total_bytes - uploaded_bytes
+            eta_secs = remaining / rate if rate > 0 else 0
+            speed = f"{rate / 1024 / 1024:.1f} MB/s"
+        else:
+            eta_secs = 0
+            speed = "—"
+
+        embed = discord.Embed(
+            title="📦 Cache Backfill",
+            description=f"`{bar}` **{pct:.1f}%** ({done}/{total})",
+            color=0x3498db if current_name else 0x2ecc71,
+        )
+        embed.add_field(name="Uploaded", value=f"{uploaded} files\n{uploaded_bytes / 1024 / 1024:.0f} MB", inline=True)
+        embed.add_field(name="Speed / ETA",
+                        value=f"{speed}\n{'—' if not eta_secs else f'{eta_secs / 60:.0f}m {eta_secs % 60:.0f}s'}",
+                        inline=True)
+        embed.add_field(name="Status", value=f"✅ {cached} cached\n❌ {errors} errors", inline=True)
+        if current_name:
+            embed.set_footer(text=f"Current: {current_name[:120]}")
+        else:
+            embed.set_footer(text="Complete!")
+
+        try:
+            if msg:
+                await msg.edit(embed=embed)
+                return msg
+        except (discord.NotFound, discord.Forbidden):
+            pass
+        return await chan.send(embed=embed)
 
     async def _send_batch(self, chan, batch) -> bool:
         files = []

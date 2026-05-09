@@ -21,7 +21,7 @@ Name: Michael (Emball/Embis). Vibe-coder with beginner Python knowledge. Dual-bo
 | Windows (current) | Development — edit code, commit, push |
 | Linux laptop | Deployment — runs the bot 24/7, holds live DBs, configs, and console output |
 
-`modules/remote_debug.py` runs a lightweight HTTP API inside the bot on Linux. `temp/remote_client.py` on Windows connects to it over the local network.
+`modules/remote_debug.py` runs a lightweight HTTP API inside the bot on Linux. When invoked standalone (`python modules/remote_debug.py <command>`), it acts as a client connecting to that API over the local network. Dual-purpose — server when imported by Embot, client when run directly.
 
 ### Default Testing Path
 
@@ -55,26 +55,26 @@ All run from the project root:
 
 | Command | Purpose |
 |---|---|
-| `uv run temp/remote_client.py ping` | Test connectivity |
-| `uv run temp/remote_client.py status` | Bot vitals (version, latency, uptime log file) |
-| `uv run temp/remote_client.py logs` | Fetch last 200 lines of console log |
-| `uv run temp/remote_client.py logs --lines 1000` | Fetch last N lines |
-| `uv run temp/remote_client.py stream` | Live tail the console log (Ctrl+C to stop) |
-| `uv run temp/remote_client.py db-download <name>` | Download a .db file to temp/ |
-| `uv run temp/remote_client.py db-query <name> "<SQL>"` | Run a SELECT/PRAGMA query |
-| `uv run temp/remote_client.py config <name>` | View a config file (auth blocked) |
-| `uv run temp/remote_client.py update` | Git pull + restart if new commits |
-| `uv run temp/remote_client.py restart` | Restart the bot remotely |
+| `uv run python modules/remote_debug.py ping` | Test connectivity |
+| `uv run python modules/remote_debug.py status` | Bot vitals (version, latency, uptime log file) |
+| `uv run python modules/remote_debug.py logs` | Fetch last 200 lines of console log |
+| `uv run python modules/remote_debug.py logs --lines 1000` | Fetch last N lines |
+| `uv run python modules/remote_debug.py stream` | Live tail the console log (Ctrl+C to stop) |
+| `uv run python modules/remote_debug.py db-download <name>` | Download a .db file to temp/ |
+| `uv run python modules/remote_debug.py db-query <name> "<SQL>"` | Run a SELECT/PRAGMA query |
+| `uv run python modules/remote_debug.py config <name>` | View a config file (auth blocked) |
+| `uv run python modules/remote_debug.py update` | Git pull + restart if new commits |
+| `uv run python modules/remote_debug.py restart` | Restart the bot remotely |
 
 ### Post-Commit Testing Checklist
 
 After pushing changes:
 
-1. `uv run temp/remote_client.py update` — trigger immediate pull + restart
-2. `uv run temp/remote_client.py status` — verify version matches, no crash
-3. `uv run temp/remote_client.py logs --lines 300` — scan for ERROR lines
-4. If error found: `uv run temp/remote_client.py logs --lines 1000` and grep for traceback
-5. If data issue suspected: `uv run temp/remote_client.py db-query <name> "<relevant query>"`
+1. `uv run python modules/remote_debug.py update` — trigger immediate pull + restart
+2. `uv run python modules/remote_debug.py status` — verify version matches, no crash
+3. `uv run python modules/remote_debug.py logs --lines 300` — scan for ERROR lines
+4. If error found: `uv run python modules/remote_debug.py logs --lines 1000` and grep for traceback
+5. If data issue suspected: `uv run python modules/remote_debug.py db-query <name> "<relevant query>"`
 6. Fix, repeat from step 1
 
 **The remote test against Linux is mandatory before considering any change complete.** Local syntax checks alone are insufficient — the real server environment is the only true validator.

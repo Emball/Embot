@@ -4,7 +4,13 @@ import secrets
 import socket
 import sqlite3
 import re
-import traceback
+import sys
+import os
+import argparse
+import urllib.request
+import urllib.parse
+import urllib.error
+import ssl
 from pathlib import Path
 from datetime import datetime
 from aiohttp import web
@@ -297,3 +303,159 @@ def setup(bot):
 
     bot._remote_debug_task = asyncio.create_task(_start())
     bot.logger.log(MODULE_NAME, "Remote debug module setup complete")
+
+
+# ── Client mode (when run as `python modules/remote_debug.py <command>`) ──
+
+_CLIENT_CFG_PATH = script_dir() / "temp" / "remote.json"
+
+
+def _load_client_config() -> dict:
+    defaults = {"url": "http://192.168.1.100:8765", "token": ""}
+    if _CLIENT_CFG_PATH.exists():
+        with open(_CLIENT_CFG_PATH, "r") as f:
+            defaults.update(json.load(f))
+    defaults["url"] = os.environ.get("REMOTE_URL", defaults["url"])
+    defaults["token"] = os.environ.get("REMOTE_TOKEN", defaults["token"])
+    return defaults
+
+
+def _client_request(cfg, path, raw=False, method="GET"):
+    url = cfg["url"].rstrip("/") + path
+    data = b"" if method == "POST" else None
+    req = urllib.request.Request(url, data=data, method=method)
+    if cfg["token"]:
+        req.add_header("X-Debug-Token", cfg["token"])
+    ctx = ssl._create_unverified_context()
+    try:
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+            data = resp.read()
+            if raw:
+                return data
+            return json.loads(data)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()
+        try:
+            err = json.loads(body).get("error", body)
+        except Exception:
+            err = body
+        print(f"HTTP {e.code}: {err}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Connection failed: {e}")
+        sys.exit(1)
+
+
+def _cmd_ping(cfg):
+    print(json.dumps(_client_request(cfg, "/ping"), indent=2))
+
+
+def _cmd_status(cfg):
+    print(json.dumps(_client_request(cfg, "/status"), indent=2))
+
+
+def _cmd_logs(cfg, lines=200):
+    data = _client_request(cfg, f"/logs?lines={lines}", raw=True)
+    sys.stdout.buffer.write(data + b"\n")
+
+
+def _cmd_stream(cfg):
+    url = cfg["url"].rstrip("/") + "/logs/stream"
+    req = urllib.request.Request(url)
+    if cfg["token"]:
+        req.add_header("X-Debug-Token", cfg["token"])
+    ctx = ssl._create_unverified_context()
+    try:
+        with urllib.request.urlopen(req, timeout=3600, context=ctx) as resp:
+            for line in resp:
+                line = line.decode(errors="replace").strip()
+                if line.startswith("data: "):
+                    sys.stdout.buffer.write((line[6:] + "\n").encode("utf-8", errors="replace"))
+    except KeyboardInterrupt:
+        print("\nDisconnected.")
+    except Exception as e:
+        print(f"Stream error: {e}")
+        sys.exit(1)
+
+
+def _cmd_db_download(cfg, name):
+    data = _client_request(cfg, f"/db/{name}", raw=True)
+    out_path = script_dir() / "temp" / f"{name}.db"
+    with open(out_path, "wb") as f:
+        f.write(data)
+    print(f"Saved {len(data):,} bytes to {out_path}")
+
+
+def _cmd_db_query(cfg, name, query):
+    encoded = urllib.parse.quote(query)
+    result = _client_request(cfg, f"/db/{name}/query?q={encoded}")
+    print(json.dumps(result, indent=2))
+
+
+def _cmd_config(cfg, name):
+    print(json.dumps(_client_request(cfg, f"/config/{name}"), indent=2))
+
+
+def _cmd_update(cfg):
+    print(json.dumps(_client_request(cfg, "/update", method="POST"), indent=2))
+
+
+def _cmd_restart(cfg):
+    print(json.dumps(_client_request(cfg, "/restart", method="POST"), indent=2))
+
+
+def main():
+    cfg = _load_client_config()
+
+    parser = argparse.ArgumentParser(description="Embot remote debug client")
+    parser.add_argument("--url", default=cfg["url"], help="Server URL")
+    parser.add_argument("--token", default=cfg["token"], help="Auth token")
+
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("ping", help="Test connection")
+    sub.add_parser("status", help="Bot status")
+
+    logs_parser = sub.add_parser("logs", help="Fetch recent logs")
+    logs_parser.add_argument("--lines", type=int, default=200)
+
+    sub.add_parser("stream", help="Live log stream (Ctrl+C to stop)")
+
+    db_dl = sub.add_parser("db-download", help="Download a database file")
+    db_dl.add_argument("name", help="DB name (without .db)")
+
+    db_q = sub.add_parser("db-query", help="Run a read-only SQL query")
+    db_q.add_argument("name", help="DB name (without .db)")
+    db_q.add_argument("query", help="SQL query (SELECT only)")
+
+    config_p = sub.add_parser("config", help="View a config file")
+    config_p.add_argument("name", help="Config name (without .json)")
+
+    sub.add_parser("update", help="Git pull and restart if updated")
+    sub.add_parser("restart", help="Restart the bot")
+
+    args = parser.parse_args()
+    run_cfg = {"url": args.url, "token": args.token}
+
+    if args.command == "ping":
+        _cmd_ping(run_cfg)
+    elif args.command == "status":
+        _cmd_status(run_cfg)
+    elif args.command == "logs":
+        _cmd_logs(run_cfg, args.lines)
+    elif args.command == "stream":
+        _cmd_stream(run_cfg)
+    elif args.command == "db-download":
+        _cmd_db_download(run_cfg, args.name)
+    elif args.command == "db-query":
+        _cmd_db_query(run_cfg, args.name, args.query)
+    elif args.command == "config":
+        _cmd_config(run_cfg, args.name)
+    elif args.command == "update":
+        _cmd_update(run_cfg)
+    elif args.command == "restart":
+        _cmd_restart(run_cfg)
+
+
+if __name__ == "__main__":
+    main()

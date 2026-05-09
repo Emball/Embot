@@ -17,6 +17,7 @@ CONFIG_DEFAULTS = {
     "last_video_id": "",
     "poll_interval_minutes": 5,
     "max_ogg_size_mb": 25,
+    "cookies_txt": "",
 }
 
 def _config_path():
@@ -62,10 +63,15 @@ async def update_yt_dlp():
     )
     await proc.communicate()
 
-async def extract_ogg(url: str, out_dir: str) -> tuple[str | None, str | None]:
+async def _cookies_args(cfg: dict) -> list:
+    p = cfg.get("cookies_txt", "").strip()
+    return ["--cookies", p] if p and Path(p).exists() else []
+
+async def extract_ogg(url: str, out_dir: str, cfg: dict = None) -> tuple[str | None, str | None]:
     """Update yt-dlp then download opus stream as .ogg. Returns (filepath, error)."""
     await update_yt_dlp()
     out_template = os.path.join(out_dir, "%(title)s.%(ext)s")
+    cookies = await _cookies_args(cfg or {})
     code, stdout, stderr = await run_yt_dlp(
         "-x",
         "--audio-format", "opus",
@@ -73,6 +79,7 @@ async def extract_ogg(url: str, out_dir: str) -> tuple[str | None, str | None]:
         "--embed-thumbnail",
         "--extractor-retries", "3",
         "--no-check-certificates",
+        *cookies,
         "-o", out_template,
         "--no-playlist",
         url,
@@ -89,8 +96,9 @@ async def extract_ogg(url: str, out_dir: str) -> tuple[str | None, str | None]:
             return path, None
     return None, "No output file found after download."
 
-async def get_latest_video(channel_id: str) -> tuple[str | None, str | None, str | None]:
+async def get_latest_video(channel_id: str, cfg: dict = None) -> tuple[str | None, str | None, str | None]:
     """Returns (video_id, title, url) of latest upload."""
+    cookies = await _cookies_args(cfg or {})
     code, stdout, stderr = await run_yt_dlp(
         f"https://www.youtube.com/channel/{channel_id}/videos",
         "--flat-playlist",
@@ -98,6 +106,7 @@ async def get_latest_video(channel_id: str) -> tuple[str | None, str | None, str
         "--print", "%(id)s|%(title)s",
         "--no-warnings",
         "--no-check-certificates",
+        *cookies,
     )
     if code != 0 or not stdout.strip():
         return None, None, None
@@ -120,7 +129,7 @@ def setup(bot):
         await interaction.response.defer(thinking=True)
 
         with tempfile.TemporaryDirectory() as tmp:
-            filepath, err = await extract_ogg(url, tmp)
+            filepath, err = await extract_ogg(url, tmp, cfg)
             if err or not filepath:
                 bot.logger.log(MODULE_NAME, f"yt-dlp error: {err}")
                 await interaction.followup.send(f"Failed to extract audio: `{err}`")
@@ -147,6 +156,7 @@ def setup(bot):
         announce_channel="Discord channel for upload notifications",
         announce_role="Role to ping on new upload",
         poll_interval="How often to check for uploads (minutes)",
+        cookies_txt="Absolute path to a Netscape cookies.txt file for YouTube auth",
     )
     async def youtube_setup(
         interaction: discord.Interaction,
@@ -154,6 +164,7 @@ def setup(bot):
         announce_channel: discord.TextChannel = None,
         announce_role: discord.Role = None,
         poll_interval: int = None,
+        cookies_txt: str = None,
     ):
         if interaction.user.id != interaction.guild.owner_id:
             await interaction.response.send_message("Owner only.", ephemeral=True)
@@ -175,6 +186,9 @@ def setup(bot):
             cfg["poll_interval_minutes"] = poll_interval
             updated.append(f"Poll interval: {poll_interval}m")
             notify_task.change_interval(minutes=poll_interval)
+        if cookies_txt is not None:
+            cfg["cookies_txt"] = cookies_txt
+            updated.append(f"Cookies: `{cookies_txt}`")
 
         save_config(cfg)
         if updated:
@@ -185,7 +199,8 @@ def setup(bot):
                 f"• Channel ID: `{cfg['channel_id']}`\n"
                 f"• Announce channel: <#{cfg['announce_channel_id']}>\n"
                 f"• Role: <@&{cfg['announce_role_id']}>\n"
-                f"• Poll interval: {cfg['poll_interval_minutes']}m"
+                f"• Poll interval: {cfg['poll_interval_minutes']}m\n"
+                f"• Cookies: `{cfg.get('cookies_txt', '') or 'not set'}`"
             )
 
     @tasks.loop(minutes=cfg.get("poll_interval_minutes", 5))
@@ -199,7 +214,7 @@ def setup(bot):
             return
 
         try:
-            vid_id, title, url = await get_latest_video(yt_channel)
+            vid_id, title, url = await get_latest_video(yt_channel, cfg)
         except Exception as e:
             bot.logger.error(MODULE_NAME, "Failed to fetch latest video", e)
             return

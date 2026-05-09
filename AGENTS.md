@@ -36,9 +36,10 @@ For every code change, follow this order:
 
 ### Remote Client Setup (Windows)
 
-Create `temp/remote.json`:
+The remote debug server and client share `config/remote_debug.json`. Set the `url` field to the server address:
+
 ```json
-{"url": "http://<linux-lan-ip>:8765", "token": "<token-from-linux-console>"}
+{"url": "http://<linux-lan-ip>:8765"}
 ```
 
 The Linux laptop logs its LAN IP and token on startup:
@@ -47,7 +48,7 @@ The Linux laptop logs its LAN IP and token on startup:
 [REMOTE_DEBUG] Auth token: <64-char-hex>
 ```
 
-If `temp/remote.json` is missing, the client falls back to env vars `REMOTE_URL` and `REMOTE_TOKEN`.
+If `url` is missing from config, the client falls back to env vars `REMOTE_URL` and `REMOTE_TOKEN`.
 
 ### Remote Client Commands
 

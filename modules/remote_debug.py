@@ -26,7 +26,26 @@ RD_CONFIG_DEFAULTS = {
     "port": 8765,
     "token": "",
     "allowed_ips": [],
+    "url": "http://192.168.1.100:8765",
 }
+
+
+def _migrate_client_config():
+    client_cfg = script_dir() / "temp" / "remote.json"
+    if not client_cfg.exists():
+        return
+    try:
+        with open(client_cfg, "r") as f:
+            client_data = json.load(f)
+        cfg = _load_config()
+        if client_data.get("url"):
+            cfg["url"] = client_data["url"]
+        if client_data.get("token") and not cfg.get("token"):
+            cfg["token"] = client_data["token"]
+        atomic_json_write(RD_CONFIG_PATH, cfg)
+        client_cfg.unlink()
+    except Exception as e:
+        print(f"[{MODULE_NAME}] Failed to migrate temp/remote.json: {e}", file=sys.stderr)
 
 
 def _load_config() -> dict:
@@ -289,6 +308,7 @@ class RemoteDebugServer:
 
 
 def setup(bot):
+    _migrate_client_config()
     bot.logger.log(MODULE_NAME, "Setting up remote debug HTTP server")
     config = _load_config()
     if not config.get("enabled", True):
@@ -307,17 +327,12 @@ def setup(bot):
 
 # ── Client mode (when run as `python modules/remote_debug.py <command>`) ──
 
-_CLIENT_CFG_PATH = script_dir() / "temp" / "remote.json"
-
 
 def _load_client_config() -> dict:
-    defaults = {"url": "http://192.168.1.100:8765", "token": ""}
-    if _CLIENT_CFG_PATH.exists():
-        with open(_CLIENT_CFG_PATH, "r") as f:
-            defaults.update(json.load(f))
-    defaults["url"] = os.environ.get("REMOTE_URL", defaults["url"])
-    defaults["token"] = os.environ.get("REMOTE_TOKEN", defaults["token"])
-    return defaults
+    cfg = migrate_config(RD_CONFIG_PATH, RD_CONFIG_DEFAULTS)
+    cfg["url"] = os.environ.get("REMOTE_URL", cfg["url"])
+    cfg["token"] = os.environ.get("REMOTE_TOKEN", cfg["token"])
+    return cfg
 
 
 def _client_request(cfg, path, raw=False, method="GET"):

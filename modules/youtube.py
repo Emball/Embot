@@ -56,12 +56,17 @@ async def run_yt_dlp(*args):
     return proc.returncode, stdout.decode(), stderr.decode()
 
 async def update_yt_dlp():
-    proc = await asyncio.create_subprocess_exec(
-        "pip", "install", "--upgrade", "--quiet", "yt-dlp",
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    await proc.communicate()
+    # Try uv first (UV venvs), fall back to pip
+    for cmd in (["uv", "pip", "install", "--upgrade", "yt-dlp"],
+                ["pip", "install", "--upgrade", "--quiet", "yt-dlp"]):
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.communicate()
+        if proc.returncode == 0:
+            break
 
 async def _cookies_args(cfg: dict) -> list:
     p = cfg.get("cookies_txt", "").strip()

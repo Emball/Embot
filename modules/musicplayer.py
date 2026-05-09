@@ -7,11 +7,11 @@ from typing import Optional
 from mutagen.flac import FLAC
 from mutagen.mp3 import MP3
 
-MODULE_NAME = "PLAYER"
+MODULE_NAME = "MUSIC PLAYER"
 
 def import_archive_functions():
     try:
-        from archive import (
+        from musicarchive import (
             find_best_match,
             select_best_candidate,
             FORMATS

@@ -939,7 +939,7 @@ def setup(bot):
     @bot.tree.command(name="setjoinlogs", description="[Owner only] Set the channel for join/leave logs")
     @app_commands.describe(channel="Channel to send join/leave logs to")
     async def set_join_logs(interaction: discord.Interaction, channel: discord.TextChannel):
-        from moderation import is_owner
+        from modcore import is_owner
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return
@@ -958,7 +958,7 @@ def setup(bot):
     @bot.tree.command(name="setbotlogs", description="[Owner only] Set the channel for bot/moderation logs")
     @app_commands.describe(channel="Channel to send bot/moderation logs to")
     async def set_bot_logs(interaction: discord.Interaction, channel: discord.TextChannel):
-        from moderation import is_owner
+        from modcore import is_owner
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return
@@ -976,7 +976,7 @@ def setup(bot):
 
     @bot.tree.command(name="logconfig", description="[Owner only] View or toggle logging settings")
     async def log_config(interaction: discord.Interaction):
-        from moderation import is_owner
+        from modcore import is_owner
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return

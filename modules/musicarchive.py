@@ -20,20 +20,31 @@ from concurrent.futures import ThreadPoolExecutor
 
 METADATA_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 atexit.register(METADATA_EXECUTOR.shutdown, wait=False)
-MODULE_NAME = "ARCHIVE"
+MODULE_NAME = "MUSIC ARCHIVE"
+
+def _migrate_path(new_path: Path, old_path: Path) -> Path:
+    if new_path.exists():
+        return new_path
+    if old_path.exists():
+        old_path.rename(new_path)
+        print(f"[MUSICARCHIVE] Migrated {old_path.name} → {new_path.name}")
+    return new_path
 
 def _load_eminem_root() -> Path:
     env_val = os.environ.get("EMINEM_ROOT")
     if env_val:
         return Path(env_val)
     from _utils import migrate_config
-    config_file = script_dir() / "config"/ "archive_config.json"
+    config_file = _migrate_path(
+        script_dir() / "config" / "musicarchive_config.json",
+        script_dir() / "config" / "archive_config.json",
+    )
     data = migrate_config(config_file, {"eminem_root": "."})
     if data.get("eminem_root"):
         return Path(data["eminem_root"])
     raise FileNotFoundError(
         "EMINEM_ROOT is not configured. Set the EMINEM_ROOT environment variable "
-        "or edit config/archive_config.json and set 'eminem_root' to your Eminem music folder."
+        "or edit config/musicarchive_config.json and set 'eminem_root' to your Eminem music folder."
     )
 
 try:
@@ -45,7 +56,10 @@ except FileNotFoundError as _e:
 
 FORMATS = ["FLAC", "MP3"]
 CACHE_CHANNEL_NAME = "songcache"
-DB_PATH = str(script_dir() / "db" / "archive.db")
+DB_PATH = str(_migrate_path(
+    script_dir() / "db" / "musicarchive.db",
+    script_dir() / "db" / "archive.db",
+))
 script_dir().joinpath("db").mkdir(parents=True, exist_ok=True)
 VERSION_KEYWORDS = ['live', 'remix', 'demo', 'acoustic', 'version', 'edit', 'radio']
 SPECIAL_FOLDERS = {
@@ -395,7 +409,7 @@ async def _deliver_song(bot, interaction: discord.Interaction, candidate: dict) 
 
 def _is_fed(interaction: discord.Interaction) -> bool:
     try:
-        from moderation import is_flagged as _check
+        from modsuspicion import is_flagged as _check
         if interaction.guild:
             return _check(str(interaction.guild.id), str(interaction.user.id))
     except Exception:
@@ -792,7 +806,7 @@ def setup(bot):
 
     @bot.tree.command(name="rebuild_index", description="[Owner only] Rebuild the song index cache")
     async def rebuild_index(interaction: discord.Interaction):
-        from moderation import is_owner
+        from modcore import is_owner
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return

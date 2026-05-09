@@ -1356,7 +1356,7 @@ def setup(bot):
         announcements_channel: Optional[discord.TextChannel] = None,
         spotlight_exclude_user: Optional[str] = None,
     ):
-        from moderation import is_owner
+        from modcore import is_owner
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return
@@ -1474,7 +1474,7 @@ def setup(bot):
 
     @bot.tree.command(name="spotlight_preview", description="[Owner only] Preview this week's Spotlight Friday winner")
     async def spotlight_preview(interaction: discord.Interaction):
-        from moderation import is_owner
+        from modcore import is_owner
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return
@@ -1499,7 +1499,7 @@ def setup(bot):
 
     @bot.tree.command(name="spotlight_run", description="[Owner only] Force-run Spotlight Friday now")
     async def spotlight_run(interaction: discord.Interaction):
-        from moderation import is_owner
+        from modcore import is_owner
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return

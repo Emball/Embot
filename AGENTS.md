@@ -58,11 +58,16 @@ Each module exposes `setup(bot)` — called during boot. Private `_*.py` files a
 
 | Module | Description |
 |---|---|
-| `archive.py` | Eminem music archive — scans FLAC/MP3, SQLite index, CDN cache channel |
+| `musicarchive.py` | Eminem music archive — scans FLAC/MP3, SQLite index, CDN cache channel |
 | `community.py` | Submission tracking (#projects/#artwork), voting, Spotlight Friday, SQLite-backed |
-| `moderation.py` | Full mod suite: ban, kick, mute, warn, purge, lock, fedcheck, rules (23+ commands) |
+| `modcore.py` | Moderation core: DB, config, auth helpers, ModContext, ModerationSystem, setup() |
+| `modactions.py` | Mod action functions: ban, kick, mute, warn, purge, lock, slowmode, etc. |
+| `modappeals.py` | Ban appeal views, modal, voting, appeal lifecycle |
+| `modoversight.py` | Action review, bot-log monitoring, daily integrity reports, embed tracking |
+| `modrules.py` | RulesManager — sync/display server rules |
+| `modsuspicion.py` | Suspicion engine: /fedcheck, /fedflag, /fedclear, /fedscan, /fedinvites |
 | `logger.py` | Event logging — 17 Discord event types to join-logs/bot-logs channels |
-| `player.py` | Voice music playback — queue, FFmpeg, YouTube/SoundCloud, vote-skip |
+| `musicplayer.py` | Voice music playback — queue, FFmpeg, YouTube/SoundCloud, vote-skip |
 | `vms.py` | Voice Message System — OGG transcription via Whisper, SQLite, archiving |
 | `dev.py` | Dev mode only (`-dev`): auto-versioning, auto-commit/push, dev console commands |
 | `starboard.py` | Dyno-style starboard — config-driven, no slash commands |
@@ -75,10 +80,12 @@ Each module exposes `setup(bot)` — called during boot. Private `_*.py` files a
 
 ### Cross-Module Dependencies
 
-- `moderation.py` is the central dependency hub — its `is_owner()`, `is_flagged()` are imported by archive, community, links, logger at call time (lazy imports inside handlers).
+- `modcore.py` provides `is_owner()` used by musicarchive, community, links, logger (lazy imports inside handlers).
+- `modsuspicion.py` provides `is_flagged()` used by musicarchive (lazy import inside handler).
+- `modcore.setup()` is the central hub — creates `ModerationSystem`, imports and wires all other mod modules, registers commands and listeners.
 - Modules attach themselves to `bot` via attributes (e.g. `bot.ARCHIVE_manager`, `bot._mod_system`, `bot._community_system`).
 - `bot.logger` (ConsoleLogger) is available to all modules — set by `Embot.py`.
-- `_utils.py` provides `atomic_json_write()` shared by links, logger, youtube; `migrate_config()` used by moderation, youtube, dev, starboard, logger, archive; `script_dir()` used by every module; `_now()` used by moderation, logger, starboard, vms, archive, dev, community.
+- `_utils.py` provides `atomic_json_write()` shared by links, logger, youtube; `migrate_config()` used by moderation, youtube, dev, starboard, logger, musicarchive; `script_dir()` used by every module; `_now()` used by moderation, logger, starboard, vms, musicarchive, dev, community.
 
 ### Startup Flow
 

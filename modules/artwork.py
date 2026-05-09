@@ -2,6 +2,7 @@ import discord
 import aiohttp
 import difflib
 import re
+import json
 from discord import app_commands
 
 MODULE_NAME = "ARTWORK"
@@ -9,27 +10,32 @@ MODULE_NAME = "ARTWORK"
 ITUNES_SEARCH = "https://itunes.apple.com/search"
 ART_SIZE = 3600
 
+_STRIP = re.compile(r"[^\w\s]")
+_WS    = re.compile(r"\s+")
+_STOP  = {"the", "a", "an", "of", "in", "and", "feat", "ft", "with", "by"}
+
 
 def normalize(text: str) -> str:
-    t = re.sub(r'[^\\w\\s]', '', text)
-    t = re.sub(r'\\s+', '', t).strip()
-    return t.casefold()
+    t = _STRIP.sub("", text)
+    return _WS.sub(" ", t).strip().casefold()
+
+
+def tokenize(text: str) -> set[str]:
+    return {w for w in normalize(text).split() if w not in _STOP}
 
 
 def art_url(raw: str, size: int = ART_SIZE) -> str:
-    return re.sub(r'\d+x\d+bb', f'{size}x{size}bb', raw)
+    return re.sub(r"\d+x\d+bb", f"{size}x{size}bb", raw)
 
 
-async def search_itunes(query: str, limit: int = 10) -> list[dict]:
+async def search_itunes(query: str, limit: int = 25) -> list[dict]:
     params = {"term": query, "entity": "album", "limit": limit}
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0"}
     async with aiohttp.ClientSession(headers=headers) as session:
         async with session.get(ITUNES_SEARCH, params=params) as resp:
             if resp.status != 200:
                 return []
-            text = await resp.text()
-            import json
-            data = json.loads(text)
+            data = json.loads(await resp.text())
             return data.get("results", [])
 
 
@@ -37,23 +43,25 @@ def best_match(query: str, results: list[dict]) -> dict | None:
     if not results:
         return None
 
-    q = normalize(query)
+    q_tokens = tokenize(query)
+    q_norm   = normalize(query)
 
-    # Build candidate strings: "artistname albumname"
-    keys = [normalize(f"{r.get('artistName','')} {r.get('collectionName','')}") for r in results]
+    scored = []
+    for r in results:
+        candidate = f"{r.get('artistName', '')} {r.get('collectionName', '')}"
+        c_tokens  = tokenize(candidate)
+        c_norm    = normalize(candidate)
 
-    matches = difflib.get_close_matches(q, keys, n=1, cutoff=0.3)
-    if matches:
-        return results[keys.index(matches[0])]
+        overlap = len(q_tokens & c_tokens)
+        ratio   = difflib.SequenceMatcher(None, q_norm, c_norm).ratio()
+        score   = overlap * 2 + ratio
+        scored.append((score, r))
 
-    # Fallback: score by word overlap
-    q_words = set(q.split()) if ' ' in q else set(q)
-    best, best_score = None, -1
-    for i, k in enumerate(keys):
-        k_words = set(k.split()) if ' ' in k else set(k)
-        score = len(q_words & k_words)
-        if score > best_score:
-            best_score, best = score, results[i]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best_score, best = scored[0]
+
+    if best_score < 0.5:
+        return None
     return best
 
 
@@ -83,8 +91,8 @@ def setup(bot):
 
         url = art_url(raw_art)
         artist = result.get("artistName", "Unknown Artist")
-        album = result.get("collectionName", "Unknown Album")
-        year = result.get("releaseDate", "")[:4]
+        album  = result.get("collectionName", "Unknown Album")
+        year   = result.get("releaseDate", "")[:4]
 
         async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
             async with session.get(url) as resp:

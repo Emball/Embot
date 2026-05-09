@@ -68,13 +68,14 @@ All run from the project root:
 
 ### Post-Commit Testing Checklist
 
-After pushing changes and Linux pulls/restarts:
+After pushing changes:
 
-1. `uv run temp/remote_client.py status` — verify version matches, no crash
-2. `uv run temp/remote_client.py logs --lines 300` — scan for ERROR lines
-3. If error found: `uv run temp/remote_client.py logs --lines 1000` and grep for traceback
-4. If data issue suspected: `uv run temp/remote_client.py db-query <name> "<relevant query>"`
-5. Fix, repeat from step 1
+1. `uv run temp/remote_client.py update` — trigger immediate pull + restart
+2. `uv run temp/remote_client.py status` — verify version matches, no crash
+3. `uv run temp/remote_client.py logs --lines 300` — scan for ERROR lines
+4. If error found: `uv run temp/remote_client.py logs --lines 1000` and grep for traceback
+5. If data issue suspected: `uv run temp/remote_client.py db-query <name> "<relevant query>"`
+6. Fix, repeat from step 1
 
 **The remote test against Linux is mandatory before considering any change complete.** Local syntax checks alone are insufficient — the real server environment is the only true validator.
 

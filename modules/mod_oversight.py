@@ -560,3 +560,7 @@ async def generate_daily_report(ms):
         ms.bot.logger.log(MODULE_NAME, "Daily integrity report sent to owner")
     except Exception as e:
         ms.bot.logger.error(MODULE_NAME, "Failed to generate daily report", e)
+
+
+def setup(bot):
+    bot.logger.log(MODULE_NAME, "Mod oversight loaded")

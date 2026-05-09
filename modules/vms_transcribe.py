@@ -439,3 +439,7 @@ class BulkProcessor:
         except Exception as exc:
             self.logger.log(MODULE_NAME,
                 f"BulkProcessor: broken-batch commit error - {exc}", "ERROR")
+
+
+def setup(bot):
+    bot.logger.log(MODULE_NAME, "VMS transcribe loaded")

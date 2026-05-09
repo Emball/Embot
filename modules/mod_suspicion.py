@@ -395,3 +395,7 @@ def _setup_suspicion(bot: commands.Bot, _mod, _cfg: "ModConfig"):
         pass
 
     bot.logger.log(MODULE_NAME, "Suspicion engine loaded - commands: /fedcheck /fedflag /fedclear /fedscan /fedinvites")
+
+
+def setup(bot):
+    bot.logger.log(MODULE_NAME, "Mod suspicion loaded")

@@ -433,3 +433,7 @@ def purge_bot_vms(manager):
     manager.bot.logger.log(MODULE_NAME,
         f"Bot-VM purge complete: {len(vm_ids)} row(s) removed, "
         f"{purged_files} file(s) deleted")
+
+
+def setup(bot):
+    bot.logger.log(MODULE_NAME, "VMS storage loaded")

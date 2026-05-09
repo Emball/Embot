@@ -256,4 +256,8 @@ def recent_messages(manager, guild_id: str, channel_id: str, limit: int = 20) ->
             return [m.get('content', '') for m in msgs[-limit:] if m.get('content')]
     except Exception:
         pass
+
+
+def setup(bot):
+    bot.logger.log(MODULE_NAME, "VMS playback loaded")
     return []

@@ -602,3 +602,7 @@ async def _do_unlock(ctx: ModContext, ms, channel: Optional[discord.TextChannel]
     except Exception as e:
         await ctx.error("An error occurred while trying to unlock the channel.")
         ctx.bot.logger.error(MODULE_NAME, "Unlock failed", e)
+
+
+def setup(bot):
+    bot.logger.log(MODULE_NAME, "Mod actions loaded")

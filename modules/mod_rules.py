@@ -152,3 +152,7 @@ class RulesManager:
                             await self.sync(guild, force=True)
             except Exception as e:
                 self.bot.logger.log("RULES", f"Watcher error: {e}", "WARNING")
+
+
+def setup(bot):
+    bot.logger.log("MOD_RULES", "Mod rules loaded")

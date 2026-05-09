@@ -336,3 +336,7 @@ async def resolve_expired_appeals_task(ms):
                 await appeal_deny(ms, appeal_id)
     except Exception as e:
         ms.bot.logger.error(MODULE_NAME, "Error in appeal resolution task", e)
+
+
+def setup(bot):
+    bot.logger.log(MODULE_NAME, "Mod appeals loaded")

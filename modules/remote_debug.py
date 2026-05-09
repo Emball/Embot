@@ -13,6 +13,7 @@ import urllib.error
 import ssl
 from pathlib import Path
 from datetime import datetime
+import time
 from aiohttp import web
 
 from _utils import script_dir, migrate_config, atomic_json_write
@@ -82,11 +83,14 @@ class RemoteDebugServer:
         self._config = _load_config()
         self._app = web.Application()
         self._runner = None
+        self._start_time: float = 0.0
         self._setup_routes()
 
     def _setup_routes(self):
         self._app.router.add_get("/ping", self._handle_ping)
         self._app.router.add_get("/status", self._handle_status)
+        self._app.router.add_get("/guilds", self._handle_guilds)
+        self._app.router.add_get("/modules", self._handle_modules)
         self._app.router.add_get("/logs", self._handle_logs)
         self._app.router.add_get("/logs/stream", self._handle_logs_stream)
         self._app.router.add_get("/db/{name}", self._handle_db_download)
@@ -132,13 +136,46 @@ class RemoteDebugServer:
     async def _handle_status(self, request):
         if not self._check_auth(request) or not self._check_ip(request):
             return self._fail()
+        uptime = int(time.time() - self._start_time) if self._start_time else 0
+        guilds = list(self.bot.guilds)
         return web.json_response({
             "version": getattr(self.bot, "version", "unknown"),
             "latency": round(getattr(self.bot, "latency", 0) * 1000, 1),
-            "guilds": len(self.bot.guilds),
+            "guilds": len(guilds),
+            "guilds_detail": [
+                {"id": g.id, "name": g.name, "members": g.member_count}
+                for g in guilds[:20]
+            ],
+            "uptime_seconds": uptime,
             "user": str(self.bot.user) if self.bot.user else None,
             "log_file": str(self.bot.logger.log_file.name) if getattr(self.bot.logger, "log_file", None) else None,
         })
+
+    async def _handle_guilds(self, request):
+        if not self._check_auth(request) or not self._check_ip(request):
+            return self._fail()
+        return web.json_response([
+            {"id": g.id, "name": g.name, "members": g.member_count,
+             "owner_id": g.owner_id, "channels": len(g.channels),
+             "roles": len(g.roles), "created": str(g.created_at)}
+            for g in self.bot.guilds
+        ])
+
+    async def _handle_modules(self, request):
+        if not self._check_auth(request) or not self._check_ip(request):
+            return self._fail()
+        if not hasattr(self.bot.logger, "log_file") or not self.bot.logger.log_file.exists():
+            return web.json_response({"error": "no log file"}, status=404)
+        try:
+            modules = []
+            with open(self.bot.logger.log_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    m = re.search(r"Loaded module: (\S+)", line)
+                    if m:
+                        modules.append(m.group(1))
+            return web.json_response(modules)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
 
     async def _handle_logs(self, request):
         if not self._check_auth(request) or not self._check_ip(request):
@@ -285,7 +322,8 @@ class RemoteDebugServer:
         _os.execv(_sys.executable, [_sys.executable] + _sys.argv)
 
     async def start(self):
-        if not self._config.get("enabled", True):
+        self._start_time = time.time()
+        if not self._config.get("enabled", False):
             self.bot.logger.log(MODULE_NAME, "Disabled by config")
             return
         host = self._config.get("host", "0.0.0.0")
@@ -369,6 +407,14 @@ def _cmd_status(cfg):
     print(json.dumps(_client_request(cfg, "/status"), indent=2))
 
 
+def _cmd_guilds(cfg):
+    print(json.dumps(_client_request(cfg, "/guilds"), indent=2))
+
+
+def _cmd_modules(cfg):
+    print(json.dumps(_client_request(cfg, "/modules"), indent=2))
+
+
 def _cmd_logs(cfg, lines=200):
     data = _client_request(cfg, f"/logs?lines={lines}", raw=True)
     sys.stdout.buffer.write(data + b"\n")
@@ -434,6 +480,9 @@ def main():
     logs_parser = sub.add_parser("logs", help="Fetch recent logs")
     logs_parser.add_argument("--lines", type=int, default=200)
 
+    sub.add_parser("guilds", help="List guilds with details")
+    sub.add_parser("modules", help="List loaded module names")
+
     sub.add_parser("stream", help="Live log stream (Ctrl+C to stop)")
 
     db_dl = sub.add_parser("db-download", help="Download a database file")
@@ -456,6 +505,10 @@ def main():
         _cmd_ping(run_cfg)
     elif args.command == "status":
         _cmd_status(run_cfg)
+    elif args.command == "guilds":
+        _cmd_guilds(run_cfg)
+    elif args.command == "modules":
+        _cmd_modules(run_cfg)
     elif args.command == "logs":
         _cmd_logs(run_cfg, args.lines)
     elif args.command == "stream":

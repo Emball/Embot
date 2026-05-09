@@ -12,7 +12,7 @@ Name: Michael (Emball/Embis). Vibe-coder with beginner Python knowledge. Dual-bo
 
 ## Remote Debugging & Testing Workflow
 
-**CRITICAL: NEVER load the bot on Windows for testing.** The live bot runs on the Linux laptop 24/7. Running a duplicate instance on Windows would register two bots at once and corrupt the workflow. All testing MUST go through the remote debug API.
+NEVER load Embot.py on Windows for testing. The live bot runs on the Linux laptop 24/7. Running a duplicate instance on Windows would register two bots at once and cause issues for the deployed Linux server. Running final tests on the Linux server ensures it utilizes the real world data and it doesn't fail on scenarios 
 
 ### Architecture
 
@@ -59,7 +59,9 @@ All run from the project root:
 | Command | Purpose |
 |---|---|
 | `uv run python modules/remote_debug.py ping` | Test connectivity |
-| `uv run python modules/remote_debug.py status` | Bot vitals (version, latency, uptime log file) |
+| `uv run python modules/remote_debug.py status` | Bot vitals (version, latency, uptime, guilds, log file) |
+| `uv run python modules/remote_debug.py guilds` | List all guilds with id, name, members, channels, roles |
+| `uv run python modules/remote_debug.py modules` | List loaded module names |
 | `uv run python modules/remote_debug.py logs` | Fetch last 200 lines of console log |
 | `uv run python modules/remote_debug.py logs --lines 1000` | Fetch last N lines |
 | `uv run python modules/remote_debug.py stream` | Live tail the console log (Ctrl+C to stop) |

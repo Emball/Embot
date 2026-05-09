@@ -279,7 +279,7 @@ class RemoteDebugServer:
             all_lines = f.readlines()
         return web.Response(
             text="".join(all_lines[-lines:]),
-            content_type="text/plain; charset=utf-8",
+            content_type="text/plain",
         )
 
     async def _handle_logs(self, request):
@@ -333,7 +333,7 @@ class RemoteDebugServer:
             out = all_lines[-lines:]
         return web.Response(
             text="".join(out),
-            content_type="text/plain; charset=utf-8",
+            content_type="text/plain",
         )
 
     async def _handle_logs_stream(self, request):

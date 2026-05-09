@@ -34,8 +34,9 @@ All run from the project root:
 | `uv run python modules/remote_debug.py db-download <name>` | Download a .db file to temp/ |
 | `uv run python modules/remote_debug.py db-query <name> "<SQL>"` | Run a SELECT/PRAGMA query |
 | `uv run python modules/remote_debug.py config <name>` | View a config file (auth blocked) |
-| `uv run python modules/remote_debug.py update` | Git pull + restart (auto-waits for server to come back) |
-| `uv run python modules/remote_debug.py restart` | Restart the bot remotely (auto-waits for server to come back) |
+| `uv run python modules/remote_debug.py exec <cmd>` | Run a shell command on the server (auth + IP locked) |
+| `uv run python modules/remote_debug.py update` | Git pull + restart (auto-tails startup logs) |
+| `uv run python modules/remote_debug.py restart` | Restart the bot remotely (auto-tails startup logs) |
 
 ## Code Style
 
@@ -93,7 +94,7 @@ Each module exposes `setup(bot)` — called during boot. Private `_*.py` files a
 
 | Module | Description |
 |---|---|
-| `music_archive.py` | Eminem music archive — scans FLAC/MP3, SQLite index, CDN cache channel |
+| `music_archive.py` | Eminem music archive — scans FLAC/MP3, SQLite index, CDN cache channel, batch backfill with live status embed, lazy CDN URL refresh via HEAD check, SMB-compatible with executor timeouts |
 | `community.py` | Submission tracking (#projects/#artwork), voting, Spotlight Friday, SQLite-backed |
 | `mod_core.py` | Moderation core: DB, config, auth helpers, ModContext, ModerationSystem, setup() |
 | `mod_actions.py` | Mod action functions: ban, kick, mute, warn, purge, lock, slowmode, etc. |
@@ -104,6 +105,7 @@ Each module exposes `setup(bot)` — called during boot. Private `_*.py` files a
 | `mod_logger.py` | Event logging — 17 Discord event types to join-logs/bot-logs channels |
 | `music_player.py` | Voice music playback — queue, FFmpeg, YouTube/SoundCloud, vote-skip |
 | `vms_core.py` | VMS core: shared defs, VMSManager, setup() with commands/listeners, stats embed, external queue |
+| `remote_debug.py` | HTTP API server — log streaming, DB access, config viewing, shell exec (auth+IP locked) for remote debugging |
 | `vms_transcribe.py` | OGG transcription via Whisper, waveform gen, bulk processing |
 | `vms_storage.py` | VM scan/conform, archival, backfill, purge |
 | `vms_playback.py` | VM selection (contextual/random), Discord CDN upload, counters, ping cooldown |
@@ -113,7 +115,6 @@ Each module exposes `setup(bot)` — called during boot. Private `_*.py` files a
 | `artwork.py` | Apple Music album artwork fetcher |
 | `magic_emball.py` | Magic 8-ball with Eminem flavor |
 | `youtube.py` | YouTube audio extraction + upload notification monitor |
-| `remote_debug.py` | HTTP API server — log streaming, DB access, config viewing for remote debugging |
 | `_utils.py` | Shared utilities: `atomic_json_write()`, `migrate_config()`, `script_dir()`, `_now()` — imported by multiple modules |
 
 ### Cross-Module Dependencies
@@ -132,4 +133,4 @@ Each module exposes `setup(bot)` — called during boot. Private `_*.py` files a
 3. Init `discord.ext.commands.Bot` with `!` and `?` prefixes
 4. Create ConsoleLogger (session-scoped log in `logs/`)
 5. `on_ready`: load `_version.py`, start console + heartbeat + auto-update loop, call `load_modules()`, sync slash commands
-6. Auto-update: pre-flight `git fetch`, merge remote if newer, restart on exit code 42
+6. Auto-update: `git fetch`, compare version, fast-forward merge, restart on exit code 42 (logs only on update or error)

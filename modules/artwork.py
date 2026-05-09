@@ -1,6 +1,6 @@
+import asyncio
 import discord
 import aiohttp
-import difflib
 import re
 import json
 from discord import app_commands
@@ -10,48 +10,43 @@ MODULE_NAME = "ARTWORK"
 ITUNES_SEARCH = "https://itunes.apple.com/search"
 ART_SIZE = 3600
 
-_STRIP = re.compile(r"[^\w\s]")
-_WS    = re.compile(r"\s+")
-
-
-def normalize(text: str) -> str:
-    t = _STRIP.sub("", text)
-    return _WS.sub(" ", t).strip().casefold()
-
 
 def art_url(raw: str, size: int = ART_SIZE) -> str:
     return re.sub(r"\d+x\d+bb", f"{size}x{size}bb", raw)
 
 
-async def search_itunes(query: str, limit: int = 25) -> list[dict]:
+async def _itunes(session: aiohttp.ClientSession, term: str, attribute: str, limit: int) -> list[dict]:
+    params = {"term": term, "entity": "album", "attribute": attribute, "limit": limit}
+    async with session.get(ITUNES_SEARCH, params=params) as resp:
+        if resp.status != 200:
+            return []
+        return json.loads(await resp.text()).get("results", [])
+
+
+async def search_itunes(artist: str, album: str) -> dict | None:
     headers = {"User-Agent": "Mozilla/5.0"}
-    params = {"term": query, "entity": "album", "limit": limit}
     async with aiohttp.ClientSession(headers=headers) as session:
-        async with session.get(ITUNES_SEARCH, params=params) as resp:
-            if resp.status != 200:
-                return []
-            return json.loads(await resp.text()).get("results", [])
-
-
-def best_match(artist: str, album: str, results: list[dict]) -> dict | None:
-    if not results:
-        return None
-
-    a_norm = normalize(artist)
-    b_norm = normalize(album)
-
-    def score(r: dict) -> tuple[float, float]:
-        artist_ratio = difflib.SequenceMatcher(None, a_norm, normalize(r.get("artistName", ""))).ratio()
-        album_ratio  = difflib.SequenceMatcher(None, b_norm, normalize(r.get("collectionName", ""))).ratio() if b_norm else 1.0
-        return (artist_ratio, album_ratio)
-
-    results.sort(key=score, reverse=True)
-    best = results[0]
-
-    artist_ratio, _ = score(best)
-    if artist_ratio < 0.3:
-        return None
-    return best
+        if album:
+            artist_results, album_results = await asyncio.gather(
+                _itunes(session, artist, "artistTerm", 50),
+                _itunes(session, album,  "albumTerm",  50),
+            )
+            # Intersect: albums that appear in both artist and album searches
+            artist_ids = {r["collectionId"] for r in artist_results}
+            intersect  = [r for r in album_results if r["collectionId"] in artist_ids]
+            if intersect:
+                return intersect[0]
+            # Fallback: artist results, sorted by how many album words appear in collection name
+            if artist_results:
+                al = album.casefold()
+                artist_results.sort(
+                    key=lambda r: -sum(w in r.get("collectionName", "").casefold() for w in al.split())
+                )
+                return artist_results[0]
+            return None
+        else:
+            results = await _itunes(session, artist, "artistTerm", 10)
+            return results[0] if results else None
 
 
 def setup(bot):
@@ -59,19 +54,18 @@ def setup(bot):
     @bot.tree.command(name="artwork", description="Fetch high-resolution album artwork from Apple Music")
     @app_commands.describe(
         artist="Artist name",
-        album="Album name (optional — returns top album if omitted)",
+        album="Album name (optional)",
     )
     async def artwork_cmd(interaction: discord.Interaction, artist: str, album: str = ""):
         await interaction.response.defer(thinking=True)
 
         try:
-            results = await search_itunes(f"{artist} {album}".strip())
+            result = await search_itunes(artist, album)
         except Exception as e:
             bot.logger.error(MODULE_NAME, "iTunes search failed", e)
             await interaction.followup.send("Failed to reach Apple Music. Try again later.")
             return
 
-        result = best_match(artist, album, results)
         if not result:
             label = f"{artist} — {album}" if album else artist
             await interaction.followup.send(f"No results found for **{label}**.")

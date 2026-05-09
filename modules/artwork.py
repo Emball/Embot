@@ -7,7 +7,7 @@ from discord import app_commands
 MODULE_NAME = "ARTWORK"
 
 ITUNES_SEARCH = "https://itunes.apple.com/search"
-ART_SIZE = 100000
+ART_SIZE = 3600
 
 
 def normalize(text: str) -> str:
@@ -86,11 +86,20 @@ def setup(bot):
         album = result.get("collectionName", "Unknown Album")
         year = result.get("releaseDate", "")[:4]
 
-        embed = discord.Embed(title=album, description=f"{artist} • {year}", color=0x000000)
-        embed.set_image(url=url)
-        embed.set_footer(text="Apple Music • max resolution")
+        async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    await interaction.followup.send(f"Found **{album}** by **{artist}** but couldn't download the artwork.")
+                    return
+                data = await resp.read()
 
-        await interaction.followup.send(embed=embed)
+        import io
+        ext = url.split(".")[-1].split("?")[0] or "jpg"
+        filename = f"{artist} - {album}.{ext}".replace("/", "-")
+        await interaction.followup.send(
+            f"**{artist}** — **{album}** ({year})",
+            file=discord.File(io.BytesIO(data), filename=filename)
+        )
         bot.logger.log(MODULE_NAME, f"{interaction.user} fetched artwork: {artist} — {album}")
 
     bot.logger.log(MODULE_NAME, "Artwork module loaded")

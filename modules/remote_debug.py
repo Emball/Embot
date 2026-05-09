@@ -621,12 +621,42 @@ def _cmd_config(cfg, name):
     print(json.dumps(_client_request(cfg, f"/config/{name}"), indent=2))
 
 
+def _wait_for_server(cfg, timeout=30):
+    url = cfg["url"].rstrip("/") + "/ping"
+    deadline = time.time() + timeout
+    last_msg = 0
+    while time.time() < deadline:
+        try:
+            req = urllib.request.Request(url)
+            if cfg["token"]:
+                req.add_header("X-Debug-Token", cfg["token"])
+            ctx = ssl._create_unverified_context()
+            with urllib.request.urlopen(req, timeout=3, context=ctx) as resp:
+                if resp.status == 200:
+                    print("Server is back online.")
+                    return True
+        except Exception:
+            pass
+        now = time.time()
+        if now - last_msg >= 5:
+            elapsed = int(now - (deadline - timeout))
+            print(f"  Waiting {elapsed}s...")
+            last_msg = now
+        time.sleep(2)
+    print("Timed out waiting for server.")
+    return False
+
+
 def _cmd_update(cfg):
-    print(json.dumps(_client_request(cfg, "/update", method="POST"), indent=2))
+    result = _client_request(cfg, "/update", method="POST")
+    print(json.dumps(result, indent=2))
+    if result.get("restarting"):
+        _wait_for_server(cfg)
 
 
 def _cmd_restart(cfg):
     print(json.dumps(_client_request(cfg, "/restart", method="POST"), indent=2))
+    _wait_for_server(cfg)
 
 
 def main():

@@ -479,6 +479,7 @@ class CommunityDB:
         q = """
             SELECT s.group_id, s.id AS submission_id, s.user_id, s.title,
                    s.content, s.channel_id, s.message_id, s.thread_id, s.version,
+                   s.links,
                    COALESCE(SUM(v.xp_delta), 0) AS total_xp
             FROM submissions s
             LEFT JOIN votes v ON v.group_id = s.group_id AND v.created_at >= ?
@@ -492,6 +493,17 @@ class CommunityDB:
         with self._conn() as c:
             row = c.execute(q, params).fetchone()
             return row if (row and row["total_xp"] > 0) else None
+
+    def get_vote_counts(self, group_id: str, since: str) -> dict:
+        counts: dict[str, int] = {"🔥": 0, "😐": 0, "🗑️": 0}
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT emoji, COUNT(*) AS cnt FROM votes WHERE group_id=? AND created_at>=? GROUP BY emoji",
+                (group_id, since)
+            ).fetchall()
+        for row in rows:
+            counts[row["emoji"]] = row["cnt"]
+        return counts
 
     def register_hash(self, h: str, sub_id: str, user_id: int):
         with self._conn() as c:
@@ -1280,20 +1292,54 @@ class CommunitySystem:
         member = guild.get_member(top["user_id"])
         name   = member.display_name if member else f"User {top['user_id']}"
 
+        # Vote counts for the week
+        since = (_now() - timedelta(days=7)).isoformat()
+        votes = self.db.get_vote_counts(top["group_id"], since)
+
         embed = discord.Embed(
             title="Spotlight Friday",
             description=(
-                f"This week's featured submission is **{top['title'] or 'Untitled'}** "
-                f"by {member.mention if member else name}!\n\n"
+                f"**{top['title'] or 'Untitled'}**\n\n"
                 f"{top['content'][:400]}{'...' if len(top['content']) > 400 else ''}"
             ),
             color=0xf1c40f,
             timestamp=_now()
         )
-        embed.add_field(name="Version",    value=top["version"],                  inline=True)
-        embed.add_field(name="XP Score",   value=f"{int(top['total_xp'])} XP",    inline=True)
 
+        embed.add_field(
+            name="Votes",
+            value=f"🔥 {votes['🔥']}  │  😐 {votes['😐']}  │  🗑️ {votes['🗑️']}",
+            inline=False
+        )
+
+        # Try to find an image attachment from the original message
+        image_url = None
         if top["message_id"]:
+            ch = guild.get_channel(top["channel_id"])
+            if ch:
+                try:
+                    msg = await ch.fetch_message(top["message_id"])
+                    for att in msg.attachments:
+                        if att.content_type and att.content_type.startswith("image/"):
+                            image_url = att.url
+                            break
+                except Exception:
+                    pass
+
+        if image_url:
+            embed.set_image(url=image_url)
+        elif member:
+            embed.set_thumbnail(url=member.display_avatar.url)
+
+        # Link field: download link if found, else jump to submission
+        links = json.loads(top["links"]) if top.get("links") else []
+        if links:
+            embed.add_field(
+                name="Download",
+                value=f"[Download Link]({links[0]})",
+                inline=False
+            )
+        elif top["message_id"]:
             ch = guild.get_channel(top["channel_id"])
             if ch:
                 embed.add_field(
@@ -1302,8 +1348,6 @@ class CommunitySystem:
                     inline=False
                 )
 
-        if member:
-            embed.set_thumbnail(url=member.display_avatar.url)
         embed.set_footer(text="Embot Spotlight Friday")
 
         await announcements.send(embed=embed)

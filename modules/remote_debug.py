@@ -351,7 +351,7 @@ class RemoteDebugServer:
 
         last_size = log_path.stat().st_size if log_path.exists() else 0
         try:
-            while not request.transport.is_closing():
+            while request.transport is not None and not request.transport.is_closing():
                 if log_path.exists():
                     current_size = log_path.stat().st_size
                     if current_size > last_size:

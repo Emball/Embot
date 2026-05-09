@@ -19,7 +19,11 @@ def _load_starboard_config() -> dict:
         "ignore_before": "",
     }
     from _utils import migrate_config
-    return migrate_config(script_dir() / "config" / "starboard_config.json", defaults)
+    _new = script_dir() / "config" / "starboard.json"
+    _old = script_dir() / "config" / "starboard_config.json"
+    if _old.exists() and not _new.exists():
+        _old.rename(_new)
+    return migrate_config(_new, defaults)
 
 CONFIG: dict = {}
 

@@ -14,7 +14,10 @@ class LinkManager:
 
     def __init__(self, bot):
         self.bot = bot
-        self.config_file = str(script_dir() / "config"/ "links_config.json")
+        _old = script_dir() / "config" / "links_config.json"
+        self.config_file = str(script_dir() / "config"/ "links.json")
+        if _old.exists() and not Path(self.config_file).exists():
+            _old.rename(self.config_file)
         self.links = self.load_links()
         self.prefix = "?"
 

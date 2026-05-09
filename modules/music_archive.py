@@ -35,16 +35,15 @@ def _load_eminem_root() -> Path:
     if env_val:
         return Path(env_val)
     from _utils import migrate_config
-    config_file = _migrate_path(
-        script_dir() / "config" / "musicarchive_config.json",
-        script_dir() / "config" / "archive_config.json",
-    )
-    data = migrate_config(config_file, {"eminem_root": "."})
+    config_dir = script_dir() / "config"
+    _migrate_path(config_dir / "music_archive.json", config_dir / "musicarchive_config.json")
+    _migrate_path(config_dir / "music_archive.json", config_dir / "archive_config.json")
+    data = migrate_config(config_dir / "music_archive.json", {"eminem_root": "."})
     if data.get("eminem_root"):
         return Path(data["eminem_root"])
     raise FileNotFoundError(
         "EMINEM_ROOT is not configured. Set the EMINEM_ROOT environment variable "
-        "or edit config/musicarchive_config.json and set 'eminem_root' to your Eminem music folder."
+        "or edit config/music_archive.json and set 'eminem_root' to your Eminem music folder."
     )
 
 try:

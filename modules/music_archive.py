@@ -788,8 +788,9 @@ def setup(bot):
             ARCHIVE_manager.song_index_ready.clear()
             ARCHIVE_manager.song_index = await build_song_index(bot)
             ARCHIVE_manager.song_index_ready.set()
-            await interaction.followup.send("Song index rebuilt successfully!", ephemeral=True)
-            bot.logger.log(MODULE_NAME, "Index rebuilt successfully")
+            await interaction.followup.send("Song index rebuilt successfully! Starting cache backfill...", ephemeral=True)
+            asyncio.create_task(ARCHIVE_manager.backfill_cache())
+            bot.logger.log(MODULE_NAME, "Index rebuilt successfully, backfill started")
         except Exception as e:
             bot.logger.error(MODULE_NAME, "Index rebuild failed", e)
             await interaction.followup.send("Failed to rebuild index.", ephemeral=True)

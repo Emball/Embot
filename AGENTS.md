@@ -34,8 +34,8 @@ All run from the project root:
 | `uv run python modules/remote_debug.py db-download <name>` | Download a .db file to temp/ |
 | `uv run python modules/remote_debug.py db-query <name> "<SQL>"` | Run a SELECT/PRAGMA query |
 | `uv run python modules/remote_debug.py config <name>` | View a config file (auth blocked) |
-| `uv run python modules/remote_debug.py update` | Git pull + restart if new commits |
-| `uv run python modules/remote_debug.py restart` | Restart the bot remotely |
+| `uv run python modules/remote_debug.py update` | Git pull + restart (auto-waits for server to come back) |
+| `uv run python modules/remote_debug.py restart` | Restart the bot remotely (auto-waits for server to come back) |
 
 ## Code Style
 

@@ -2632,6 +2632,7 @@ def setup(bot):
         bot.add_view(ActionReviewView(mod_system, action['id'], action))
 
     # Convenience shorthand used throughout
+    global _mod, _cfg
     _mod = mod_system
     _cfg = mod_system.cfg
 

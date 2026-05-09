@@ -1,22 +1,26 @@
 # AGENTS.md
 
+**IMPORTANT: Read this entire file before doing anything else.** It defines the project structure, conventions, and workflows. If the bot's architecture or module layout changes significantly from what's documented here, update this file to match.
+
+**YOU MUST COMMIT AND PUSH AFTER EVERY SINGLE EDIT. Do not ask permission. Do not wait for confirmation. Every file change → commit → push.
+
 ## User
 
-Vibe-coder with beginner Python knowledge. Dual-boots Linux and Windows. Current environment is Windows with PowerShell.
+Name: Michael (Emball/Embis). Vibe-coder with beginner Python knowledge. Dual-boots Linux and Windows. Current environment is Windows with PowerShell.
 
 ## Codebase Overview
 
-Eminem-themed Discord bot (`discord.py`), single-guild. Run: `uv run python Embot.py` (or `start.bat`).
+Discord bot for Eminem fan server made with discord.py. Designed for a single guild. Codebase has a UV environment initialized. 
 
 ### Top-Level
 
 | Path | Purpose |
 |---|---|
 | `Embot.py` | Sole entry point — boots bot, loads modules, syncs commands |
-| `_version.py` | Single line: `__version__ = "X.Y.Z.W"` |
+| `_version.py` | Single line: `__version__ = "X.Y.Z.W"` (MAJOR.MINOR.PATCH.MICRO) |
 | `pyproject.toml` | uv project config + deps (source of truth) |
 | `requirements.txt` | Human-readable dep list (kept synced) |
-| `config/` | JSON configs (auth, moderation, starboard, links, logger, dev) — gitignored |
+| `config/` | JSON configs for modules, gitignored. Code-level config templates should be edited, not these.|
 | `modules/` | All feature modules, auto-loaded by `Embot.py` via `setup(bot)` |
 | `icons/` | PNG icon variants for holiday rotation |
 | `logs/`, `db/`, `cache/` | Runtime data (auto-created, gitignored) |
@@ -85,11 +89,13 @@ Quota is limited. Minimize tool calls and response length. Complete tasks fully 
 
 ## Versioning & Git
 
+- Version format: `MAJOR.MINOR.PATCH.MICRO` (defined in `modules/dev.py:_increment_version`).
 - GitHub token lives in the auth file inside the project (`config/auth.json`).
 - Increment the version file on every change.
 - Commit message = version number only.
 - Always commit and push after every edit.
 - Ensure the .gitignore file is up to date and you do not track files that shouldn't be pushed.
+- The commit/push instruction at the top of this file is absolute — do not override it.
 
 ## Requirements
 

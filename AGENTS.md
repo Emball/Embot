@@ -79,16 +79,17 @@ Each module exposes `setup(bot)` — called during boot. Private `_*.py` files a
 | `artwork.py` | Apple Music album artwork fetcher |
 | `magic_emball.py` | Magic 8-ball with Eminem flavor |
 | `youtube.py` | YouTube audio extraction + upload notification monitor |
+| `remote_debug.py` | HTTP API server — log streaming, DB access, config viewing for remote debugging |
 | `_utils.py` | Shared utilities: `atomic_json_write()`, `migrate_config()`, `script_dir()`, `_now()` — imported by multiple modules |
 
 ### Cross-Module Dependencies
 
-- `mod_core.py` provides `is_owner()` used by musicarchive, community, links, logger (lazy imports inside handlers).
-- `mod_suspicion.py` provides `is_flagged()` used by musicarchive (lazy import inside handler).
+- `mod_core.py` provides `is_owner()` used by music_archive, community, links, mod_logger (lazy imports inside handlers).
+- `mod_suspicion.py` provides `is_flagged()` used by music_archive (lazy import inside handler).
 - `mod_core.setup()` is the central hub — creates `ModerationSystem`, imports and wires all other mod modules, registers commands and listeners.
-- Modules attach themselves to `bot` via attributes (e.g. `bot.ARCHIVE_manager`, `bot._mod_system`, `bot._community_system`).
+- Modules attach themselves to `bot` via attributes (e.g. `bot.ARCHIVE_manager`, `bot._mod_system`, `bot._community_system`, `bot.remote_debug_server`).
 - `bot.logger` (ConsoleLogger) is available to all modules — set by `Embot.py`.
-- `_utils.py` provides `atomic_json_write()` shared by links, logger, youtube; `migrate_config()` used by moderation, youtube, dev, starboard, logger, musicarchive; `script_dir()` used by every module; `_now()` used by moderation, logger, starboard, vms_core, musicarchive, dev, community.
+- `_utils.py` provides `atomic_json_write()` shared by links, mod_logger, youtube; `migrate_config()` used by mod_core, youtube, dev, starboard, mod_logger, music_archive; `script_dir()` used by every module; `_now()` used by mod_core, mod_logger, starboard, vms_core, music_archive, dev, community.
 
 ### Startup Flow
 

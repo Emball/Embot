@@ -2243,10 +2243,108 @@ async def _do_timeout(ctx: ModContext, mod: ModerationSystem,
         ctx.bot.logger.error(MODULE_NAME, "Timeout failed", e)
 
 async def _do_untimeout(ctx: ModContext, mod: ModerationSystem,
-                         member: discord.Member, fake: bool = False):
+                        member: discord.Member, fake: bool = False):
     cfg = mod.cfg
     if not has_elevated_role(ctx.author, cfg):
-        return await ctx.error(ERROR_NO_PERMISSION)  # timeout
+        return await ctx.error(ERROR_NO_PERMISSION)
+    if member == ctx.author:
+        return await ctx.error(ERROR_CANNOT_ACTION_SELF)
+    if member == ctx.bot.user:
+        return await ctx.error(ERROR_CANNOT_ACTION_BOT)
+    try:
+        if not fake:
+            await member.timeout(None, reason=f"Timeout removed by {ctx.author}")
+        embed = discord.Embed(
+            title="Timeout Removed",
+            description=f"{member.mention}'s timeout has been removed.",
+            color=0x2ecc71, timestamp=datetime.now(timezone.utc))
+        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+        await ctx.reply(embed=embed)
+        ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} removed timeout from {member}")
+    except Exception as e:
+        await ctx.error("An error occurred while removing the timeout.")
+        ctx.bot.logger.error(MODULE_NAME, "Untimeout failed", e)
+
+async def _do_mute(ctx: ModContext, mod: ModerationSystem,
+                   member: discord.Member, reason: str = "No reason provided",
+                   duration: Optional[str] = None, fake: bool = False):
+    cfg = mod.cfg
+    if not has_elevated_role(ctx.author, cfg):
+        return await ctx.error(ERROR_NO_PERMISSION)
+    if member == ctx.author:
+        return await ctx.error(ERROR_CANNOT_ACTION_SELF)
+    if member == ctx.bot.user:
+        return await ctx.error(ERROR_CANNOT_ACTION_BOT)
+    duration_seconds, duration_str = parse_duration(duration or "")
+    try:
+        muted_role = discord.utils.get(ctx.guild.roles, name=cfg.muted_role_name)
+        if not muted_role:
+            muted_role = await ctx.guild.create_role(
+                name=cfg.muted_role_name, color=discord.Color.dark_gray(),
+                reason="Creating Muted role for moderation")
+            for ch in ctx.guild.channels:
+                try:
+                    await ch.set_permissions(muted_role, send_messages=False, speak=False)
+                except Exception:
+                    pass
+        if not fake:
+            await member.add_roles(muted_role, reason=reason)
+            mod.add_mute(ctx.guild.id, member.id, reason, ctx.author, duration_seconds)
+        try:
+            dm = discord.Embed(title="You Have Been Muted",
+                description=f"You have been muted in **{ctx.guild.name}**.",
+                color=0xf39c12, timestamp=datetime.now(timezone.utc))
+            dm.add_field(name="Reason", value=reason, inline=False)
+            dm.add_field(name="Duration", value=duration_str, inline=True)
+            dm.add_field(name="Moderator", value=str(ctx.author), inline=True)
+            await member.send(embed=dm)
+        except discord.Forbidden:
+            pass
+        embed = discord.Embed(title="Member Muted",
+            description=f"{member.mention} has been muted.",
+            color=0xf39c12, timestamp=datetime.now(timezone.utc))
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.add_field(name="Duration", value=duration_str, inline=True)
+        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+        await ctx.reply(embed=embed)
+        el = get_event_logger(ctx.bot)
+        if el:
+            await el.log_mute(ctx.guild, member, ctx.author, reason, duration_str, ctx.channel)
+        ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} muted {member} for {duration_str}")
+    except discord.Forbidden:
+        await ctx.error("I don't have permission to mute this member.")
+    except Exception as e:
+        await ctx.error("An error occurred while trying to mute the member.")
+        ctx.bot.logger.error(MODULE_NAME, "Mute failed", e)
+
+async def _do_unmute(ctx: ModContext, mod: ModerationSystem,
+                     member: discord.Member, fake: bool = False):
+    cfg = mod.cfg
+    if not has_elevated_role(ctx.author, cfg):
+        return await ctx.error(ERROR_NO_PERMISSION)
+    muted_role = discord.utils.get(ctx.guild.roles, name=cfg.muted_role_name)
+    if not muted_role or muted_role not in member.roles:
+        return await ctx.error("This member is not muted.")
+    try:
+        if not fake:
+            await member.remove_roles(muted_role, reason=f"Unmuted by {ctx.author}")
+            mod.remove_mute(ctx.guild.id, member.id)
+        embed = discord.Embed(title="Member Unmuted",
+            description=f"{member.mention} has been unmuted.",
+            color=0x2ecc71, timestamp=datetime.now(timezone.utc))
+        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+        await ctx.reply(embed=embed)
+        ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} unmuted {member}")
+    except Exception as e:
+        await ctx.error("An error occurred while trying to unmute the member.")
+        ctx.bot.logger.error(MODULE_NAME, "Unmute failed", e)
+
+async def _do_softban(ctx: ModContext, mod: ModerationSystem,
+                      member: discord.Member, reason: str,
+                      delete_days: int = 7, fake: bool = False):
+    cfg = mod.cfg
+    if not has_elevated_role(ctx.author, cfg):
+        return await ctx.error(ERROR_NO_PERMISSION)
     ok, err = validate_reason(reason, cfg.min_reason_length)
     if not ok:
         return await ctx.error(err)
@@ -2262,13 +2360,12 @@ async def _do_untimeout(ctx: ModContext, mod: ModerationSystem,
             await member.ban(reason=f"Softban: {reason} - By {ctx.author}",
                              delete_message_days=delete_days)
             await ctx.guild.unban(member, reason=f"Softban unban - By {ctx.author}")
-        embed = discord.Embed(
-            title="Member Softbanned",
+        embed = discord.Embed(title="Member Softbanned",
             description=f"{member.mention} softbanned (messages deleted, can rejoin).",
             color=0x992d22, timestamp=datetime.now(timezone.utc))
-        embed.add_field(name="Reason",            value=reason,              inline=False)
-        embed.add_field(name="Moderator",         value=ctx.author.mention,  inline=True)
-        embed.add_field(name="Messages Deleted",  value=f"{delete_days} days", inline=True)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+        embed.add_field(name="Messages Deleted", value=f"{delete_days} days", inline=True)
         inchat_msg_id = await ctx.reply(embed=embed)
         el = get_event_logger(ctx.bot)
         botlog_msg_id = None
@@ -2548,7 +2645,6 @@ def setup(bot):
         delete_days="Days of messages to delete (0-7)",
         fake="Simulate without executing",
     )
-    @app_commands.default_permissions(ban_members=True)
     async def slash_ban(interaction: discord.Interaction, user: discord.User,
                         reason: Optional[str] = None, rule: Optional[int] = None,
                         delete_days: Optional[int] = 0, fake: bool = False):
@@ -2566,7 +2662,6 @@ def setup(bot):
         delete_days="Days of messages to delete (0-7)",
         fake="Simulate without executing",
     )
-    @app_commands.default_permissions(ban_members=True)
     async def slash_multiban(interaction: discord.Interaction, user_ids: str,
                              reason: str, delete_days: Optional[int] = 0,
                              fake: bool = False):
@@ -2626,7 +2721,6 @@ def setup(bot):
     @bot.tree.command(name="unban", description="[Mod] Unban a user from the server")
     @app_commands.describe(user_id="User ID to unban", reason="Reason for unban",
                            fake="Simulate without executing")
-    @app_commands.default_permissions(ban_members=True)
     async def slash_unban(interaction: discord.Interaction, user_id: str,
                           reason: Optional[str] = "No reason provided", fake: bool = False):
         await _do_unban(ModContext(interaction), _mod, user_id, reason, fake=fake)
@@ -2634,7 +2728,6 @@ def setup(bot):
     @bot.tree.command(name="kick", description="[Mod] Kick a member from the server")
     @app_commands.describe(member="Member to kick", reason="Reason (min 10 chars)",
                            fake="Simulate without executing")
-    @app_commands.default_permissions(kick_members=True)
     async def slash_kick(interaction: discord.Interaction, member: discord.Member,
                          reason: str, fake: bool = False):
         await _do_kick(ModContext(interaction), _mod, member, reason, fake=fake)
@@ -2642,7 +2735,6 @@ def setup(bot):
     @bot.tree.command(name="timeout", description="[Mod] Timeout a member")
     @app_commands.describe(member="Member to timeout", duration="Duration in minutes",
                            reason="Reason (min 10 chars)", fake="Simulate without executing")
-    @app_commands.default_permissions(moderate_members=True)
     async def slash_timeout(interaction: discord.Interaction, member: discord.Member,
                             duration: int, reason: str, fake: bool = False):
         await _do_timeout(ModContext(interaction), _mod, member, duration, reason, fake=fake)
@@ -2650,7 +2742,6 @@ def setup(bot):
     @bot.tree.command(name="untimeout", description="[Mod] Remove timeout from a member")
     @app_commands.describe(member="Member to remove timeout from",
                            fake="Simulate without executing")
-    @app_commands.default_permissions(moderate_members=True)
     async def slash_untimeout(interaction: discord.Interaction, member: discord.Member,
                                fake: bool = False):
         await _do_untimeout(ModContext(interaction), _mod, member, fake=fake)
@@ -2659,7 +2750,6 @@ def setup(bot):
     @app_commands.describe(member="Member to mute", reason="Reason for mute",
                            duration="Duration e.g. 10m, 1h, 1d (empty = permanent)",
                            fake="Simulate without executing")
-    @app_commands.default_permissions(manage_roles=True)
     async def slash_mute(interaction: discord.Interaction, member: discord.Member,
                          reason: str = "No reason provided",
                          duration: Optional[str] = None, fake: bool = False):
@@ -2667,7 +2757,6 @@ def setup(bot):
 
     @bot.tree.command(name="unmute", description="[Mod] Unmute a member")
     @app_commands.describe(member="Member to unmute", fake="Simulate without executing")
-    @app_commands.default_permissions(manage_roles=True)
     async def slash_unmute(interaction: discord.Interaction, member: discord.Member,
                             fake: bool = False):
         await _do_unmute(ModContext(interaction), _mod, member, fake=fake)
@@ -2677,7 +2766,6 @@ def setup(bot):
     @app_commands.describe(member="Member to softban", reason="Reason (min 10 chars)",
                            delete_days="Days of messages to delete (0-7, default 7)",
                            fake="Simulate without executing")
-    @app_commands.default_permissions(ban_members=True)
     async def slash_softban(interaction: discord.Interaction, member: discord.Member,
                             reason: str, delete_days: Optional[int] = 7,
                             fake: bool = False):
@@ -2687,20 +2775,17 @@ def setup(bot):
     @bot.tree.command(name="warn", description="[Mod] Warn a member")
     @app_commands.describe(member="Member to warn", reason="Reason (min 10 chars)",
                            fake="Simulate without executing")
-    @app_commands.default_permissions(manage_messages=True)
     async def slash_warn(interaction: discord.Interaction, member: discord.Member,
                          reason: str, fake: bool = False):
         await _do_warn(ModContext(interaction), _mod, member, reason, fake=fake)
 
     @bot.tree.command(name="warnings", description="[Mod] View warnings for a member")
     @app_commands.describe(member="Member to check")
-    @app_commands.default_permissions(manage_messages=True)
     async def slash_warnings(interaction: discord.Interaction, member: discord.Member):
         await _do_warnings(ModContext(interaction), _mod, member)
 
-    @bot.tree.command(name="clearwarnings", description="[Admin] Clear all warnings for a member")
+    @bot.tree.command(name="clearwarnings",                       description="[Owner only] Clear all warnings for a member")
     @app_commands.describe(member="Member to clear warnings for")
-    @app_commands.default_permissions(administrator=True)
     async def slash_clearwarnings(interaction: discord.Interaction, member: discord.Member):
         await _do_clearwarnings(ModContext(interaction), _mod, member)
 
@@ -2708,7 +2793,6 @@ def setup(bot):
     @app_commands.describe(amount="Number of messages to delete (1-100)",
                            user="Only delete messages from this user (optional)",
                            fake="Simulate without executing")
-    @app_commands.default_permissions(manage_messages=True)
     async def slash_purge(interaction: discord.Interaction, amount: int,
                           user: Optional[discord.Member] = None, fake: bool = False):
         await _do_purge(ModContext(interaction), _mod, amount, user, fake=fake)
@@ -2716,7 +2800,6 @@ def setup(bot):
     @bot.tree.command(name="slowmode", description="[Mod] Set slowmode delay for this channel")
     @app_commands.describe(seconds="Slowmode delay in seconds (0 to disable)",
                            channel="Channel to apply to (default: current)")
-    @app_commands.default_permissions(manage_channels=True)
     async def slash_slowmode(interaction: discord.Interaction, seconds: int,
                              channel: Optional[discord.TextChannel] = None):
         await _do_slowmode(ModContext(interaction), _mod, seconds, channel)
@@ -2725,14 +2808,12 @@ def setup(bot):
     @app_commands.describe(reason="Reason for locking (min 10 chars)",
                            channel="Channel to lock (default: current)",
                            fake="Simulate without executing")
-    @app_commands.default_permissions(manage_channels=True)
     async def slash_lock(interaction: discord.Interaction, reason: str,
                          channel: Optional[discord.TextChannel] = None, fake: bool = False):
         await _do_lock(ModContext(interaction), _mod, reason, channel, fake=fake)
 
     @bot.tree.command(name="unlock", description="[Mod] Re-allow members to send messages")
     @app_commands.describe(channel="Channel to unlock (default: current)")
-    @app_commands.default_permissions(manage_channels=True)
     async def slash_unlock(interaction: discord.Interaction,
                            channel: Optional[discord.TextChannel] = None):
         await _do_unlock(ModContext(interaction), _mod, channel)
@@ -3197,8 +3278,7 @@ def setup(bot):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @bot.tree.command(name="updaterules",
-                      description="[Admin] Force-refresh the #rules channel embed")
-    @app_commands.default_permissions(administrator=True)
+                      description="[Owner only] Force-refresh the #rules channel embed")
     async def slash_updaterules(interaction: discord.Interaction):
         if not has_owner_role(interaction.user, _cfg):
             await interaction.response.send_message(ERROR_NO_PERMISSION, ephemeral=True)
@@ -3213,8 +3293,7 @@ def setup(bot):
                 "ℹ Rules embed is already up to date.", ephemeral=True)
 
     @bot.tree.command(name="restart",
-                      description="[Admin] Restart the bot process")
-    @app_commands.default_permissions(administrator=True)
+                      description="[Owner only] Restart the bot process")
     async def slash_restart(interaction: discord.Interaction):
         if not has_owner_role(interaction.user, _cfg):
             await interaction.response.send_message(ERROR_NO_PERMISSION, ephemeral=True)
@@ -3582,7 +3661,6 @@ def _setup_suspicion(bot: commands.Bot, _mod: "ModerationSystem", _cfg: "ModConf
     @bot.tree.command(name="fedcheck",
                       description="[Mod] Show suspicion report for a member")
     @app_commands.describe(member="Member to inspect")
-    @app_commands.default_permissions(manage_messages=True)
     async def slash_fedcheck(interaction: discord.Interaction, member: discord.Member):
         if not has_elevated_role(interaction.user, _cfg):
             await interaction.response.send_message(ERROR_NO_PERMISSION, ephemeral=True)
@@ -3640,7 +3718,6 @@ def _setup_suspicion(bot: commands.Bot, _mod: "ModerationSystem", _cfg: "ModConf
     @bot.tree.command(name="fedflag",
                       description="[Mod] Manually flag a member as suspicious")
     @app_commands.describe(member="Member to flag", note="Optional note")
-    @app_commands.default_permissions(manage_messages=True)
     async def slash_fedflag(interaction: discord.Interaction,
                             member: discord.Member,
                             note: str = ""):
@@ -3663,7 +3740,6 @@ def _setup_suspicion(bot: commands.Bot, _mod: "ModerationSystem", _cfg: "ModConf
     @bot.tree.command(name="fedclear",
                       description="[Mod] Clear a suspicion flag from a member")
     @app_commands.describe(member="Member to clear")
-    @app_commands.default_permissions(manage_messages=True)
     async def slash_fedclear(interaction: discord.Interaction, member: discord.Member):
         if not has_elevated_role(interaction.user, _cfg):
             await interaction.response.send_message(ERROR_NO_PERMISSION, ephemeral=True)
@@ -3679,8 +3755,7 @@ def _setup_suspicion(bot: commands.Bot, _mod: "ModerationSystem", _cfg: "ModConf
         )
 
     @bot.tree.command(name="fedscan",
-                      description="[Admin] Re-score all members in the server")
-    @app_commands.default_permissions(administrator=True)
+                      description="[Owner only] Re-score all members in the server")
     async def slash_fedscan(interaction: discord.Interaction):
         if not has_owner_role(interaction.user, _cfg):
             await interaction.response.send_message(ERROR_NO_PERMISSION, ephemeral=True)
@@ -3702,8 +3777,7 @@ def _setup_suspicion(bot: commands.Bot, _mod: "ModerationSystem", _cfg: "ModConf
         )
 
     @bot.tree.command(name="fedinvites",
-                      description="[Admin] Show invite classification labels")
-    @app_commands.default_permissions(administrator=True)
+                      description="[Mod] Show invite classification labels")
     async def slash_fedinvites(interaction: discord.Interaction):
         if not has_elevated_role(interaction.user, _cfg):
             await interaction.response.send_message(ERROR_NO_PERMISSION, ephemeral=True)

@@ -816,7 +816,7 @@ def setup(bot):
         await _deliver_song(bot, interaction, best)
         await _log_delivery(bot, interaction.user, best, source="slash command")
 
-    @bot.tree.command(name="rebuild_index", description="[Admin] Rebuild the song index cache")
+    @bot.tree.command(name="rebuild_index", description="[Owner only] Rebuild the song index cache")
     async def rebuild_index(interaction: discord.Interaction):
         from moderation import is_owner
         if not is_owner(interaction.user):

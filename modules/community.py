@@ -1403,7 +1403,7 @@ def setup(bot):
 
     integrity_task.start()
 
-    @bot.tree.command(name="community_setup", description="[Admin] Configure community submission channels")
+    @bot.tree.command(name="community_setup", description="[Owner only] Configure community submission channels")
     @app_commands.describe(
         projects_channel="The #projects channel",
         artwork_channel="The #artwork channel",
@@ -1535,7 +1535,7 @@ def setup(bot):
         embed.set_footer(text=f"Submission ID: {sub['id']}")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @bot.tree.command(name="spotlight_preview", description="[Admin] Preview this week's Spotlight Friday winner")
+    @bot.tree.command(name="spotlight_preview", description="[Owner only] Preview this week's Spotlight Friday winner")
     async def spotlight_preview(interaction: discord.Interaction):
         from moderation import is_owner
         if not is_owner(interaction.user):
@@ -1560,7 +1560,7 @@ def setup(bot):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @bot.tree.command(name="spotlight_run", description="[Admin] Force-run Spotlight Friday now")
+    @bot.tree.command(name="spotlight_run", description="[Owner only] Force-run Spotlight Friday now")
     async def spotlight_run(interaction: discord.Interaction):
         from moderation import is_owner
         if not is_owner(interaction.user):

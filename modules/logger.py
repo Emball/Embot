@@ -1037,7 +1037,7 @@ def setup(bot):
         await event_logger.log_invite_delete(invite)
     
     # Commands to configure logger
-    @bot.tree.command(name="setjoinlogs", description="Set the channel for join/leave logs")
+    @bot.tree.command(name="setjoinlogs", description="[Owner only] Set the channel for join/leave logs")
     @app_commands.describe(channel="Channel to send join/leave logs to")
     async def set_join_logs(interaction: discord.Interaction, channel: discord.TextChannel):
         from moderation import is_owner
@@ -1057,7 +1057,7 @@ def setup(bot):
         await interaction.response.send_message(embed=embed)
         bot.logger.log(MODULE_NAME, f"Join logs channel set to {channel.name} by {interaction.user}")
     
-    @bot.tree.command(name="setbotlogs", description="Set the channel for bot/moderation logs")
+    @bot.tree.command(name="setbotlogs", description="[Owner only] Set the channel for bot/moderation logs")
     @app_commands.describe(channel="Channel to send bot/moderation logs to")
     async def set_bot_logs(interaction: discord.Interaction, channel: discord.TextChannel):
         from moderation import is_owner
@@ -1077,7 +1077,7 @@ def setup(bot):
         await interaction.response.send_message(embed=embed)
         bot.logger.log(MODULE_NAME, f"Bot logs channel set to {channel.name} by {interaction.user}")
     
-    @bot.tree.command(name="logconfig", description="View or toggle logging settings")
+    @bot.tree.command(name="logconfig", description="[Owner only] View or toggle logging settings")
     async def log_config(interaction: discord.Interaction):
         from moderation import is_owner
         if not is_owner(interaction.user):

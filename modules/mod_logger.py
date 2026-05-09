@@ -1,9 +1,7 @@
 import discord
 from discord import app_commands
 from typing import Optional
-import json
-import os
-from _utils import script_dir, _now
+from _utils import _now
 
 MODULE_NAME = "LOGGER"
 
@@ -11,50 +9,20 @@ class EventLogger:
 
     def __init__(self, bot):
         self.bot = bot
-        config_dir = script_dir() / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        self.config_file = str(config_dir / "logger_config.json")
-        self.config = self.load_config()
-
         self._scanner = None
 
-    def load_config(self):
-        defaults = {
-            "join_logs_channel_id": 0,
-            "bot_logs_channel_id": 0,
-            "log_message_edits": True,
-            "log_message_deletes": True,
-            "log_member_joins": True,
-            "log_member_leaves": True,
-            "log_bans": True,
-            "log_unbans": True,
-            "log_role_changes": True,
-            "log_channel_changes": True,
-            "log_voice_changes": True,
-            "log_invite_changes": True,
-            "log_nickname_changes": True,
-        }
-        from _utils import migrate_config
-        return migrate_config(self.config_file, defaults)
-
-    def save_config(self, config=None):
-        if config is None:
-            config = self.config
-        try:
-            from _utils import atomic_json_write
-            atomic_json_write(self.config_file, config)
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Failed to save logger config", e)
+    @property
+    def mod_cfg(self):
+        ms = getattr(self.bot, 'moderation_manager', None)
+        return ms.cfg if ms else None
 
     def get_join_logs_channel(self, guild):
-        if not self.config.get("join_logs_channel_id"):
-            return None
-        return guild.get_channel(self.config["join_logs_channel_id"])
+        ch_id = self.mod_cfg.join_logs_channel_id if self.mod_cfg else 0
+        return guild.get_channel(ch_id) if ch_id else None
 
     def get_bot_logs_channel(self, guild):
-        if not self.config.get("bot_logs_channel_id"):
-            return None
-        return guild.get_channel(self.config["bot_logs_channel_id"])
+        ch_id = self.mod_cfg.bot_logs_channel_id if self.mod_cfg else 0
+        return guild.get_channel(ch_id) if ch_id else None
 
     def _get_scanner(self):
         if self._scanner is not None:
@@ -88,7 +56,7 @@ class EventLogger:
         return None
 
     async def log_message_delete(self, message, rehosted_files: list = None):
-        if not self.config.get("log_message_deletes"):
+        if not self.mod_cfg.get("log_message_deletes"):
             return
         if message.author.bot:
             return
@@ -115,23 +83,6 @@ class EventLogger:
 
         image_exts = ('.png', '.jpg', '.jpeg', '.gif', '.webp')
         audio_exts = ('.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.opus', '.mp4', '.mov', '.webm')
-
-        if not rehosted_files:
-            mod_sys = getattr(self.bot, '_mod_system', None)
-            if mod_sys and message.id in mod_sys.media_cache:
-                cached = mod_sys.media_cache[message.id]
-                rehosted_files = []
-                for f in cached['files']:
-                    try:
-                        data = mod_sys._decrypt_from_disk(f['path'])
-                        rehosted_files.append({'filename': f['filename'], 'data': data})
-                    except FileNotFoundError:
-                        pass
-                    except Exception as e:
-                        self.bot.logger.log(
-                            MODULE_NAME,
-                            f"Failed to decrypt {f['filename']} for deletion log: {e}",
-                            "WARNING")
 
         if rehosted_files:
             scanner = self._get_scanner()
@@ -182,7 +133,7 @@ class EventLogger:
             await self.log_to_channel(channel, embed)
 
     async def log_message_edit(self, before, after):
-        if not self.config.get("log_message_edits"):
+        if not self.mod_cfg.get("log_message_edits"):
             return
         if before.author.bot:
             return
@@ -224,7 +175,7 @@ class EventLogger:
         await self.log_to_channel(channel, embed)
 
     async def log_bulk_message_delete(self, messages):
-        if not self.config.get("log_message_deletes"):
+        if not self.mod_cfg.get("log_message_deletes"):
             return
         if not messages:
             return
@@ -246,7 +197,7 @@ class EventLogger:
         await self.log_to_channel(channel, embed)
 
     async def log_member_join(self, member):
-        if not self.config.get("log_member_joins"):
+        if not self.mod_cfg.get("log_member_joins"):
             return
 
         channel = self.get_join_logs_channel(member.guild)
@@ -288,7 +239,7 @@ class EventLogger:
         await self.log_to_channel(channel, embed)
 
     async def log_member_leave(self, member):
-        if not self.config.get("log_member_leaves"):
+        if not self.mod_cfg.get("log_member_leaves"):
             return
 
         channel = self.get_join_logs_channel(member.guild)
@@ -324,7 +275,7 @@ class EventLogger:
         if not channel:
             return
 
-        if self.config.get("log_role_changes") and before.roles != after.roles:
+        if self.mod_cfg.get("log_role_changes") and before.roles != after.roles:
             added_roles = [role for role in after.roles if role not in before.roles]
             removed_roles = [role for role in before.roles if role not in after.roles]
 
@@ -351,7 +302,7 @@ class EventLogger:
                 embed.set_footer(text=f"User ID: {after.id}")
                 await self.log_to_channel(channel, embed)
 
-        if self.config.get("log_nickname_changes") and before.nick != after.nick:
+        if self.mod_cfg.get("log_nickname_changes") and before.nick != after.nick:
             before_nick = before.nick or "*No nickname*"
             after_nick = after.nick or "*No nickname*"
 
@@ -376,7 +327,7 @@ class EventLogger:
             await self.log_to_channel(channel, embed)
 
     async def log_role_create(self, role):
-        if not self.config.get("log_role_changes"):
+        if not self.mod_cfg.get("log_role_changes"):
             return
 
         channel = self.get_bot_logs_channel(role.guild)
@@ -404,7 +355,7 @@ class EventLogger:
         await self.log_to_channel(channel, embed)
 
     async def log_role_delete(self, role):
-        if not self.config.get("log_role_changes"):
+        if not self.mod_cfg.get("log_role_changes"):
             return
 
         channel = self.get_bot_logs_channel(role.guild)
@@ -427,7 +378,7 @@ class EventLogger:
         await self.log_to_channel(channel, embed)
 
     async def log_role_update(self, before, after):
-        if not self.config.get("log_role_changes"):
+        if not self.mod_cfg.get("log_role_changes"):
             return
 
         channel = self.get_bot_logs_channel(after.guild)
@@ -467,7 +418,7 @@ class EventLogger:
         await self.log_to_channel(channel, embed)
 
     async def log_channel_create(self, channel):
-        if not self.config.get("log_channel_changes"):
+        if not self.mod_cfg.get("log_channel_changes"):
             return
 
         bot_logs = self.get_bot_logs_channel(channel.guild)
@@ -490,7 +441,7 @@ class EventLogger:
         await self.log_to_channel(bot_logs, embed)
 
     async def log_channel_delete(self, channel):
-        if not self.config.get("log_channel_changes"):
+        if not self.mod_cfg.get("log_channel_changes"):
             return
 
         bot_logs = self.get_bot_logs_channel(channel.guild)
@@ -513,7 +464,7 @@ class EventLogger:
         await self.log_to_channel(bot_logs, embed)
 
     async def log_channel_update(self, before, after):
-        if not self.config.get("log_channel_changes"):
+        if not self.mod_cfg.get("log_channel_changes"):
             return
 
         channel = self.get_bot_logs_channel(after.guild)
@@ -547,7 +498,7 @@ class EventLogger:
         await self.log_to_channel(channel, embed)
 
     async def log_voice_state_update(self, member, before, after):
-        if not self.config.get("log_voice_changes"):
+        if not self.mod_cfg.get("log_voice_changes"):
             return
 
         channel = self.get_bot_logs_channel(member.guild)
@@ -606,7 +557,7 @@ class EventLogger:
             await self.log_to_channel(channel, embed)
 
     async def log_invite_create(self, invite):
-        if not self.config.get("log_invite_changes"):
+        if not self.mod_cfg.get("log_invite_changes"):
             return
 
         channel = self.get_bot_logs_channel(invite.guild)
@@ -647,7 +598,7 @@ class EventLogger:
         await self.log_to_channel(channel, embed)
 
     async def log_invite_delete(self, invite):
-        if not self.config.get("log_invite_changes"):
+        if not self.mod_cfg.get("log_invite_changes"):
             return
 
         channel = self.get_bot_logs_channel(invite.guild)
@@ -943,8 +894,7 @@ def setup(bot):
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return
-        event_logger.config["join_logs_channel_id"] = channel.id
-        event_logger.save_config()
+        event_logger.mod_cfg.set("join_logs_channel_id", channel.id)
 
         embed = discord.Embed(
             title="Join Logs Channel Set",
@@ -962,8 +912,7 @@ def setup(bot):
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return
-        event_logger.config["bot_logs_channel_id"] = channel.id
-        event_logger.save_config()
+        event_logger.mod_cfg.set("bot_logs_channel_id", channel.id)
 
         embed = discord.Embed(
             title="Bot Logs Channel Set",
@@ -997,16 +946,16 @@ def setup(bot):
         )
 
         settings = [
-            f"{'' if event_logger.config.get('log_message_edits') else ''} Message Edits",
-            f"{'' if event_logger.config.get('log_message_deletes') else ''} Message Deletes",
-            f"{'' if event_logger.config.get('log_member_joins') else ''} Member Joins",
-            f"{'' if event_logger.config.get('log_member_leaves') else ''} Member Leaves",
-            f"{'' if event_logger.config.get('log_bans') else ''} Bans/Unbans",
-            f"{'' if event_logger.config.get('log_role_changes') else ''} Role Changes",
-            f"{'' if event_logger.config.get('log_channel_changes') else ''} Channel Changes",
-            f"{'' if event_logger.config.get('log_voice_changes') else ''} Voice Changes",
-            f"{'' if event_logger.config.get('log_invite_changes') else ''} Invite Changes",
-            f"{'' if event_logger.config.get('log_nickname_changes') else ''} Nickname Changes"
+            f"{'' if event_logger.mod_cfg.get('log_message_edits') else ''} Message Edits",
+            f"{'' if event_logger.mod_cfg.get('log_message_deletes') else ''} Message Deletes",
+            f"{'' if event_logger.mod_cfg.get('log_member_joins') else ''} Member Joins",
+            f"{'' if event_logger.mod_cfg.get('log_member_leaves') else ''} Member Leaves",
+            f"{'' if event_logger.mod_cfg.get('log_bans') else ''} Bans/Unbans",
+            f"{'' if event_logger.mod_cfg.get('log_role_changes') else ''} Role Changes",
+            f"{'' if event_logger.mod_cfg.get('log_channel_changes') else ''} Channel Changes",
+            f"{'' if event_logger.mod_cfg.get('log_voice_changes') else ''} Voice Changes",
+            f"{'' if event_logger.mod_cfg.get('log_invite_changes') else ''} Invite Changes",
+            f"{'' if event_logger.mod_cfg.get('log_nickname_changes') else ''} Nickname Changes"
         ]
 
         embed.add_field(name="Enabled Features", value="\n".join(settings), inline=False)

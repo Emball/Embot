@@ -1,19 +1,14 @@
-import asyncio
 import base64
 import numpy as np
 import os
 import queue
-import re
-import shutil
 import sqlite3
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, Tuple, List
-from _utils import script_dir, _now
 from vms_core import (
-    MODULE_NAME, _cache_subdir, _whisper_model_dir, _broken_dir,
+    MODULE_NAME, _whisper_model_dir, _broken_dir,
 )
 
 WAVEFORM_SAMPLES = 256

@@ -444,14 +444,16 @@ EXT_COOLDOWN_SECONDS = 30
 _ext_queue: Optional[asyncio.Queue] = None
 _ext_pending: list = []
 _ext_pending_lock: Optional[asyncio.Lock] = None
-_ext_cooldowns: dict = {}
-_ext_worker_task: Optional[asyncio.Task] = None
-_ext_avg_secs: float = 5.0
-_EXT_AVG_ALPHA: float = 0.3
+_ext_cooldowns:    dict                    = {}
+_ext_cooldown_lock: asyncio.Lock           = asyncio.Lock()
+_ext_worker_task:  Optional[asyncio.Task]  = None
+_ext_avg_secs:     float                   = 5.0
+_EXT_AVG_ALPHA:    float                   = 0.3
 
 
-def _ext_cooldown_remaining(user_id: str) -> float:
-    last = _ext_cooldowns.get(user_id, 0.0)
+async def _ext_cooldown_remaining(user_id: str) -> float:
+    async with _ext_cooldown_lock:
+        last = _ext_cooldowns.get(user_id, 0.0)
     return max(0.0, EXT_COOLDOWN_SECONDS - (time.time() - last))
 
 
@@ -676,18 +678,16 @@ def setup(bot):
 
                     async with _ext_pending_lock:
                         total = len(_ext_pending)
+                        snapshot = [e for e in _ext_pending if e['msg'] != followup_msg]
                     try:
                         await followup_msg.edit(embed=_ext_status_embed(1, total))
                     except Exception:
                         pass
-                    async with _ext_pending_lock:
-                        for i, entry in enumerate(
-                            [e for e in _ext_pending if e['msg'] != followup_msg], start=2
-                        ):
-                            try:
-                                await entry['msg'].edit(embed=_ext_status_embed(i, total))
-                            except Exception:
-                                pass
+                    for i, entry in enumerate(snapshot, start=2):
+                        try:
+                            await entry['msg'].edit(embed=_ext_status_embed(i, total))
+                        except Exception:
+                            pass
 
                     t_start = time.time()
                     transcript = None
@@ -902,9 +902,11 @@ def setup(bot):
                     bot.logger.log(MODULE_NAME,
                         f"Playback triggered ({mode}) but no eligible VMs found")
 
-    @bot.listen()
-    async def on_close():
+    _original_close = bot.close
+    async def _patched_close():
         await manager.shutdown()
+        await _original_close()
+    bot.close = _patched_close
 
     bot.logger.log(MODULE_NAME, "VMS module setup complete")
 
@@ -935,7 +937,7 @@ def setup(bot):
 
         if not is_emball:
             user_id = str(interaction.user.id)
-            remaining_cd = _ext_cooldown_remaining(user_id)
+            remaining_cd = await _ext_cooldown_remaining(user_id)
             if remaining_cd > 0:
                 await interaction.followup.send(
                     f"You're on cooldown. Try again in **{int(remaining_cd) + 1}s**.",
@@ -943,7 +945,8 @@ def setup(bot):
                 )
                 return
 
-            _ext_cooldowns[user_id] = time.time()
+            async with _ext_cooldown_lock:
+                _ext_cooldowns[user_id] = time.time()
 
             temp_dir = _temp_vms_dir
             safe_name = re.sub(r'[^\w\-.]', '_', vm_att.filename)

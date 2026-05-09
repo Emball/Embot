@@ -78,14 +78,6 @@ class SuspicionEngine:
         elif invite_source == "youtube":
             score += add("invite_youtube")
 
-        try:
-            fetched = await member.guild.fetch_member(member.id)
-            profile = await fetched.user.profile()
-            if not profile.bio:
-                score += add("no_bio")
-        except Exception:
-            pass
-
         auto_flagged  = score >= SUSPICION_THRESHOLD
         flagged_at    = now.isoformat() if auto_flagged else None
 

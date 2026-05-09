@@ -147,6 +147,20 @@ CREATE TABLE IF NOT EXISTS mod_suspicion (
 );
 """
 
+def _migrate_logger_config():
+    logger_cfg = script_dir() / "config" / "logger_config.json"
+    if not logger_cfg.exists():
+        return
+    try:
+        with open(logger_cfg, encoding="utf-8") as f:
+            logger_data = json.load(f)
+        mod_cfg = _load_config()
+        mod_cfg.update(logger_data)
+        _save_config(mod_cfg)
+        logger_cfg.unlink()
+    except Exception as e:
+        print(f"[MODERATION] Failed to migrate logger_config.json: {e}", file=sys.stderr)
+
 def _config_path() -> Path:
     p = script_dir() / "config"
     p.mkdir(parents=True, exist_ok=True)
@@ -158,6 +172,17 @@ def _load_config() -> dict:
         "owner_id": 0,
         "join_logs_channel_id": 0,
         "bot_logs_channel_id": 0,
+        "log_message_edits": True,
+        "log_message_deletes": True,
+        "log_member_joins": True,
+        "log_member_leaves": True,
+        "log_bans": True,
+        "log_unbans": True,
+        "log_role_changes": True,
+        "log_channel_changes": True,
+        "log_voice_changes": True,
+        "log_invite_changes": True,
+        "log_nickname_changes": True,
         "rules_channel_name": "rules",
         "min_reason_length": 10,
         "muted_role_name": "Muted",
@@ -504,6 +529,7 @@ class ModerationSystem:
         self._db     = _db_path()
         _migrate(self._db)
         _init_db(self._db)
+        _migrate_logger_config()
         self.cfg     = ModConfig()
 
         import base64 as _b64, hashlib as _hl
@@ -879,7 +905,7 @@ def setup(bot):
 
     _self._cfg = mod_system.cfg
 
-    from mod_appeals import BanAppealView, BanAppealModal, AppealVoteView, appeal_get
+    from mod_appeals import BanAppealView, AppealVoteView
     from mod_oversight import ActionReviewView, action_row_to_dict, action_get_pending
     from mod_actions import (
         _do_ban, _do_unban, _do_kick, _do_timeout, _do_untimeout,

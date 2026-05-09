@@ -58,7 +58,7 @@ Each module exposes `setup(bot)` — called during boot. Private `_*.py` files a
 
 | Module | Description |
 |---|---|
-| `musicarchive.py` | Eminem music archive — scans FLAC/MP3, SQLite index, CDN cache channel |
+| `music_archive.py` | Eminem music archive — scans FLAC/MP3, SQLite index, CDN cache channel |
 | `community.py` | Submission tracking (#projects/#artwork), voting, Spotlight Friday, SQLite-backed |
 | `mod_core.py` | Moderation core: DB, config, auth helpers, ModContext, ModerationSystem, setup() |
 | `mod_actions.py` | Mod action functions: ban, kick, mute, warn, purge, lock, slowmode, etc. |
@@ -66,8 +66,8 @@ Each module exposes `setup(bot)` — called during boot. Private `_*.py` files a
 | `mod_oversight.py` | Action review, bot-log monitoring, daily integrity reports, embed tracking |
 | `mod_rules.py` | RulesManager — sync/display server rules |
 | `mod_suspicion.py` | Suspicion engine: /fedcheck, /fedflag, /fedclear, /fedscan, /fedinvites |
-| `logger.py` | Event logging — 17 Discord event types to join-logs/bot-logs channels |
-| `musicplayer.py` | Voice music playback — queue, FFmpeg, YouTube/SoundCloud, vote-skip |
+| `mod_logger.py` | Event logging — 17 Discord event types to join-logs/bot-logs channels |
+| `music_player.py` | Voice music playback — queue, FFmpeg, YouTube/SoundCloud, vote-skip |
 | `vms_core.py` | VMS core: shared defs, VMSManager, setup() with commands/listeners, stats embed, external queue |
 | `vms_transcribe.py` | OGG transcription via Whisper, waveform gen, bulk processing |
 | `vms_storage.py` | VM scan/conform, archival, backfill, purge |

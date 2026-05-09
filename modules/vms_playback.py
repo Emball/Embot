@@ -1,20 +1,15 @@
 import aiohttp
-import asyncio
-import base64
 import discord
-import os
 import random
 import re
 import time
 from pathlib import Path
 from typing import Optional, Tuple, List
-from _utils import script_dir, _now
 from vms_core import (
-    MODULE_NAME, _vms_dir, _archive_dir, _broken_dir, EMBALL_GUILD_ID,
+    MODULE_NAME, GENERAL_CHANNEL_NAME,
 )
-from vms_transcribe import generate_waveform, STOP_WORDS, get_ogg_duration
+from vms_transcribe import generate_waveform, STOP_WORDS
 
-GENERAL_CHANNEL_NAME = "general"
 PING_COOLDOWN_SECONDS = 10
 VM_COOLDOWN_DAYS = 7
 LONG_VM_THRESHOLD_SECS = 60

@@ -12,7 +12,7 @@ from mod_core import (
 )
 from mod_rules import RulesManager
 from mod_appeals import BanAppealView
-from mod_oversight import action_log, embed_track, action_resolve_pending, send_cached_media_to_logs
+from mod_oversight import action_log, embed_track, action_resolve_pending
 
 
 async def _do_ban(ctx: ModContext, ms, user: discord.User, reason: str = None,

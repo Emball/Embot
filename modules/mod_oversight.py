@@ -4,11 +4,10 @@ import json
 import io
 from datetime import datetime, timedelta
 from typing import Optional, Dict
-from collections import deque
 from _utils import _now
 from mod_core import (
-    MODULE_NAME, ModConfig, _db_exec, _db_one, _db_all,
-    has_elevated_role, get_event_logger,
+    MODULE_NAME, _db_exec, _db_one, _db_all,
+    get_event_logger,
 )
 
 
@@ -135,34 +134,6 @@ async def send_bot_log(ms, guild: discord.Guild, embed: discord.Embed,
         ms.bot.logger.error(MODULE_NAME, f"Failed to send bot log: {e}")
         return None
 
-
-async def send_cached_media_to_logs(ms, guild: discord.Message, message_id: int,
-                                    author_str: str, reason: str, extra_content: str = None):
-    ch = bot_logs_channel(ms, guild)
-    if not ch:
-        return
-    cached = ms.media_cache.get(message_id)
-    if not cached or not cached['files']:
-        return
-    files = []
-    for f in cached['files']:
-        try:
-            data = ms._decrypt_from_disk(f['path'])
-            files.append(discord.File(fp=io.BytesIO(data), filename=f['filename']))
-        except Exception as e:
-            ms.bot.logger.log(
-                MODULE_NAME,
-                f"Failed to decrypt cached file {f['filename']}: {e}", "WARNING")
-    if not files:
-        return
-    embed = discord.Embed(title=reason, color=discord.Color.orange(), timestamp=_now())
-    embed.add_field(name="User",       value=author_str,           inline=True)
-    embed.add_field(name="Message ID", value=str(message_id),      inline=True)
-    if extra_content:
-        embed.add_field(name="Message Content",
-                        value=extra_content[:1024] or "*empty*", inline=False)
-    embed.set_footer(text=f"{len(files)} attachment(s) re-hosted below")
-    await send_bot_log(ms, guild, embed, files_data=cached['files'])
 
 
 def embed_track(ms, message_id: int, action_id: str, embed_type: str):

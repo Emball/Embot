@@ -344,10 +344,7 @@ async def _check_for_update(bot) -> bool:
         bot.logger.log("AUTO-UPDATE", "Remote _version.py has no version string", "WARNING")
         return False
     remote_ver = _parse_version_tuple(match.group(1))
-    bot.logger.log("AUTO-UPDATE", f"Remote v{match.group(1)}")
     if remote_ver <= local_ver:
-        if remote_ver < local_ver:
-            bot.logger.log("AUTO-UPDATE", "Remote is older — skipping")
         return False
     bot.logger.log("AUTO-UPDATE", "Remote is newer — fast-forwarding...")
     proc = await asyncio.create_subprocess_exec(

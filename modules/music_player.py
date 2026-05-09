@@ -11,7 +11,7 @@ MODULE_NAME = "MUSIC PLAYER"
 
 def import_archive_functions():
     try:
-        from musicarchive import (
+        from music_archive import (
             find_best_match,
             select_best_candidate,
             FORMATS

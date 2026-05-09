@@ -1,24 +1,15 @@
 import asyncio
 import discord
-import os
-import random
-import re
-import shutil
-import sqlite3
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Optional, Tuple, List
-from discord.ext import tasks
-from _utils import script_dir, _now
 from vms_core import (
     MODULE_NAME, GENERAL_CHANNEL_NAME, EMBALL_GUILD_ID,
-    _cache_subdir, _vms_dir, _archive_dir, _broken_dir,
+    _vms_dir, _archive_dir, _broken_dir,
     _vm_canonical_name, _rename_to_canonical, _parse_vm_filename,
 )
 from vms_transcribe import (
-    BulkProcessor, get_ogg_duration, load_whisper,
-    WHISPER_MODEL_SIZE, SCAN_BATCH_SIZE,
+    get_ogg_duration, load_whisper, SCAN_BATCH_SIZE,
 )
 
 ARCHIVE_AFTER_DAYS = 150
@@ -374,7 +365,7 @@ async def backfill(manager, scan_after, label="Backfill"):
                     canon_path.write_bytes(raw)
 
                     duration = await asyncio.get_running_loop().run_in_executor(
-                        None, get_ogg_duration, str(canon_path)
+                        manager._executor, get_ogg_duration, str(canon_path)
                     )
                     manager._db_exec(
                         "UPDATE vms SET filename=?, duration_secs=? WHERE id=?",

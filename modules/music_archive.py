@@ -13,6 +13,7 @@ from mutagen.flac import FLAC
 from mutagen.id3 import ID3
 from mutagen.mp3 import MP3
 import asyncio
+import aiohttp
 import difflib
 from discord import app_commands
 import discord
@@ -367,14 +368,19 @@ async def _get_or_upload_cache(bot, file_path: str) -> Optional[str]:
     p = Path(file_path)
     cached = _cache_lookup(file_path)
     if cached:
-        age = (_now() - datetime.fromisoformat(cached["cached_at"])).total_seconds()
-        if age > 86400:
-            fresh = await _cache_refresh_url(bot, file_path, cached)
-            if fresh:
-                bot.logger.log(MODULE_NAME, f"Cache refreshed: {p.name}")
-                return fresh
-        bot.logger.log(MODULE_NAME, f"Cache hit: {p.name}")
-        return cached["cdn_url"]
+        try:
+            async with aiohttp.ClientSession() as sess:
+                async with sess.head(cached["cdn_url"], timeout=5) as resp:
+                    if resp.status == 200:
+                        bot.logger.log(MODULE_NAME, f"Cache hit: {p.name}")
+                        return cached["cdn_url"]
+        except Exception:
+            pass
+        fresh = await _cache_refresh_url(bot, file_path, cached)
+        if fresh:
+            bot.logger.log(MODULE_NAME, f"Cache refreshed: {p.name}")
+            return fresh
+        bot.logger.log(MODULE_NAME, f"Cache stale, re-uploading: {p.name}", "WARNING")
 
     chan = discord.utils.get(bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
     if not chan:

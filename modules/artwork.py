@@ -23,44 +23,51 @@ def art_url(raw: str, size: int = ART_SIZE) -> str:
     return re.sub(r"\d+x\d+bb", f"{size}x{size}bb", raw)
 
 
-async def search_itunes(artist: str, album: str, limit: int = 10) -> list[dict]:
-    query = f"{artist} {album}".strip()
-    params = {"term": query, "entity": "album", "attribute": "albumTerm", "limit": limit}
+async def _search(params: dict) -> list[dict]:
     headers = {"User-Agent": "Mozilla/5.0"}
     async with aiohttp.ClientSession(headers=headers) as session:
-        async with session.get(ITUNES_SEARCH, params=params) as resp:
+        async with session.get(ITUNES_SEARCH, params=params, headers=headers) as resp:
             if resp.status != 200:
                 return []
-            data = json.loads(await resp.text())
-            return data.get("results", [])
+            return json.loads(await resp.text()).get("results", [])
+
+
+async def search_itunes(artist: str, album: str) -> list[dict]:
+    # Primary: search by artistTerm only so iTunes filters to that artist's catalogue
+    results = await _search({
+        "term": artist,
+        "entity": "album",
+        "attribute": "artistTerm",
+        "limit": 25,
+    })
+    # If album specified, filter down; otherwise return as-is
+    if album and results:
+        a = normalize(album)
+        results.sort(
+            key=lambda r: difflib.SequenceMatcher(None, a, normalize(r.get("collectionName", ""))).ratio(),
+            reverse=True,
+        )
+    return results
 
 
 def best_match(artist: str, album: str, results: list[dict]) -> dict | None:
     if not results:
         return None
-
-    a_norm = normalize(artist)
-    b_norm = normalize(album)
-
-    scored = []
-    for r in results:
-        r_artist = normalize(r.get("artistName", ""))
-        r_album  = normalize(r.get("collectionName", ""))
-        artist_score = difflib.SequenceMatcher(None, a_norm, r_artist).ratio()
-        album_score  = difflib.SequenceMatcher(None, b_norm, r_album).ratio() if b_norm else 1.0
-        scored.append((artist_score + album_score, r))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    best_score, best = scored[0]
-    return best if best_score > 0.6 else None
+    # Top result is already the best artist+album match from search_itunes sort
+    r = results[0]
+    # Sanity: artist name should at least partially match
+    artist_ratio = difflib.SequenceMatcher(None, normalize(artist), normalize(r.get("artistName", ""))).ratio()
+    if artist_ratio < 0.3:
+        return None
+    return r
 
 
 def setup(bot):
 
     @bot.tree.command(name="artwork", description="Fetch high-resolution album artwork from Apple Music")
     @app_commands.describe(
-        artist="Artist name, e.g. 'Royce Da 5\\'9\"'",
-        album="Album name, e.g. 'Rock City' (optional — returns top album if omitted)",
+        artist="Artist name",
+        album="Album name (optional — returns top album if omitted)",
     )
     async def artwork_cmd(interaction: discord.Interaction, artist: str, album: str = ""):
         await interaction.response.defer(thinking=True)
@@ -74,8 +81,8 @@ def setup(bot):
 
         result = best_match(artist, album, results)
         if not result:
-            query_str = f"{artist} — {album}" if album else artist
-            await interaction.followup.send(f"No results found for **{query_str}**.")
+            label = f"{artist} — {album}" if album else artist
+            await interaction.followup.send(f"No results found for **{label}**.")
             return
 
         raw_art = result.get("artworkUrl100", "")

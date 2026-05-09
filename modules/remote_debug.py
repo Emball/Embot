@@ -100,6 +100,7 @@ class RemoteDebugServer:
         self._app.router.add_get("/config/{name}", self._handle_config)
         self._app.router.add_post("/update", self._handle_update)
         self._app.router.add_post("/restart", self._handle_restart)
+        self._app.router.add_post("/exec", self._handle_exec)
         self._app.middlewares.append(self._error_middleware)
 
     @web.middleware
@@ -454,6 +455,32 @@ class RemoteDebugServer:
         asyncio.create_task(self._delayed_restart())
         return web.json_response({"ok": True, "message": "Restarting..."})
 
+    async def _handle_exec(self, request):
+        if not self._check_auth(request) or not self._check_ip(request):
+            return self._fail()
+        try:
+            body = await request.json()
+        except Exception:
+            return self._fail("invalid JSON", 400)
+        cmd = body.get("cmd", "").strip()
+        if not cmd:
+            return self._fail("missing 'cmd'", 400)
+        timeout = min(int(body.get("timeout", 15)), 60)
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            return web.json_response({
+                "exit_code": proc.returncode,
+                "stdout": stdout.decode(errors="replace"),
+                "stderr": stderr.decode(errors="replace"),
+            })
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "timed out"}, status=504)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
     async def _delayed_restart(self):
         await asyncio.sleep(1)
         await self.bot.close()
@@ -513,9 +540,8 @@ def _load_client_config() -> dict:
     return cfg
 
 
-def _client_request(cfg, path, raw=False, method="GET"):
+def _client_request(cfg, path, raw=False, method="GET", data=None):
     url = cfg["url"].rstrip("/") + path
-    data = b"" if method == "POST" else None
     req = urllib.request.Request(url, data=data, method=method)
     if cfg["token"]:
         req.add_header("X-Debug-Token", cfg["token"])
@@ -646,6 +672,12 @@ def _wait_for_server(cfg, timeout=30):
     return False
 
 
+def _cmd_exec(cfg, cmd, timeout=15):
+    result = _client_request(cfg, "/exec", method="POST",
+                             data=json.dumps({"cmd": cmd, "timeout": timeout}).encode())
+    print(json.dumps(result, indent=2))
+
+
 def _cmd_update(cfg):
     result = _client_request(cfg, "/update", method="POST")
     print(json.dumps(result, indent=2))
@@ -697,6 +729,10 @@ def main():
     config_p = sub.add_parser("config", help="View a config file")
     config_p.add_argument("name", help="Config name (without .json)")
 
+    exec_p = sub.add_parser("exec", help="Run a shell command on the server")
+    exec_p.add_argument("cmd", help="Command to run")
+    exec_p.add_argument("--timeout", type=int, default=15, help="Timeout in seconds")
+
     sub.add_parser("update", help="Git pull and restart if updated")
     sub.add_parser("restart", help="Restart the bot")
 
@@ -725,6 +761,8 @@ def main():
         _cmd_db_query(run_cfg, args.name, args.query)
     elif args.command == "config":
         _cmd_config(run_cfg, args.name)
+    elif args.command == "exec":
+        _cmd_exec(run_cfg, args.cmd, args.timeout)
     elif args.command == "update":
         _cmd_update(run_cfg)
     elif args.command == "restart":

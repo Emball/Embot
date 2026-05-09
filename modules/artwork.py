@@ -8,6 +8,7 @@ from discord import app_commands
 MODULE_NAME = "ARTWORK"
 
 ITUNES_SEARCH = "https://itunes.apple.com/search"
+ITUNES_LOOKUP = "https://itunes.apple.com/lookup"
 ART_SIZE = 3600
 
 
@@ -69,12 +70,12 @@ def _rank_key(query: str, index: int, total: int, name: str) -> float:
 
 
 async def _artist_albums(session: aiohttp.ClientSession, name: str, artist_id: int) -> list[dict]:
-    params = {"term": name, "entity": "album", "attribute": "artistTerm", "limit": 50}
-    async with session.get(ITUNES_SEARCH, params=params) as resp:
+    params = {"id": artist_id, "entity": "album", "limit": 200}
+    async with session.get(ITUNES_LOOKUP, params=params) as resp:
         if resp.status != 200:
             return []
         results = json.loads(await resp.text()).get("results", [])
-    return [a for a in results if a.get("artistId") == artist_id]
+    return [a for a in results if a.get("artistId") == artist_id and a.get("wrapperType") == "collection"]
 
 
 async def search_itunes(artist: str, album: str) -> dict | None:

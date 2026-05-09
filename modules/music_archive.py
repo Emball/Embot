@@ -654,10 +654,7 @@ class ARCHIVEManager:
         if self._status_msg_id:
             try:
                 msg = await chan.fetch_message(self._status_msg_id)
-                await msg.edit(embed=embed)
-                return
-            except discord.NotFound:
-                self._status_msg_id = None
+                await msg.delete()
             except Exception:
                 pass
         msg = await chan.send(embed=embed)

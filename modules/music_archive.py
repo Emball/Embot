@@ -311,7 +311,7 @@ def _db_init() -> None:
         c.commit()
 
 def _cache_lookup(file_path: str) -> Optional[dict]:
-    key = str(Path(file_path).resolve())
+    key = str(Path(file_path))
     with _db_conn() as c:
         c.execute("UPDATE song_cache SET accessed_at=? WHERE file_path=?",
                   (_now().isoformat(), key))
@@ -321,7 +321,7 @@ def _cache_lookup(file_path: str) -> Optional[dict]:
 
 def _cache_store(file_path: str, cdn_url: str, message_id: str, channel_id: str,
                  file_name: str, file_size: int) -> None:
-    key = str(Path(file_path).resolve())
+    key = str(Path(file_path))
     now = _now().isoformat()
     with _db_conn() as c:
         c.execute(
@@ -488,28 +488,9 @@ class ARCHIVEManager:
                         seen.add(fp)
         total = len(seen)
 
-        pending = []
-        already_cached = 0
-        skipped = 0
-        for fp in sorted(seen):
-            try:
-                if _cache_lookup(fp):
-                    already_cached += 1
-                    continue
-                p = Path(fp)
-                if not p.exists():
-                    skipped += 1
-                    continue
-                sz = p.stat().st_size
-                if sz > max_bytes:
-                    self.bot.logger.log(MODULE_NAME,
-                        f"Skipping {p.name} ({sz // 1024 // 1024}MB exceeds {max_bytes // 1024 // 1024}MB limit)", "WARNING")
-                    skipped += 1
-                    continue
-                pending.append((fp, p, sz))
-            except Exception as exc:
-                self.bot.logger.log(MODULE_NAME, f"Backfill check error on {fp}: {exc}", "WARNING")
-                skipped += 1
+        loop = asyncio.get_running_loop()
+        pending, cached, _ = await loop.run_in_executor(
+            METADATA_EXECUTOR, self._scan_pending, list(seen), max_bytes)
 
         self.bot.logger.log(MODULE_NAME,
             f"Cache backfill: {len(pending)}/{total} files need upload "
@@ -522,7 +503,6 @@ class ARCHIVEManager:
                 color=0x2ecc71))
             return
 
-        cached = already_cached
         uploaded = 0
         errors = 0
         uploaded_bytes = 0
@@ -578,6 +558,25 @@ class ARCHIVEManager:
             f"Cache backfill complete: {uploaded} uploaded in {sent_batches} batch(es), "
             f"{cached} cached, {errors} errors")
 
+    def _scan_pending(self, seen, max_bytes):
+        pending = []
+        cached = 0
+        for fp in sorted(seen):
+            try:
+                if _cache_lookup(fp):
+                    cached += 1
+                    continue
+                p = Path(fp)
+                if not p.exists():
+                    continue
+                sz = p.stat().st_size
+                if sz > max_bytes:
+                    continue
+                pending.append((fp, p, sz))
+            except Exception:
+                pass
+        return pending, cached, len(seen) - len(pending) - cached
+
     async def _update_backfill_embed(self, chan, msg, start, total, cached, uploaded, errors, uploaded_bytes, total_bytes, current_name):
         elapsed = time.time() - start
         done = uploaded + cached
@@ -620,9 +619,11 @@ class ARCHIVEManager:
 
     async def _send_batch(self, chan, batch) -> bool:
         read_start = time.time()
+        loop = asyncio.get_running_loop()
         file_data = []
         for fp, p, sz in batch:
-            file_data.append((fp, p.name, p.read_bytes(), sz))
+            data = await loop.run_in_executor(METADATA_EXECUTOR, p.read_bytes)
+            file_data.append((fp, p.name, data, sz))
         read_elapsed = time.time() - read_start
         files = [discord.File(io.BytesIO(d), filename=n) for _, n, d, _ in file_data]
         total_mb = sum(sz for _, _, _, sz in file_data) // 1024 // 1024

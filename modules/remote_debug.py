@@ -672,6 +672,11 @@ def _wait_for_server(cfg, timeout=30):
     return False
 
 
+def _auto_tail(cfg, lines=30):
+    print(f"\n--- Last {lines} lines of startup log ---")
+    _cmd_logs(cfg, lines=lines)
+
+
 def _cmd_exec(cfg, cmd, timeout=15):
     result = _client_request(cfg, "/exec", method="POST",
                              data=json.dumps({"cmd": cmd, "timeout": timeout}).encode())
@@ -683,11 +688,13 @@ def _cmd_update(cfg):
     print(json.dumps(result, indent=2))
     if result.get("restarting"):
         _wait_for_server(cfg)
+        _auto_tail(cfg)
 
 
 def _cmd_restart(cfg):
     print(json.dumps(_client_request(cfg, "/restart", method="POST"), indent=2))
     _wait_for_server(cfg)
+    _auto_tail(cfg)
 
 
 def main():

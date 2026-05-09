@@ -2,7 +2,7 @@ import asyncio
 import aiohttp
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import tasks
 from collections import Counter
 import os
 import random
@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import threading
-from typing import Optional, List, Tuple
+from typing import Optional, List
 from _utils import script_dir, _now
 
 MODULE_NAME = "VMS"
@@ -641,7 +641,7 @@ def setup(bot):
     global _ext_queue, _ext_pending_lock, _ext_worker_task
 
     from vms_transcribe import (
-        _whisper_mgr, WHISPER_MODEL_SIZE, load_whisper,
+        _whisper_mgr, WHISPER_MODEL_SIZE,
         transcribe_with_model, process_file_sync, BulkProcessor,
     )
     from vms_storage import (

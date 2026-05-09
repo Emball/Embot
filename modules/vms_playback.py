@@ -1,12 +1,11 @@
 import aiohttp
-import discord
 import random
 import re
 import time
 from pathlib import Path
 from typing import Optional, Tuple, List
 from vms_core import (
-    MODULE_NAME, GENERAL_CHANNEL_NAME,
+    MODULE_NAME,
 )
 from vms_transcribe import generate_waveform, STOP_WORDS
 
@@ -256,6 +255,7 @@ def recent_messages(manager, guild_id: str, channel_id: str, limit: int = 20) ->
             return [m.get('content', '') for m in msgs[-limit:] if m.get('content')]
     except Exception:
         pass
+    return []
 
 
 def setup(bot):

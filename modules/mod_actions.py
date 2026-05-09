@@ -1,14 +1,13 @@
 import discord
-import re
 from datetime import datetime, timedelta
 from typing import Optional
 from _utils import _now
 from mod_core import (
-    MODULE_NAME, ModContext, ModConfig,
-    ERROR_NO_PERMISSION, ERROR_REASON_REQUIRED,
+    MODULE_NAME, ModContext,
+    ERROR_NO_PERMISSION,
     ERROR_CANNOT_ACTION_SELF, ERROR_CANNOT_ACTION_BOT, ERROR_HIGHER_ROLE,
     has_elevated_role, has_owner_role, validate_reason, parse_duration,
-    _parse_fake_suffix, get_event_logger,
+    get_event_logger,
 )
 from mod_rules import RulesManager
 from mod_appeals import BanAppealView

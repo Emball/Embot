@@ -5,7 +5,6 @@ from discord import HTTPException
 import os
 import sys
 import traceback
-import time
 from datetime import datetime
 import importlib
 import argparse

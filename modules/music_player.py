@@ -166,14 +166,11 @@ class MusicPlayer:
                     queue_items.append(self.queue.get_nowait())
                 except asyncio.QueueEmpty:
                     break
-            try:
-                if queue_items:
-                    next_song = queue_items[0]
-                    embed.add_field(name="Next Up", value=next_song.title, inline=False)
-            finally:
-                for item in queue_items:
-                    await self.queue.put(item)
+            if queue_items:
+                next_song = queue_items[0]
                 embed.add_field(name="Next Up", value=next_song.title, inline=False)
+            for item in queue_items:
+                await self.queue.put(item)
 
         embed.set_footer(text=f"Loop: {'🔁 ON' if self.loop else '⏹ OFF'} | Queue: {self.queue.qsize()}")
 
@@ -319,7 +316,7 @@ def setup(bot):
 
         voice_channel = interaction.user.voice.channel
 
-        if not hasattr(bot, 'archive_manager') or not bot.archive_manager.song_index_ready.is_set():
+        if not hasattr(bot, 'archive_manager') or not bot.ARCHIVE_manager.song_index_ready.is_set():
             await interaction.response.send_message(
                 "Music index not ready—please try again shortly.",
                 ephemeral=True
@@ -330,7 +327,7 @@ def setup(bot):
         await interaction.response.defer(thinking=True)
         bot.logger.log(MODULE_NAME, f"Play command: '{song_name}' (Format: {format}, Version: {version})")
 
-        key = find_best_match(bot.archive_manager.song_index, format, song_name)
+        key = find_best_match(bot.ARCHIVE_manager.song_index, format, song_name)
         if not key:
             await interaction.followup.send(
                 f"Song not found: '{song_name}' in {format}",
@@ -339,7 +336,7 @@ def setup(bot):
             bot.logger.log(MODULE_NAME, f"Song not found: '{song_name}'", "WARNING")
             return
 
-        candidates = bot.archive_manager.song_index[format][key]
+        candidates = bot.ARCHIVE_manager.song_index[format][key]
         best = select_best_candidate(candidates, version)
 
         if not best:

@@ -3,7 +3,6 @@ import discord
 from discord.ext import commands
 from pathlib import Path
 from datetime import datetime, timezone
-import json
 import sqlite3
 import asyncio
 from _utils import script_dir, _now

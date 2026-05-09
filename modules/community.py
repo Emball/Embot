@@ -3,11 +3,9 @@ import discord
 from discord.ext import tasks
 from discord import app_commands
 import sqlite3
-import asyncio
 import hashlib
 import re
 import json
-import uuid
 import random
 import string
 import threading
@@ -37,7 +35,7 @@ GENERAL_CHANNEL_NAME   = "general"
 
 VOTE_EMOJIS: dict[str, int] = {
     "🔥": 5,
-    "⭐": 10,
+
     "😐": 0,
     "🗑️": -5,
 }
@@ -327,24 +325,12 @@ class CommunityDB:
                 "SELECT * FROM submissions WHERE message_id=? AND is_deleted=0", (message_id,)
             ).fetchone()
 
-    def by_id(self, sub_id: str) -> Optional[sqlite3.Row]:
-        with self._conn() as c:
-            return c.execute("SELECT * FROM submissions WHERE id=?", (sub_id,)).fetchone()
-
     def by_group(self, group_id: str) -> List[sqlite3.Row]:
         with self._conn() as c:
             return c.execute(
                 "SELECT * FROM submissions WHERE group_id=? ORDER BY version_major, version_minor",
                 (group_id,)
             ).fetchall()
-
-    def current_in_group(self, group_id: str) -> Optional[sqlite3.Row]:
-        with self._conn() as c:
-            return c.execute(
-                "SELECT * FROM submissions WHERE group_id=? AND is_current=1 AND is_deleted=0 "
-                "ORDER BY version_major DESC, version_minor DESC LIMIT 1",
-                (group_id,)
-            ).fetchone()
 
     def find_existing(self, user_id: int, norm: str) -> Optional[sqlite3.Row]:
         with self._conn() as c:
@@ -515,19 +501,6 @@ class CommunityDB:
                 except Exception:
                     pass
             return None
-
-    def merge_groups(self, keep: str, drop: str):
-        if keep == drop:
-            return
-        with self._conn() as c:
-            c.execute("UPDATE submissions SET group_id=? WHERE group_id=?", (keep, drop))
-            c.execute("""
-                DELETE FROM votes WHERE group_id=? AND user_id IN (
-                    SELECT user_id FROM votes WHERE group_id=?
-                )
-            """, (drop, keep))
-            c.execute("UPDATE votes SET group_id=? WHERE group_id=?", (keep, drop))
-            c.commit()
 
     def get_checkable_submissions(self, limit: int = 50) -> List[sqlite3.Row]:
         cutoff = (_now() - timedelta(days=VERSION_REENTRY_DAYS)).isoformat()

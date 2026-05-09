@@ -1,9 +1,7 @@
 import discord
-from discord.ext import commands
 from discord import app_commands
 from typing import Optional
 import json
-import os
 from pathlib import Path
 
 MODULE_NAME = "LINKS"

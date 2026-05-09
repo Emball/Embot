@@ -1,8 +1,7 @@
 import discord
 from discord.ext import tasks
 import os
-from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
 
 MODULE_NAME = "ICONS"
@@ -54,7 +53,6 @@ class IconManager:
         self.default_icon = 'Emball_Pit.png'
         self.current_icon = None
         self._last_avatar_change: datetime | None = None
-        _AVATAR_CHANGE_COOLDOWN_MINUTES = 65
 
     def should_use_icon(self, icon_name, now_est):
         config = self.icon_schedule.get(icon_name)

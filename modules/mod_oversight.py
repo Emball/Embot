@@ -2,7 +2,7 @@ import discord
 from discord import ui
 import json
 import io
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, Dict
 from _utils import _now
 from mod_core import (

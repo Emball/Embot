@@ -11,7 +11,6 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import ssl
-from pathlib import Path
 from datetime import datetime
 import time
 from aiohttp import web

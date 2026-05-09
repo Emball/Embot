@@ -42,12 +42,6 @@ class EventLogger:
             elif file:
                 kwargs["file"] = file
             msg = await channel.send(**kwargs)
-            mod_sys = getattr(self.bot, '_mod_system', None)
-            if mod_sys and hasattr(mod_sys, '_register_bot_log'):
-                try:
-                    mod_sys._register_bot_log(msg.id, f"LOG-{msg.id}", embed)
-                except Exception:
-                    pass
             return msg.id
         except discord.Forbidden:
             self.bot.logger.error(MODULE_NAME, f"No permission to send logs to {channel.name}")
@@ -262,12 +256,6 @@ class EventLogger:
         embed.set_footer(text=f"ID: {member.id}")
 
         await self.log_to_channel(channel, embed)
-
-    async def log_member_ban(self, guild, user):
-        pass
-
-    async def log_member_unban(self, guild, user):
-        pass
 
     async def log_member_update(self, before, after):
         guild = after.guild
@@ -638,20 +626,6 @@ class EventLogger:
         embed.add_field(name="Channel", value=action_channel.mention, inline=True)
         return await self.log_to_channel(channel, embed)
 
-    async def log_unban(self, guild: discord.Guild, user: discord.User,
-                        moderator: discord.Member, reason: str) -> Optional[int]:
-        channel = self.get_bot_logs_channel(guild)
-        embed = discord.Embed(
-            title="User Unbanned",
-            description=f"{user.mention} was unbanned from the server.",
-            color=0x2ecc71,
-            timestamp=_now()
-        )
-        embed.set_thumbnail(url=user.display_avatar.url)
-        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
-        embed.add_field(name="Reason", value=reason, inline=False)
-        return await self.log_to_channel(channel, embed)
-
     async def log_kick(self, guild: discord.Guild, member: discord.Member,
                        moderator: discord.Member, reason: str,
                        action_channel: discord.TextChannel) -> Optional[int]:
@@ -769,43 +743,6 @@ class EventLogger:
         embed.add_field(name="Channel", value=locked_channel.mention, inline=True)
         return await self.log_to_channel(channel, embed)
 
-    async def log_autoban(self, guild: discord.Guild, user: discord.User,
-                          reason: str, trigger_channel: discord.TextChannel) -> None:
-        channel = self.get_bot_logs_channel(guild)
-        embed = discord.Embed(
-            title="AUTO-BAN",
-            description=f"{user.mention} was automatically banned.",
-            color=0xdc143c,
-            timestamp=_now()
-        )
-        embed.set_thumbnail(url=user.display_avatar.url)
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Channel", value=trigger_channel.mention, inline=True)
-        await self.log_to_channel(channel, embed)
-
-    async def log_autoban_strike(self, guild: discord.Guild, user: discord.User,
-                                 strike_count: int, reason: str,
-                                 trigger_channel: discord.TextChannel) -> None:
-        channel = self.get_bot_logs_channel(guild)
-        if strike_count >= 2:
-            embed = discord.Embed(
-                title="AUTO-BAN: Repeated Violation",
-                description=f"{user.mention} was automatically banned after {strike_count} strikes.",
-                color=0xdc143c,
-                timestamp=_now()
-            )
-        else:
-            embed = discord.Embed(
-                title=f"Auto-Mod Strike {strike_count}/2",
-                description=f"{user.mention} received a strike.",
-                color=0xf39c12,
-                timestamp=_now()
-            )
-        embed.set_thumbnail(url=user.display_avatar.url)
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Channel", value=trigger_channel.mention, inline=True)
-        await self.log_to_channel(channel, embed)
-
 def setup(bot):
 
     event_logger = EventLogger(bot)
@@ -838,14 +775,6 @@ def setup(bot):
     @bot.listen()
     async def on_member_remove(member):
         await event_logger.log_member_leave(member)
-
-    @bot.listen()
-    async def on_member_ban(guild, user):
-        await event_logger.log_member_ban(guild, user)
-
-    @bot.listen()
-    async def on_member_unban(guild, user):
-        await event_logger.log_member_unban(guild, user)
 
     @bot.listen()
     async def on_member_update(before, after):

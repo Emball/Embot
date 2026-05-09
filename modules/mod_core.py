@@ -1,11 +1,10 @@
 import discord
-from discord import app_commands, ui
-from discord.ext import commands, tasks
+from discord import app_commands
+from discord.ext import tasks
 import re
 import json
 import os
 import sys
-import uuid
 import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -376,10 +375,6 @@ class ModConfig:
         return self.get("muted_role_name", "Muted")
 
     @property
-    def report_time_cst(self) -> str:
-        return self.get("report_time_cst", "00:00")
-
-    @property
     def context_message_count(self) -> int:
         return self.get_int("context_message_count", 30)
 
@@ -389,20 +384,6 @@ class ModConfig:
 
     def get_elevated_roles(self) -> List[str]:
         return list(self._data.get("elevated_roles", []))
-
-    def add_elevated_role(self, role_name: str) -> None:
-        roles = self.get_elevated_roles()
-        if role_name not in roles:
-            roles.append(role_name)
-            self._data["elevated_roles"] = roles
-            _save_config(self._data)
-
-    def remove_elevated_role(self, role_name: str) -> None:
-        roles = self.get_elevated_roles()
-        if role_name in roles:
-            roles.remove(role_name)
-            self._data["elevated_roles"] = roles
-            _save_config(self._data)
 
     def get_rules(self) -> Optional[dict]:
         rules = self._data.get("rules")
@@ -461,9 +442,6 @@ def _is_default_avatar(member: discord.Member) -> bool:
     return "/embed/avatars/" in url or "/assets/" in url and "a_" not in url
 
 _cfg: Optional[ModConfig] = None
-
-def is_mod(member: discord.Member) -> bool:
-    return has_elevated_role(member, _cfg)
 
 def is_owner(member: discord.Member) -> bool:
     return has_owner_role(member, _cfg)
@@ -677,12 +655,6 @@ class ModerationSystem:
             (str(guild_id), str(user_id)),
         )
 
-    def is_muted(self, guild_id, user_id) -> bool:
-        row = self._one(
-            "SELECT 1 FROM mod_mutes WHERE guild_id=? AND user_id=?",
-            (str(guild_id), str(user_id)))
-        return row is not None
-
     def get_expired_mutes(self) -> list:
         now  = _now().isoformat()
         rows = self._all(
@@ -781,10 +753,6 @@ class ModerationSystem:
         start = max(0, target_idx - half)
         end   = min(len(messages), target_idx + half + 1)
         return messages[start:end]
-
-    async def submit_appeal(self, user_id: int, guild_id: int, appeal_text: str):
-        from mod_appeals import appeal_submit
-        return await appeal_submit(self, user_id, guild_id, appeal_text)
 
     @tasks.loop(minutes=1)
     async def check_expired_mutes(self):
@@ -912,7 +880,7 @@ def setup(bot):
     _self._cfg = mod_system.cfg
 
     from mod_appeals import BanAppealView, AppealVoteView
-    from mod_oversight import ActionReviewView, action_row_to_dict, action_get_pending
+    from mod_oversight import ActionReviewView, action_row_to_dict
     from mod_actions import (
         _do_ban, _do_unban, _do_kick, _do_timeout, _do_untimeout,
         _do_mute, _do_unmute, _do_softban,

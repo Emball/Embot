@@ -2,9 +2,9 @@ import asyncio
 import discord
 import time
 from datetime import datetime
-from typing import Optional, Tuple, List
+from typing import Optional
 from vms_core import (
-    MODULE_NAME, GENERAL_CHANNEL_NAME, EMBALL_GUILD_ID,
+    MODULE_NAME, GENERAL_CHANNEL_NAME,
     _vms_dir, _archive_dir, _broken_dir,
     _vm_canonical_name, _rename_to_canonical, _parse_vm_filename,
 )

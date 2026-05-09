@@ -53,11 +53,11 @@ Quota is limited. Minimize tool calls and response length. Complete tasks fully 
 - GitHub token lives in the auth file inside the project (`config/auth.json`).
 - Version format: `MAJOR.MINOR.PATCH.MICRO` (e.g. `34.4.0.4`).
 - The agent handles all versioning and git operations automatically.
-- Version increment thresholds (based on total lines changed since last version bump commit):
-  - `>= 500` lines → **MAJOR** bump (M.m.p.m)
-  - `>= 100` lines → **minor** bump (m.M.p.m)
-  - `>= 20` lines → **patch** bump (m.m.P.m)
-  - `>= 1` lines → **micro** bump (m.m.p.M)
+- Version.py increment thresholds (based on total lines changed since last version bump commit):
+  - `>= 300-500` lines → **MAJOR** bump (M.m.p.m)
+  - `>= 100-150` lines → **minor** bump (m.M.p.m)
+  - `>= 20-50` lines → **patch** bump (m.m.P.m)
+  - `>= 1-5` lines → **micro** bump (m.m.p.M)
 - Increment the version file on every change.
 - Commit message = version number only.
 - Ensure the .gitignore file is up to date and you do not track files that shouldn't be pushed.

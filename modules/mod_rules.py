@@ -53,12 +53,6 @@ class RulesManager:
                 return f"**Rule {rule['number']} - {rule['title']}**: {rule['description']}"
         return None
 
-    def list_rules_summary(self) -> list:
-        data = self.load_rules()
-        if not data:
-            return []
-        return [f"Rule {r['number']} - {r['title']}" for r in data.get("rules", [])]
-
     def build_embed(self, data: dict) -> discord.Embed:
         color = data.get("color", 0x3498db)
         embed = discord.Embed(

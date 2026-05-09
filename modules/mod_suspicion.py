@@ -2,13 +2,12 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import json
-from typing import Optional
 from _utils import _now
 from mod_core import (
     MODULE_NAME, _db_exec, _db_one, _db_all,
     SUSPICION_THRESHOLD, SIGNAL_WEIGHTS, _THROWAWAY_PATTERNS,
     _is_default_avatar, has_elevated_role, has_owner_role,
-    ModConfig, ERROR_NO_PERMISSION, ERROR_CANNOT_ACTION_SELF,
+    ERROR_NO_PERMISSION, ERROR_CANNOT_ACTION_SELF,
 )
 
 _suspicion_engine: "SuspicionEngine | None" = None

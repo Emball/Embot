@@ -11,9 +11,9 @@ from discord.ext import tasks
 MODULE_NAME = "YOUTUBE"
 
 CONFIG_DEFAULTS = {
-    "channel_id": "",          # Emball YouTube channel ID
-    "announce_channel_id": 0,  # Discord channel to post in
-    "announce_role_id": 0,     # Role ID to ping
+    "channel_id": "",
+    "announce_channel_id": 0,
+    "announce_role_id": 0,
     "last_video_id": "",
     "poll_interval_minutes": 5,
     "max_ogg_size_mb": 25,
@@ -54,14 +54,25 @@ async def run_yt_dlp(*args):
     stdout, stderr = await proc.communicate()
     return proc.returncode, stdout.decode(), stderr.decode()
 
+async def update_yt_dlp():
+    proc = await asyncio.create_subprocess_exec(
+        "yt-dlp", "-U",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await proc.communicate()
+
 async def extract_ogg(url: str, out_dir: str) -> tuple[str | None, str | None]:
-    """Download and extract opus stream as .ogg. Returns (filepath, error)."""
+    """Update yt-dlp then download opus stream as .ogg. Returns (filepath, error)."""
+    await update_yt_dlp()
     out_template = os.path.join(out_dir, "%(title)s.%(ext)s")
     code, stdout, stderr = await run_yt_dlp(
         "-x",
         "--audio-format", "opus",
         "--audio-quality", "0",
         "--embed-thumbnail",
+        "--extractor-retries", "3",
+        "--no-check-certificates",
         "-o", out_template,
         "--no-playlist",
         url,
@@ -69,9 +80,8 @@ async def extract_ogg(url: str, out_dir: str) -> tuple[str | None, str | None]:
     if code != 0:
         return None, stderr.strip()
     for f in os.listdir(out_dir):
-        if f.endswith(".opus") or f.endswith(".ogg") or f.endswith(".webm"):
+        if f.endswith((".opus", ".ogg", ".webm")):
             path = os.path.join(out_dir, f)
-            # Rename to .ogg if needed
             if not f.endswith(".ogg"):
                 new_path = os.path.join(out_dir, Path(f).stem + ".ogg")
                 os.rename(path, new_path)
@@ -80,13 +90,14 @@ async def extract_ogg(url: str, out_dir: str) -> tuple[str | None, str | None]:
     return None, "No output file found after download."
 
 async def get_latest_video(channel_id: str) -> tuple[str | None, str | None, str | None]:
-    """Returns (video_id, title, url) of the latest upload."""
+    """Returns (video_id, title, url) of latest upload."""
     code, stdout, stderr = await run_yt_dlp(
         f"https://www.youtube.com/channel/{channel_id}/videos",
         "--flat-playlist",
         "--playlist-end", "1",
         "--print", "%(id)s|%(title)s",
         "--no-warnings",
+        "--no-check-certificates",
     )
     if code != 0 or not stdout.strip():
         return None, None, None
@@ -99,7 +110,6 @@ async def get_latest_video(channel_id: str) -> tuple[str | None, str | None, str
 def setup(bot):
     cfg = load_config()
 
-    # --- /youtube command ---
     @bot.tree.command(name="youtube", description="Extract and deliver opus audio from a YouTube link as .ogg")
     @app_commands.describe(url="YouTube video URL")
     async def youtube_cmd(interaction: discord.Interaction, url: str):
@@ -131,7 +141,6 @@ def setup(bot):
                 file=discord.File(filepath, filename=filename),
             )
 
-    # --- /youtube_setup command ---
     @bot.tree.command(name="youtube_setup", description="[Owner only] Configure YouTube notification settings")
     @app_commands.describe(
         channel_id="Emball YouTube channel ID",
@@ -179,7 +188,6 @@ def setup(bot):
                 f"• Poll interval: {cfg['poll_interval_minutes']}m"
             )
 
-    # --- Background notification poller ---
     @tasks.loop(minutes=cfg.get("poll_interval_minutes", 5))
     async def notify_task():
         nonlocal cfg
@@ -208,9 +216,7 @@ def setup(bot):
             return
 
         role_mention = f"<@&{role_id}>" if role_id else ""
-        await channel.send(
-            f"{role_mention} Emball just released a new video. Check it out: {url}"
-        )
+        await channel.send(f"{role_mention} Emball just released a new video. Check it out: {url}")
         bot.logger.log(MODULE_NAME, f"Announced new video: {title} ({vid_id})")
 
     @notify_task.before_loop

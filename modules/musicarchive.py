@@ -409,7 +409,7 @@ async def _deliver_song(bot, interaction: discord.Interaction, candidate: dict) 
 
 def _is_fed(interaction: discord.Interaction) -> bool:
     try:
-        from modsuspicion import is_flagged as _check
+        from mod_suspicion import is_flagged as _check
         if interaction.guild:
             return _check(str(interaction.guild.id), str(interaction.user.id))
     except Exception:
@@ -806,7 +806,7 @@ def setup(bot):
 
     @bot.tree.command(name="rebuild_index", description="[Owner only] Rebuild the song index cache")
     async def rebuild_index(interaction: discord.Interaction):
-        from modcore import is_owner
+        from mod_core import is_owner
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return

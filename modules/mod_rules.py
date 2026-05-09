@@ -4,7 +4,7 @@ import json
 from typing import Optional
 import asyncio
 from _utils import _now
-from modcore import _db_one, _db_exec, ModConfig
+from mod_core import _db_one, _db_exec, ModConfig
 
 
 class RulesManager:

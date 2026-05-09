@@ -3,16 +3,16 @@ import re
 from datetime import datetime, timedelta
 from typing import Optional
 from _utils import _now
-from modcore import (
+from mod_core import (
     MODULE_NAME, ModContext, ModConfig,
     ERROR_NO_PERMISSION, ERROR_REASON_REQUIRED,
     ERROR_CANNOT_ACTION_SELF, ERROR_CANNOT_ACTION_BOT, ERROR_HIGHER_ROLE,
     has_elevated_role, has_owner_role, validate_reason, parse_duration,
     _parse_fake_suffix, get_event_logger,
 )
-from modrules import RulesManager
-from modappeals import BanAppealView
-from modoversight import action_log, embed_track, action_resolve_pending, send_cached_media_to_logs
+from mod_rules import RulesManager
+from mod_appeals import BanAppealView
+from mod_oversight import action_log, embed_track, action_resolve_pending, send_cached_media_to_logs
 
 
 async def _do_ban(ctx: ModContext, ms, user: discord.User, reason: str = None,

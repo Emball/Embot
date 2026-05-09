@@ -60,15 +60,18 @@ Each module exposes `setup(bot)` — called during boot. Private `_*.py` files a
 |---|---|
 | `musicarchive.py` | Eminem music archive — scans FLAC/MP3, SQLite index, CDN cache channel |
 | `community.py` | Submission tracking (#projects/#artwork), voting, Spotlight Friday, SQLite-backed |
-| `modcore.py` | Moderation core: DB, config, auth helpers, ModContext, ModerationSystem, setup() |
-| `modactions.py` | Mod action functions: ban, kick, mute, warn, purge, lock, slowmode, etc. |
-| `modappeals.py` | Ban appeal views, modal, voting, appeal lifecycle |
-| `modoversight.py` | Action review, bot-log monitoring, daily integrity reports, embed tracking |
-| `modrules.py` | RulesManager — sync/display server rules |
-| `modsuspicion.py` | Suspicion engine: /fedcheck, /fedflag, /fedclear, /fedscan, /fedinvites |
+| `mod_core.py` | Moderation core: DB, config, auth helpers, ModContext, ModerationSystem, setup() |
+| `mod_actions.py` | Mod action functions: ban, kick, mute, warn, purge, lock, slowmode, etc. |
+| `mod_appeals.py` | Ban appeal views, modal, voting, appeal lifecycle |
+| `mod_oversight.py` | Action review, bot-log monitoring, daily integrity reports, embed tracking |
+| `mod_rules.py` | RulesManager — sync/display server rules |
+| `mod_suspicion.py` | Suspicion engine: /fedcheck, /fedflag, /fedclear, /fedscan, /fedinvites |
 | `logger.py` | Event logging — 17 Discord event types to join-logs/bot-logs channels |
 | `musicplayer.py` | Voice music playback — queue, FFmpeg, YouTube/SoundCloud, vote-skip |
-| `vms.py` | Voice Message System — OGG transcription via Whisper, SQLite, archiving |
+| `vms_core.py` | VMS core: shared defs, VMSManager, setup() with commands/listeners, stats embed, external queue |
+| `vms_transcribe.py` | OGG transcription via Whisper, waveform gen, bulk processing |
+| `vms_storage.py` | VM scan/conform, archival, backfill, purge |
+| `vms_playback.py` | VM selection (contextual/random), Discord CDN upload, counters, ping cooldown |
 | `dev.py` | Dev mode only (`-dev`): auto-versioning, auto-commit/push, dev console commands |
 | `starboard.py` | Dyno-style starboard — config-driven, no slash commands |
 | `icons.py` | Holiday icon rotation — date-based server icon + bot avatar changes |
@@ -80,12 +83,12 @@ Each module exposes `setup(bot)` — called during boot. Private `_*.py` files a
 
 ### Cross-Module Dependencies
 
-- `modcore.py` provides `is_owner()` used by musicarchive, community, links, logger (lazy imports inside handlers).
-- `modsuspicion.py` provides `is_flagged()` used by musicarchive (lazy import inside handler).
-- `modcore.setup()` is the central hub — creates `ModerationSystem`, imports and wires all other mod modules, registers commands and listeners.
+- `mod_core.py` provides `is_owner()` used by musicarchive, community, links, logger (lazy imports inside handlers).
+- `mod_suspicion.py` provides `is_flagged()` used by musicarchive (lazy import inside handler).
+- `mod_core.setup()` is the central hub — creates `ModerationSystem`, imports and wires all other mod modules, registers commands and listeners.
 - Modules attach themselves to `bot` via attributes (e.g. `bot.ARCHIVE_manager`, `bot._mod_system`, `bot._community_system`).
 - `bot.logger` (ConsoleLogger) is available to all modules — set by `Embot.py`.
-- `_utils.py` provides `atomic_json_write()` shared by links, logger, youtube; `migrate_config()` used by moderation, youtube, dev, starboard, logger, musicarchive; `script_dir()` used by every module; `_now()` used by moderation, logger, starboard, vms, musicarchive, dev, community.
+- `_utils.py` provides `atomic_json_write()` shared by links, logger, youtube; `migrate_config()` used by moderation, youtube, dev, starboard, logger, musicarchive; `script_dir()` used by every module; `_now()` used by moderation, logger, starboard, vms_core, musicarchive, dev, community.
 
 ### Startup Flow
 

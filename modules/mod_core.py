@@ -751,7 +751,7 @@ class ModerationSystem:
         return messages[start:end]
 
     async def submit_appeal(self, user_id: int, guild_id: int, appeal_text: str):
-        from modappeals import appeal_submit
+        from mod_appeals import appeal_submit
         return await appeal_submit(self, user_id, guild_id, appeal_text)
 
     @tasks.loop(minutes=1)
@@ -839,7 +839,7 @@ class ModerationSystem:
     @tasks.loop(hours=24)
     async def send_daily_report(self):
         try:
-            from modoversight import generate_daily_report
+            from mod_oversight import generate_daily_report
             await generate_daily_report(self)
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to send daily report", e)
@@ -858,7 +858,7 @@ class ModerationSystem:
     @tasks.loop(minutes=1)
     async def resolve_expired_appeals(self):
         try:
-            from modappeals import resolve_expired_appeals_task
+            from mod_appeals import resolve_expired_appeals_task
             await resolve_expired_appeals_task(self)
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Error in appeal resolution task", e)
@@ -869,7 +869,7 @@ class ModerationSystem:
 
 
 def setup(bot):
-    import modcore as _self
+    import mod_core as _self
 
     mod_system = ModerationSystem(bot)
     bot._mod_system        = mod_system
@@ -879,16 +879,16 @@ def setup(bot):
 
     _self._cfg = mod_system.cfg
 
-    from modappeals import BanAppealView, BanAppealModal, AppealVoteView, appeal_get
-    from modoversight import ActionReviewView, action_row_to_dict, action_get_pending
-    from modactions import (
+    from mod_appeals import BanAppealView, BanAppealModal, AppealVoteView, appeal_get
+    from mod_oversight import ActionReviewView, action_row_to_dict, action_get_pending
+    from mod_actions import (
         _do_ban, _do_unban, _do_kick, _do_timeout, _do_untimeout,
         _do_mute, _do_unmute, _do_softban,
         _do_warn, _do_warnings, _do_clearwarnings,
         _do_purge, _do_slowmode, _do_lock, _do_unlock,
     )
-    from modrules import RulesManager
-    from modsuspicion import _setup_suspicion
+    from mod_rules import RulesManager
+    from mod_suspicion import _setup_suspicion
 
     bot.add_view(BanAppealView(guild_id=0))
     for appeal_row in mod_system._all("SELECT appeal_id FROM mod_appeals WHERE status='pending'"):
@@ -1247,7 +1247,7 @@ def setup(bot):
             return
         await interaction.response.send_message("Generating report...", ephemeral=True)
         try:
-            from modoversight import generate_daily_report
+            from mod_oversight import generate_daily_report
             await generate_daily_report(mod_system)
         except Exception as e:
             bot.logger.error(MODULE_NAME, "Manual report generation failed", e)
@@ -1260,7 +1260,7 @@ def setup(bot):
 
     @bot.listen()
     async def on_message_delete(message):
-        from modoversight import embed_handle_deletion, handle_bot_log_deletion, bot_logs_channel
+        from mod_oversight import embed_handle_deletion, handle_bot_log_deletion, bot_logs_channel
         await embed_handle_deletion(mod_system, message.id)
 
         if not message.guild:
@@ -1304,7 +1304,7 @@ def setup(bot):
                         text="Deleting this message will cause it to repost again.")
                     try:
                         new_warn_msg = await bot_logs_ch.send(embed=warning_embed)
-                        from modoversight import log_bot_register
+                        from mod_oversight import log_bot_register
                         log_bot_register(
                             mod_system, new_warn_msg.id, f"WARN-{original_log_id}",
                             warning_embed, is_warning=True,
@@ -1419,7 +1419,7 @@ def setup(bot):
                     inline=False)
                 embed.set_footer(
                     text=f"Author: {after.author.id} | Message ID: {after.id}")
-                from modoversight import send_bot_log
+                from mod_oversight import send_bot_log
                 await send_bot_log(mod_system, after.guild, embed)
             return
 
@@ -1440,7 +1440,7 @@ def setup(bot):
 
         if image_files and not other_files:
             embed.set_image(url=f"attachment://{image_files[0]['filename']}")
-            from modoversight import send_bot_log
+            from mod_oversight import send_bot_log
             await send_bot_log(mod_system, after.guild, embed, files_data=removed_files)
         elif other_files:
             has_audio = any(f['filename'].lower().endswith(audio_exts) for f in other_files)
@@ -1453,10 +1453,10 @@ def setup(bot):
                     for f in removed_files
                 ]
                 await bot_logs_ch.send(files=discord_files)
-            from modoversight import send_bot_log
+            from mod_oversight import send_bot_log
             await send_bot_log(mod_system, after.guild, embed)
         else:
-            from modoversight import send_bot_log
+            from mod_oversight import send_bot_log
             await send_bot_log(mod_system, after.guild, embed, files_data=removed_files)
 
     @bot.listen()

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict
 from collections import deque
 from _utils import _now
-from modcore import (
+from mod_core import (
     MODULE_NAME, ModConfig, _db_exec, _db_one, _db_all,
     has_elevated_role, get_event_logger,
 )

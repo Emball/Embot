@@ -4,10 +4,10 @@ import json
 from datetime import timedelta
 from typing import Optional
 from _utils import _now
-from modcore import (
+from mod_core import (
     MODULE_NAME, ModConfig, _db_exec, _db_one, _db_all, has_elevated_role,
 )
-from modoversight import send_bot_log, _create_ban_reversal_invite
+from mod_oversight import send_bot_log, _create_ban_reversal_invite
 
 
 class BanAppealView(ui.View):

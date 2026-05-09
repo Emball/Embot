@@ -506,6 +506,8 @@ def setup(bot):
             await interaction.followup.send(f"{msg} not found.", ephemeral=True)
             return
         bot.logger.log(MODULE_NAME, f"Delivering: {best['original_title']}")
+        if not _cache_lookup(best['path']):
+            await interaction.followup.send("Uploading to cache (first time, may be slow)...", ephemeral=True)
         await _deliver_song(bot, interaction, best)
         await _log_delivery(bot, interaction.user, best, source="slash command")
 

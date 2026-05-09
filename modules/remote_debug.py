@@ -67,6 +67,8 @@ class RemoteDebugServer:
         self._app.router.add_get("/db/{name}", self._handle_db_download)
         self._app.router.add_get("/db/{name}/query", self._handle_db_query)
         self._app.router.add_get("/config/{name}", self._handle_config)
+        self._app.router.add_post("/update", self._handle_update)
+        self._app.router.add_post("/restart", self._handle_restart)
         self._app.middlewares.append(self._error_middleware)
 
     @web.middleware
@@ -220,6 +222,42 @@ class RemoteDebugServer:
             return web.json_response(data)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_update(self, request):
+        if not self._check_auth(request) or not self._check_ip(request):
+            return self._fail()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "-c", "credential.helper=", "pull", "--ff-only", "origin", "main",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env={"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"},
+            )
+            stdout, stderr = await proc.communicate()
+            out = stdout.decode().strip()
+            err = stderr.decode().strip()
+            if proc.returncode == 0:
+                if "Already up to date" in out or "already up to date" in out:
+                    return web.json_response({"updated": False, "output": out})
+                self.bot.logger.log(MODULE_NAME, "Update pulled — restarting")
+                asyncio.create_task(self._delayed_restart())
+                return web.json_response({"updated": True, "output": out, "restarting": True})
+            return web.json_response({"error": err or "git pull failed"}, status=500)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_restart(self, request):
+        if not self._check_auth(request) or not self._check_ip(request):
+            return self._fail()
+        self.bot.logger.log(MODULE_NAME, "Remote restart requested")
+        asyncio.create_task(self._delayed_restart())
+        return web.json_response({"ok": True, "message": "Restarting..."})
+
+    async def _delayed_restart(self):
+        await asyncio.sleep(1)
+        await self.bot.close()
+        import os as _os
+        import sys as _sys
+        _os.execv(_sys.executable, [_sys.executable] + _sys.argv)
 
     async def start(self):
         if not self._config.get("enabled", True):

@@ -63,6 +63,8 @@ All run from the project root:
 | `uv run temp/remote_client.py db-download <name>` | Download a .db file to temp/ |
 | `uv run temp/remote_client.py db-query <name> "<SQL>"` | Run a SELECT/PRAGMA query |
 | `uv run temp/remote_client.py config <name>` | View a config file (auth blocked) |
+| `uv run temp/remote_client.py update` | Git pull + restart if new commits |
+| `uv run temp/remote_client.py restart` | Restart the bot remotely |
 
 ### Post-Commit Testing Checklist
 

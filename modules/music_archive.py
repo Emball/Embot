@@ -348,12 +348,15 @@ async def _get_or_upload_cache(bot, file_path: str) -> Optional[str]:
     try:
         bot.logger.log(MODULE_NAME, f"Uploading {p.name} to {CACHE_CHANNEL_NAME}")
         mf = discord.File(p, filename=p.name)
-        msg = await chan.send(file=mf)
+        msg = await asyncio.wait_for(chan.send(file=mf), timeout=120)
         url = msg.attachments[0].url
         _cache_store(file_path, url, msg.id, chan.id, p.name,
                      p.stat().st_size if p.exists() else 0)
         bot.logger.log(MODULE_NAME, f"Cached: {p.name}")
         return url
+    except asyncio.TimeoutError:
+        bot.logger.log(MODULE_NAME, f"Upload timed out: {p.name}", "WARNING")
+        return None
     except discord.HTTPException as e:
         if e.status == 413:
             bot.logger.log(MODULE_NAME, f"File too large: {p.name}", "WARNING")
@@ -453,7 +456,10 @@ class ARCHIVEManager:
 
     async def ensure_ready(self):
         if not self.song_index_ready.is_set() and self.initialization_task:
-            await self.song_index_ready.wait()
+            try:
+                await asyncio.wait_for(self.song_index_ready.wait(), timeout=30)
+            except asyncio.TimeoutError:
+                self.bot.logger.log(MODULE_NAME, "Song index init timed out", "WARNING")
 
 def setup(bot):
     bot.logger.log(MODULE_NAME, "Setting up ARCHIVE module")

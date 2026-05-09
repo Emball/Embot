@@ -164,7 +164,13 @@ def _migrate_logger_config():
 def _config_path() -> Path:
     p = script_dir() / "config"
     p.mkdir(parents=True, exist_ok=True)
-    return p / "moderation.json"
+    old = p / "moderation.json"
+    new = p / "mod.json"
+    if old.exists() and not new.exists():
+        old.rename(new)
+    elif new.exists() and old.exists():
+        old.unlink()
+    return new
 
 def _load_config() -> dict:
     path = _config_path()
@@ -255,7 +261,7 @@ def _migrate(db_path: str) -> None:
                 rules_file.unlink()
             except Exception:
                 pass
-        print("[MODERATION] Migration complete -> config/moderation.json", file=sys.stderr)
+        print("[MODERATION] Migration complete -> config/mod.json", file=sys.stderr)
     finally:
         conn.close()
 

@@ -32,7 +32,7 @@ class RulesManager:
     def load_rules(self) -> Optional[dict]:
         data = self.cfg.get_rules()
         if data is None:
-            self.bot.logger.log("RULES", "No rules content found in config/moderation.json", "WARNING")
+            self.bot.logger.log("RULES", "No rules content found in config/mod.json", "WARNING")
         return data
 
     def save_rules(self, data: dict) -> None:

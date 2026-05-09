@@ -374,7 +374,7 @@ def _setup_suspicion(bot: commands.Bot, _mod, _cfg: "ModConfig"):
         labels: dict = _cfg.get("invite_labels", {})
         if not labels:
             await interaction.response.send_message(
-                "No invite labels configured yet. Add them to `config/moderation.json` under "
+                "No invite labels configured yet. Add them to `config/mod.json` under "
                 "`invite_labels`: `{\"leaktracker\": [\"code1\"], \"youtube\": [\"code2\"]}`",
                 ephemeral=True
             )

@@ -520,6 +520,9 @@ class ARCHIVEManager:
         sent_batches = 0
 
         for fp, p, sz in pending:
+            if _cache_lookup(fp):
+                cached += 1
+                continue
             if batch and batch_size + sz > max_bytes:
                 ok = await self._send_batch(chan, batch)
                 if ok:
@@ -539,12 +542,14 @@ class ARCHIVEManager:
             batch_size += sz
 
         if batch:
-            ok = await self._send_batch(chan, batch)
-            if ok:
-                uploaded += len(batch)
-            else:
-                errors += len(batch)
-            sent_batches += 1
+            batch = [(fp, p, sz) for fp, p, sz in batch if not _cache_lookup(fp)]
+            if batch:
+                ok = await self._send_batch(chan, batch)
+                if ok:
+                    uploaded += len(batch)
+                else:
+                    errors += len(batch)
+                sent_batches += 1
 
         self.bot.logger.log(MODULE_NAME,
             f"Cache backfill complete: {uploaded} uploaded in {sent_batches} batch(es), "

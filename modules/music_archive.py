@@ -522,8 +522,11 @@ class ARCHIVEManager:
                 continue
             p = Path(fp)
             try:
-                sz = await loop.run_in_executor(METADATA_EXECUTOR, lambda: p.stat().st_size)
-            except OSError:
+                sz = await asyncio.wait_for(
+                    loop.run_in_executor(METADATA_EXECUTOR, lambda: p.stat().st_size),
+                    timeout=15)
+            except (OSError, asyncio.TimeoutError):
+                self.bot.logger.log(MODULE_NAME, f"Skipping {p.name} — stat timed out", "WARNING")
                 continue
             if sz > max_bytes:
                 continue

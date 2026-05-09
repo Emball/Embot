@@ -36,7 +36,6 @@ def _load_eminem_root() -> Path:
         "or edit config/archive_config.json and set 'eminem_root' to your Eminem music folder."
     )
 
-
 try:
     EMINEM_ROOT = _load_eminem_root()
 except FileNotFoundError as _e:
@@ -57,7 +56,7 @@ SPECIAL_FOLDERS = {
 }
 LARGE_FILE_MSG = "Sorry! The song file was too big to upload."
 MAX_SEARCH_RESULTS = 5
-NAV_PAGE_SIZE = 23  # reserve 2 slots for ◀ ▶ pagination arrows
+NAV_PAGE_SIZE = 23
 
 _FOLDER_CLEAN_RE = re.compile(
     r"^\d+\s*-\s*|\s*\(.*?\)\s*$|\s*\[.*?\]\s*$",
@@ -65,11 +64,9 @@ _FOLDER_CLEAN_RE = re.compile(
 )
 
 def _clean_folder_name(raw: str) -> str:
-    """'8 - Features' → 'Features', '10 - Freestyles (MP3 Only)' → 'Freestyles'."""
     cleaned = _FOLDER_CLEAN_RE.sub("", raw).strip()
     return cleaned if cleaned else raw
 
-#  METADATA / INDEX
 async def extract_metadata_async(file_path):
     loop = asyncio.get_event_loop()
     try:
@@ -234,7 +231,6 @@ async def process_single_file(bot, full_path, folder, category, fmt):
         return None
 
 def _load_song_index_from_db() -> dict:
-    """Reconstruct the in-memory song_index dict from the DB."""
     from collections import defaultdict
     idx = {fmt: defaultdict(list) for fmt in FORMATS}
     with _db_conn() as c:
@@ -287,8 +283,6 @@ def select_best_candidate(cands, version=None):
         scored.append((p, y, c))
     scored.sort(key=lambda x: (x[0], x[1]))
     return scored[0][2] if scored else None
-
-#  DATABASE
 
 DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS song_index (
@@ -350,8 +344,6 @@ def _cache_store(file_path: str, cdn_url: str, message_id: str, channel_id: str,
         c.commit()
 
 async def _get_or_upload_cache(bot, file_path: str) -> Optional[str]:
-    """Look up cached CDN URL, or upload to #songcache and store in DB.
-    If cache entry exists but Discord CDN is dead, re-upload using stored message_id."""
     p = Path(file_path)
     cached = _cache_lookup(file_path)
     if cached:
@@ -385,8 +377,6 @@ async def _get_or_upload_cache(bot, file_path: str) -> Optional[str]:
         bot.logger.error(MODULE_NAME, f"Upload error", e)
         return None
 
-#  DELIVERY
-
 async def _deliver_song(bot, interaction: discord.Interaction, candidate: dict) -> None:
     p = Path(candidate['path'])
     url = await _get_or_upload_cache(bot, str(p))
@@ -403,7 +393,6 @@ async def _deliver_song(bot, interaction: discord.Interaction, candidate: dict) 
         await interaction.followup.send(f"[{p.name}]({url})", ephemeral=True)
     bot.logger.log(MODULE_NAME, f"Delivered '{p.name}'")
 
-#  FED CHECK
 def _is_fed(interaction: discord.Interaction) -> bool:
     try:
         from moderation import is_flagged as _check
@@ -413,7 +402,6 @@ def _is_fed(interaction: discord.Interaction) -> bool:
         pass
     return False
 
-#  NAVIGATOR — per-user ephemeral multi-step LayoutView
 def _get_categories_for_format(song_index: dict, fmt: str) -> list:
     cats = set()
     for entries in song_index.get(fmt, {}).values():
@@ -493,10 +481,6 @@ def _song_options_for_page(songs: list, page: int):
     return opts, has_prev, has_next
 
 class ArchiveNavigatorView(discord.ui.LayoutView):
-    """
-    Ephemeral multi-step navigator using Components v2.
-    format → category → folder → song → deliver
-    """
 
     def __init__(self, bot, song_index: dict):
         super().__init__(timeout=300)
@@ -692,9 +676,6 @@ class ArchiveNavigatorView(discord.ui.LayoutView):
     async def on_timeout(self):
         self.clear_items()
 
-
-
-#  LOGGING
 async def _log_delivery(bot, user, candidate: dict, source: str = "command"):
     try:
         channel = discord.utils.get(bot.get_all_channels(), name="bot-logs")
@@ -734,7 +715,6 @@ async def send_bot_log(bot, log_data):
     except Exception as e:
         bot.logger.error(MODULE_NAME, "Failed to send log", e)
 
-#  ARCHIVEManager
 class ARCHIVEManager:
     def __init__(self, bot):
         self.bot = bot
@@ -762,7 +742,6 @@ class ARCHIVEManager:
         if not self.song_index_ready.is_set() and self.initialization_task:
             await self.song_index_ready.wait()
 
-#  SETUP
 def setup(bot):
     bot.logger.log(MODULE_NAME, "Setting up ARCHIVE module")
 

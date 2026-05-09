@@ -1,8 +1,3 @@
-"""
-Community module for Embot.
-Handles submission tracking (#projects / #artwork), voting/XP, Spotlight Friday,
-version detection, submission linking, duplicate detection, and edit syncing.
-"""
 
 import discord
 from discord.ext import tasks
@@ -46,16 +41,15 @@ VOTE_EMOJIS: dict[str, int] = {
     "😐": 0,
     "🗑️": -5,
 }
-SETUP_EMOJIS = ["🔥", "😐", "🗑️"]   # Bot reacts with these on every submission
+SETUP_EMOJIS = ["🔥", "😐", "🗑️"]
 
 MIN_DESCRIPTION_LENGTH = 10
-VERSION_REENTRY_DAYS   = 30          # Days before a group can re-enter spotlight
+VERSION_REENTRY_DAYS   = 30
 
 def _now_str() -> str:
     return _now().isoformat()
 
 def _parse_version(text: str) -> Optional[Tuple[int, int]]:
-    """Return (major, minor) from the first 'vX' or 'vX.Y' token found, else None."""
     m = re.search(r'\bv(\d+)(?:\.(\d+))?\b', text, re.IGNORECASE)
     if m:
         return int(m.group(1)), int(m.group(2) or 0)
@@ -65,7 +59,6 @@ def _strip_version(text: str) -> str:
     return re.sub(r'\bv\d+(?:\.\d+)?\b', '', text, flags=re.IGNORECASE).strip()
 
 def _extract_title(content: str) -> Optional[str]:
-    """Return the first markdown header, or the first non-empty line."""
     for line in content.splitlines():
         stripped = line.strip()
         if stripped.startswith('#'):
@@ -80,7 +73,6 @@ def _extract_links(content: str) -> List[str]:
     return re.findall(r'https?://[^\s<>"]+', content)
 
 def _normalize(content: str) -> str:
-    """Normalise content for duplicate / version comparison."""
     text = _strip_version(content)
     text = re.sub(r'^#+\s*', '', text, flags=re.MULTILINE)
     return re.sub(r'\s+', '', text).strip().lower()
@@ -106,14 +98,12 @@ async def _hash_url(url: str, session: Optional["aiohttp.ClientSession"] = None)
 async def _hash_attachment(att: discord.Attachment, session: Optional["aiohttp.ClientSession"] = None) -> Optional[str]:
     return await _hash_url(att.url, session)
 
-_SHORT_ID_CHARS = string.ascii_letters + string.digits  # 62 chars → ~56 trillion combos at 9 chars
+_SHORT_ID_CHARS = string.ascii_letters + string.digits
 
 def _short_id(length: int = 9) -> str:
-    """Generate a YouTube-style short alphanumeric ID (e.g. 'aB3xK9mRq')."""
     return "".join(random.choices(_SHORT_ID_CHARS, k=length))
 
 def _display_name(bot, guild_id: int, user_id: int) -> str:
-    """Resolve a user ID to a display name for logging. Falls back to shortened ID."""
     try:
         guild = bot.get_guild(guild_id)
         if guild:
@@ -125,10 +115,6 @@ def _display_name(bot, guild_id: int, user_id: int) -> str:
     return f"user:{user_id}"
 
 class CommunityDB:
-    # MIGRATION REGISTRY
-    # Each entry is (version: int, description: str, sql: str).
-    # To evolve the schema: append a new tuple — never edit existing ones.
-    # The migration engine runs only the versions the current DB hasn't seen yet.
     _MIGRATIONS: list[tuple[int, str, str]] = [
         (1, "Initial schema", """
             CREATE TABLE IF NOT EXISTS community_config (
@@ -207,14 +193,6 @@ class CommunityDB:
             CREATE INDEX IF NOT EXISTS idx_hash ON file_hash_registry(hash);
         """),
 
-        # Simple additions (new tables, indexes) can use plain SQL with IF NOT EXISTS.
-        # For ALTER TABLE (adding columns), use a Python callable instead of a SQL
-        # string — the engine supports both. The callable receives the connection and
-        # the two helper methods so you can guard against re-runs:
-        # (3, "Add channel_name to submissions", lambda c, col_ok, tbl_ok: (
-        #     c.execute("ALTER TABLE submissions ADD COLUMN channel_name TEXT")
-        #     if not col_ok(c, "submissions", "channel_name") else None
-        # )),
         (2, "Add reactions_blocked flag to submissions", lambda c, col_ok, tbl_ok: (
             c.execute("ALTER TABLE submissions ADD COLUMN reactions_blocked INTEGER NOT NULL DEFAULT 0")
             if not col_ok(c, "submissions", "reactions_blocked") else None
@@ -234,10 +212,6 @@ class CommunityDB:
         return c
 
     def query_thread_submission(self, thread_id: int):
-        """
-        Public, lock-guarded query for handle_thread_message.
-        Avoids bypassing _lock by going through _conn() directly.
-        """
         with self._lock:
             with self._conn() as c:
                 return c.execute(
@@ -246,36 +220,25 @@ class CommunityDB:
                 ).fetchone()
 
     def _get_schema_version(self, c: sqlite3.Connection) -> int:
-        """Read the current schema version from the migration_log table."""
         try:
             row = c.execute(
                 "SELECT MAX(version) AS v FROM schema_migration_log"
             ).fetchone()
             return int(row["v"]) if row and row["v"] is not None else 0
         except sqlite3.OperationalError:
-            return 0  # Table doesn't exist yet — fresh or pre-migration DB
+            return 0
 
     def _column_exists(self, c: sqlite3.Connection, table: str, column: str) -> bool:
-        """Return True if `column` already exists in `table`. Use before ALTER TABLE ADD COLUMN."""
         rows = c.execute(f"PRAGMA table_info({table})").fetchall()
         return any(row["name"] == column for row in rows)
 
     def _table_exists(self, c: sqlite3.Connection, table: str) -> bool:
-        """Return True if `table` exists in the database."""
         row = c.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
         ).fetchone()
         return row is not None
 
     def _init(self):
-        """
-        Bootstrap the migration log table, then run any pending migrations in order.
-        Each migration runs inside its own transaction and is recorded atomically.
-        Migrations that have already been applied are skipped via INSERT OR IGNORE.
-        Use _column_exists() and _table_exists() inside migration callables to guard
-        ALTER TABLE statements against re-runs.
-        """
-        # Bootstrap the migration log table outside of any migration
         with self._conn() as c:
             c.execute("""
                 CREATE TABLE IF NOT EXISTS schema_migration_log (
@@ -290,7 +253,7 @@ class CommunityDB:
                    if m[0] > self._get_schema_version(self._conn())]
 
         if not pending:
-            return  # Nothing to do
+            return
 
         for version, description, sql in pending:
             print(f"[COMMUNITY] [INFO] Applying migration v{version}: {description}")
@@ -312,7 +275,7 @@ class CommunityDB:
                     f"[COMMUNITY] [ERROR] Migration v{version} FAILED: {e}\n"
                     f" The database has NOT been modified for this migration."
                 )
-                raise  # Re-raise so the bot startup fails loudly rather than silently corrupting
+                raise
 
     def get_config(self, key: str, default=None):
         with self._conn() as c:
@@ -384,7 +347,6 @@ class CommunityDB:
             ).fetchone()
 
     def find_existing(self, user_id: int, norm: str) -> Optional[sqlite3.Row]:
-        """Find the newest non-deleted submission by this user with matching normalized content."""
         with self._conn() as c:
             return c.execute(
                 "SELECT * FROM submissions WHERE user_id=? AND content_normalized=? AND is_deleted=0 "
@@ -400,7 +362,6 @@ class CommunityDB:
 
     def upsert_vote(self, group_id: str, user_id: int, emoji: str,
                     xp_delta: int, message_id: int) -> Optional[sqlite3.Row]:
-        """Insert or replace vote. Returns the old vote row (or None)."""
         with self._conn() as c:
             old = c.execute(
                 "SELECT * FROM votes WHERE group_id=? AND user_id=?", (group_id, user_id)
@@ -443,7 +404,6 @@ class CommunityDB:
             ).fetchall()
 
     def log_thread_xp(self, submitter_id: int, thread_id: int, message_id: int):
-        """Returns True if this message is new (XP should be awarded)."""
         with self._conn() as c:
             try:
                 c.execute("""
@@ -512,7 +472,6 @@ class CommunityDB:
             c.commit()
 
     def hash_owner(self, h: str, exclude_user: int) -> Optional[sqlite3.Row]:
-        """Find a registered hash belonging to a different user."""
         with self._conn() as c:
             return c.execute(
                 "SELECT fhr.*, s.user_id AS owner_id FROM file_hash_registry fhr "
@@ -522,7 +481,6 @@ class CommunityDB:
             ).fetchone()
 
     def link_owner(self, link: str, exclude_user: int) -> Optional[sqlite3.Row]:
-        """Find a submission (from another user) that already registered this link."""
         with self._conn() as c:
             rows = c.execute(
                 "SELECT * FROM submissions WHERE user_id!=? AND is_deleted=0", (exclude_user,)
@@ -545,7 +503,6 @@ class CommunityDB:
             return row["group_id"] if row else None
 
     def group_for_link(self, link: str, user_id: int) -> Optional[str]:
-        """Find the group_id of any existing submission (same user) that registered this link."""
         with self._conn() as c:
             rows = c.execute(
                 "SELECT group_id, links FROM submissions WHERE user_id=? AND is_deleted=0",
@@ -560,12 +517,10 @@ class CommunityDB:
             return None
 
     def merge_groups(self, keep: str, drop: str):
-        """Reassign all submissions and votes from `drop` group into `keep`."""
         if keep == drop:
             return
         with self._conn() as c:
             c.execute("UPDATE submissions SET group_id=? WHERE group_id=?", (keep, drop))
-            # For votes: keep the earlier vote per user, discard duplicates
             c.execute("""
                 DELETE FROM votes WHERE group_id=? AND user_id IN (
                     SELECT user_id FROM votes WHERE group_id=?
@@ -575,7 +530,6 @@ class CommunityDB:
             c.commit()
 
     def get_checkable_submissions(self, limit: int = 50) -> List[sqlite3.Row]:
-        """Return submissions eligible for edit-sync checking (not older than 30 days)."""
         cutoff = (_now() - timedelta(days=VERSION_REENTRY_DAYS)).isoformat()
         with self._conn() as c:
             return c.execute("""
@@ -602,7 +556,6 @@ class CommunitySystem:
         self.bot.logger.error(MODULE_NAME, msg, exc)
 
     async def _bot_log(self, guild: discord.Guild, embed: discord.Embed):
-        """Send embed to #bot-logs via the logger module if available."""
         try:
             el = getattr(self.bot, "_logger_event_logger", None)
             if el:
@@ -617,7 +570,6 @@ class CommunitySystem:
             self.cerr("Failed to send to bot-logs", e)
 
     async def _dm_or_ping(self, user: discord.Member, embed: discord.Embed):
-        """DM the user. On failure, ping them in #general with the embed."""
         try:
             await user.send(embed=embed)
             return
@@ -648,7 +600,6 @@ class CommunitySystem:
         return channel_id in self._submission_channel_ids
 
     def _validate(self, message: discord.Message) -> Optional[str]:
-        """Return an error string if the message fails validation, else None."""
         content = message.content or ""
         links   = _extract_links(content)
         has_file = bool(message.attachments)
@@ -657,7 +608,6 @@ class CommunitySystem:
         if not has_file and not has_link:
             return "Your submission must include at least one **attached file** or **link**."
 
-        # Artwork submissions do not require a title or description — the image speaks for itself.
         is_artwork = message.channel.name == ARTWORK_CHANNEL_NAME
         if is_artwork:
             return None
@@ -688,11 +638,6 @@ class CommunitySystem:
 
     def _next_version(self, existing_row: sqlite3.Row, new_content: str
                       ) -> Tuple[str, int, int]:
-        """
-        Given the most-recent submission row in a group and new content,
-        determine the next version string and (major, minor).
-        Explicit 'vX' in new content wins; otherwise bump major.
-        """
         parsed = _parse_version(new_content)
         if parsed:
             maj, min_ = parsed
@@ -702,14 +647,12 @@ class CommunitySystem:
         return f"v{maj}.{min_}", maj, min_
 
     async def handle_submission(self, message: discord.Message):
-        """Process a message posted in a submission channel."""
         if message.author.bot:
             return
 
         guild = message.guild
         self._refresh_channel_ids(guild)
 
-        # Validate
         err = self._validate(message)
         if err:
             try:
@@ -727,7 +670,6 @@ class CommunitySystem:
         links     = _extract_links(content)
         user_id   = message.author.id
 
-        # Hash every attached file. Links are stored as plain text and matched by string equality.
         attachment_hashes: List[str] = []
         if message.attachments:
             async with aiohttp.ClientSession() as sess:
@@ -802,7 +744,6 @@ class CommunitySystem:
         dm_version_embed: Optional[discord.Embed] = None
 
         if existing:
-            # Check re-entry eligibility
             created = datetime.fromisoformat(existing["created_at"])
             age_days = (_now() - created.replace(tzinfo=timezone.utc)).days
             reenter_ok = age_days >= VERSION_REENTRY_DAYS
@@ -811,7 +752,6 @@ class CommunitySystem:
             version_str, version_major, version_minor = self._next_version(existing, content)
             is_new_version = True
 
-            # Mark all previous versions in this group as not-current
             for sub in self.db.by_group(group_id):
                 if sub["is_current"]:
                     self.db.update_submission(sub["id"], is_current=0)
@@ -834,8 +774,6 @@ class CommunitySystem:
             version_str  = "v1.0"
             version_major = 1
             version_minor = 0
-            # Cross-channel linking: if another submission shares an attachment hash,
-            # merge this submission into that group so votes/XP are pooled.
             linked_group: Optional[str] = None
             for h in attachment_hashes:
                 linked_group = self.db.group_for_hash(h)
@@ -857,7 +795,6 @@ class CommunitySystem:
             if linked_group and linked_group != group_id:
                 group_id = linked_group
 
-        # file_hashes stores attachment hashes only. Links are stored as plain text in `links`.
         sub_id = _short_id()
         sub_record = {
             "id":                 sub_id,
@@ -882,7 +819,6 @@ class CommunitySystem:
         }
         self.db.add_submission(sub_record)
 
-        # Register each attachment hash individually
         for h in attachment_hashes:
             self.db.register_hash(h, sub_id, user_id)
 
@@ -924,10 +860,6 @@ class CommunitySystem:
         )
 
     async def handle_edit(self, payload: discord.RawMessageUpdateEvent):
-        """Sync an edited submission. Skip if older than 30 days."""
-        # Discord fires on_raw_message_edit for its own URL embed unfurling.
-        # These payloads only contain 'embeds' and/or 'flags' — no actual user edit.
-        # Skip them to avoid spamming false "Synced edit (changed=False)"log lines.
         _embed_only_keys = {"embeds", "flags", "id", "channel_id", "guild_id"}
         if payload.data and set(payload.data.keys()) <= _embed_only_keys:
             return
@@ -936,12 +868,10 @@ class CommunitySystem:
         if not sub:
             return
 
-        # 30-day cutoff
         created = datetime.fromisoformat(sub["created_at"]).replace(tzinfo=timezone.utc)
         if (_now() - created).days >= VERSION_REENTRY_DAYS:
-            return  # Too old; stop tracking edits
+            return
 
-        # Fetch the updated message
         try:
             guild   = self.bot.get_guild(payload.guild_id)
             channel = guild.get_channel(payload.channel_id) if guild else None
@@ -955,7 +885,6 @@ class CommunitySystem:
         new_content = message.content or ""
         new_links   = _extract_links(new_content)
 
-        # Hash each attachment individually — links are matched as plain text
         new_att_hashes: List[str] = []
         if message.attachments:
             async with aiohttp.ClientSession() as sess:
@@ -970,7 +899,6 @@ class CommunitySystem:
                             "WARNING"
                         )
 
-        # Check validity
         err = self._validate(message)
         if err:
             try:
@@ -985,7 +913,6 @@ class CommunitySystem:
             self.clog(f"Edited submission {sub['id']} became invalid and was deleted.")
             return
 
-        # Check for file/link changes → bump minor version
         old_hashes = set(json.loads(sub["file_hashes"]))
         old_links  = set(json.loads(sub["links"]))
         changed = set(new_att_hashes) != old_hashes or set(new_links) != old_links
@@ -1005,11 +932,9 @@ class CommunitySystem:
             kwargs["version"]       = f"v{maj}.{min_}"
             kwargs["version_major"] = maj
             kwargs["version_minor"] = min_
-            # Demote all other versions in the group — this one is now current
             for old_sub in self.db.by_group(sub["group_id"]):
                 if old_sub["is_current"] and old_sub["id"] != sub["id"]:
                     self.db.update_submission(old_sub["id"], is_current=0)
-            # Notify the author their version was retroactively updated via edit
             try:
                 member = guild.get_member(sub["user_id"])
                 if member:
@@ -1039,7 +964,6 @@ class CommunitySystem:
 
         self.db.update_submission(sub["id"], **kwargs)
 
-        # Register any newly-seen attachment hashes
         for h in new_att_hashes:
             if h not in old_hashes:
                 self.db.register_hash(h, sub["id"], sub["user_id"])
@@ -1064,7 +988,7 @@ class CommunitySystem:
 
     async def handle_reaction_add(self, payload: discord.RawReactionActionEvent):
         if payload.user_id == self.bot.user.id:
-            return  # Ignore bot's own reactions
+            return
 
         emoji = str(payload.emoji)
         if emoji not in VOTE_EMOJIS:
@@ -1078,7 +1002,6 @@ class CommunitySystem:
         submitter = sub["user_id"]
 
         if voter_id == submitter:
-            # Self-voting is not allowed — remove the reaction silently
             voter_name = _display_name(self.bot, payload.guild_id, voter_id)
             self.clog(
                 f"Self-vote blocked: {voter_name} attempted to vote {emoji} "
@@ -1099,13 +1022,10 @@ class CommunitySystem:
         group_id  = sub["group_id"]
         xp_delta  = VOTE_EMOJIS[emoji]
 
-        # Upsert vote; get old vote to handle XP adjustments + reaction cleanup
         old_vote = self.db.upsert_vote(group_id, voter_id, emoji, xp_delta, payload.message_id)
 
         if old_vote:
-            # Reverse old XP
             self.db.add_xp(submitter, -old_vote["xp_delta"])
-            # Remove the old emoji from the old message if different
             if old_vote["emoji"] != emoji:
                 try:
                     guild   = self.bot.get_guild(payload.guild_id)
@@ -1148,7 +1068,6 @@ class CommunitySystem:
         if not old_vote or old_vote["emoji"] != emoji:
             return
 
-        # Only remove if the reaction removed matches stored vote
         self.db.remove_vote(group_id, payload.user_id)
         self.db.add_xp(sub["user_id"], -old_vote["xp_delta"])
         voter_name = _display_name(self.bot, payload.guild_id, payload.user_id)
@@ -1158,7 +1077,6 @@ class CommunitySystem:
         )
 
     async def handle_delete(self, payload: discord.RawMessageDeleteEvent):
-        """Mark a submission as deleted when its Discord message is removed."""
         sub = self.db.by_message(payload.message_id)
         if not sub:
             return
@@ -1169,15 +1087,12 @@ class CommunitySystem:
             f"(message {payload.message_id} removed from channel {payload.channel_id})"
         )
 
-        # If the deleted submission was the current version, promote the next most-recent
-        # non-deleted version in the group so votes/spotlight still work correctly.
         if sub["is_current"]:
             remaining = [
                 s for s in self.db.by_group(sub["group_id"])
                 if not s["is_deleted"] and s["id"] != sub["id"]
             ]
             if remaining:
-                # by_group returns rows ordered by version_major, version_minor ASC
                 latest = remaining[-1]
                 self.db.update_submission(latest["id"], is_current=1)
                 self.clog(
@@ -1186,30 +1101,24 @@ class CommunitySystem:
                 )
 
     async def handle_thread_message(self, message: discord.Message):
-        """Award 0.1 XP to the submission author when someone replies in its thread."""
         if message.author.bot:
             return
         channel = message.channel
         if not isinstance(channel, discord.Thread):
             return
 
-        # Find submission whose thread_id matches — uses the lock via public query method
         row = self.db.query_thread_submission(channel.id)
         if not row:
             return
 
         submitter_id = row["user_id"]
         if message.author.id == submitter_id:
-            return  # Don't award XP for own replies
+            return
 
         if self.db.log_thread_xp(submitter_id, channel.id, message.id):
             self.db.add_xp(submitter_id, 0.1)
 
     async def check_submission_integrity(self, guild: discord.Guild):
-        """
-        Verify that active submissions still have their setup reactions and threads intact.
-        Restores missing reactions and logs anomalies. Runs periodically.
-        """
         subs = self.db.get_checkable_submissions(limit=50)
         for sub in subs:
             channel = guild.get_channel(sub["channel_id"])
@@ -1218,7 +1127,6 @@ class CommunitySystem:
             try:
                 message = await channel.fetch_message(sub["message_id"])
             except (discord.NotFound, discord.Forbidden):
-                # Message was deleted externally
                 if not sub["is_deleted"]:
                     self.db.update_submission(sub["id"], is_deleted=1)
                     self.clog(
@@ -1229,7 +1137,6 @@ class CommunitySystem:
             except Exception:
                 continue
 
-            # Check setup reactions (skip if the author has blocked the bot)
             if not sub["reactions_blocked"]:
                 existing_emojis = {str(r.emoji) for r in message.reactions}
                 for emoji in SETUP_EMOJIS:
@@ -1252,7 +1159,6 @@ class CommunitySystem:
                         except Exception as e:
                             self.cerr(f"Integrity: failed to restore reaction {emoji} on {sub['id']}", e)
 
-            # Check thread still exists if one was created
             if sub["thread_id"]:
                 thread = guild.get_thread(sub["thread_id"])
                 if thread is None:
@@ -1290,7 +1196,6 @@ class CommunitySystem:
         member = guild.get_member(top["user_id"])
         name   = member.display_name if member else f"User {top['user_id']}"
 
-        # Vote counts for the week
         since = (_now() - timedelta(days=7)).isoformat()
         votes = self.db.get_vote_counts(top["group_id"], since)
 
@@ -1310,7 +1215,6 @@ class CommunitySystem:
             inline=False
         )
 
-        # Try to find an image attachment from the original message
         image_url = None
         if top["message_id"]:
             ch = guild.get_channel(top["channel_id"])
@@ -1329,7 +1233,6 @@ class CommunitySystem:
         elif member:
             embed.set_thumbnail(url=member.display_avatar.url)
 
-        # Link field: download link if found, else jump to submission
         links = json.loads(top["links"]) if top.get("links") else []
         if links:
             embed.add_field(
@@ -1355,7 +1258,6 @@ class CommunitySystem:
         )
 
 def setup(bot):
-    # (db directory is created by db_path reference above)
 
     cs = CommunitySystem(bot)
     bot._community_system = cs
@@ -1365,12 +1267,10 @@ def setup(bot):
         if CST:
             local = now.astimezone(CST)
         else:
-            # DST-safe fallback using stdlib zoneinfo (Python 3.9+)
             try:
                 from zoneinfo import ZoneInfo
                 local = now.astimezone(ZoneInfo("America/Chicago"))
             except Exception:
-                # Last-resort: fixed UTC-6 (may be wrong during CDT)
                 local = now - timedelta(hours=6)
                 local = local.replace(tzinfo=timezone.utc)
         return local.weekday() == 4 and local.hour == 15
@@ -1380,15 +1280,12 @@ def setup(bot):
         if not message.guild or message.author.bot:
             return
 
-        # Refresh channel IDs for this guild
         cs._refresh_channel_ids(message.guild)
 
-        # Submission channel
         if cs._is_submission_channel(message.channel.id):
             await cs.handle_submission(message)
             return
 
-        # Thread reply XP
         await cs.handle_thread_message(message)
 
     @bot.listen()
@@ -1468,7 +1365,6 @@ def setup(bot):
             names = cs._get_submission_channel_names()
             if projects_channel.name not in names:
                 names.append(projects_channel.name)
-            # Store under submission_channels so _get_submission_channel_names() reads it correctly
             cs.db.set_config("submission_channels", names)
             changed.append(f"Projects: {projects_channel.mention}")
 
@@ -1556,7 +1452,6 @@ def setup(bot):
         member   = interaction.guild.get_member(sub["user_id"])
         name     = member.display_name if member else f"User {sub['user_id']}"
 
-        # Calculate group XP from votes
         with cs.db._conn() as c:
             xp_row = c.execute(
                 "SELECT COALESCE(SUM(xp_delta),0) AS total FROM votes WHERE group_id=?",

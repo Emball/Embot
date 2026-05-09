@@ -1,11 +1,3 @@
-"""
-VMS — Voice Message System for Embot
-• Saves/transcribes Discord voice messages via OpenAI Whisper
-• Stores transcripts in SQLite (db/vms.db), audio in cache/vms/
-• Archives after 150 days, deletes after 365 days
-• Periodic random/contextual playback in #general, replies to @mentions
-• User-installable app: right-click any VM → Apps → Transcribe VM
-"""
 
 import asyncio
 import aiohttp
@@ -32,26 +24,23 @@ MODULE_NAME = "VMS"
 GENERAL_CHANNEL_NAME      = "general"
 PING_COOLDOWN_SECONDS     = 10
 VM_COOLDOWN_DAYS          = 7
-LONG_VM_THRESHOLD_SECS    = 60        # VMs longer than this get a score penalty
+LONG_VM_THRESHOLD_SECS    = 60
 ARCHIVE_AFTER_DAYS        = 150
 DELETE_AFTER_DAYS         = 365
 ARCHIVE_JOB_INTERVAL_HOURS = 24
 RANDOM_PLAYBACK_MIN       = 40
 RANDOM_PLAYBACK_MAX       = 80
-WHISPER_MODEL_SIZE        = "base"   # tiny / base / small / medium / large
+WHISPER_MODEL_SIZE        = "base"
 BACKFILL_DAYS             = 365
 
-# Emball guild ID — VMs from here are stored persistently; all others are ephemeral
 EMBALL_GUILD_ID: Optional[int] = int(os.getenv("EMBALL_GUILD_ID", "0")) or None
 
-# Whisper is NOT thread-safe — always 1 worker regardless of CPU/GPU count
 BULK_GPU_WORKERS  = 1
 BULK_CPU_WORKERS  = 1
-BULK_BATCH_SIZE   = 16    # progress log interval
-SCAN_BATCH_SIZE   = 256   # rows per commit during startup scan
-WAVEFORM_SAMPLES  = 256   # Discord expects 256-byte waveform
+BULK_BATCH_SIZE   = 16
+SCAN_BATCH_SIZE   = 256
+WAVEFORM_SAMPLES  = 256
 
-# Common words to filter out before keyword matching
 STOP_WORDS = {
     'the', 'a', 'an', 'and', 'or', 'but', 'is', 'are', 'was', 'were', 'be',
     'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
@@ -68,41 +57,21 @@ STOP_WORDS = {
     'got', 'im', 'yeah', 'okay', 'ok', 'also', 'lol', 'um', 'uh', 'oh', 'yes',
 }
 
-def _vms_dir() -> Path:
-    """Voice message audio files live here."""
-    p = script_dir() / "cache"/ "vms"
+def _cache_subdir(*parts: str) -> Path:
+    p = script_dir() / "cache"/ Path(*parts)
     p.mkdir(parents=True, exist_ok=True)
     return p
 
-def _archive_dir() -> Path:
-    """Archived voice messages live here."""
-    p = script_dir() / "cache"/ "vms"/ "archive"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+_VMS_DIR           = _cache_subdir("vms")
+_ARCHIVE_DIR       = _cache_subdir("vms", "archive")
+_BROKEN_DIR        = _cache_subdir("vms", "broken")
+_WHISPER_MODEL_DIR = _cache_subdir("whisper_models")
+_TEMP_VMS_DIR      = _cache_subdir("vms", "temp")
 
 def _db_path() -> str:
-    """SQLite database path."""
     p = script_dir() / "db"
     p.mkdir(parents=True, exist_ok=True)
     return str(p / "vms.db")
-
-def _broken_dir() -> Path:
-    """Corrupt or unprocessable voice message files are moved here."""
-    p = script_dir() / "cache"/ "vms"/ "broken"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-def _whisper_model_dir() -> Path:
-    """Whisper model cache directory."""
-    p = script_dir() / "cache"/ "whisper_models"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-def _temp_vms_dir() -> Path:
-    """Temp dir for external (non-Emball) VM transcriptions — files deleted after use."""
-    p = script_dir() / "cache"/ "vms"/ "temp"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
 
 def _vm_canonical_name(
     vm_id: int,
@@ -110,10 +79,6 @@ def _vm_canonical_name(
     message_id: Optional[str] = None,
     created_at: Optional[int] = None,
 ) -> str:
-    """
-    Returns vm_{username}_{message_id}_{MM-DD-YY}.ogg, or vm_{vm_id}.ogg
-    if metadata is unavailable.
-    """
     if username and message_id and created_at:
         safe_user = re.sub(r'[\\/:*?"<>|]', '', username)[:32].strip() or "unknown"
         date_str  = datetime.fromtimestamp(created_at).strftime("%m-%d-%y")
@@ -121,8 +86,6 @@ def _vm_canonical_name(
     return f"vm_{vm_id}.ogg"
 
 def _parse_vm_filename(filename: str) -> dict:
-    """Parse metadata out of a canonical VM filename. Returns dict with username, message_id, created_at, vm_id."""
-    # Rich format: vm_{username}_{message_id}_{MM-DD-YY}.ogg
     rich = re.match(
         r'^vm_(.+)_(\d{15,20})_(\d{2}-\d{2}-\d{2})\.ogg$',
         filename
@@ -137,7 +100,6 @@ def _parse_vm_filename(filename: str) -> dict:
         return {"username": username, "message_id": message_id,
                 "created_at": created_at, "vm_id": None}
 
-    # Fallback format: vm_{id}.ogg
     fallback = re.match(r'^vm_(\d+)\.ogg$', filename)
     if fallback:
         return {"username": None, "message_id": None,
@@ -152,7 +114,6 @@ def _rename_to_canonical(
     message_id: Optional[str] = None,
     created_at: Optional[int] = None,
 ) -> Path:
-    """Rename current_path to its canonical name in the same directory. No-ops if already canonical or file missing."""
     canonical = current_path.parent / _vm_canonical_name(vm_id, username, message_id, created_at)
     if current_path == canonical:
         return canonical
@@ -235,8 +196,6 @@ def _init_db(db_path: str):
         conn.close()
 
 def _generate_waveform(filepath: str, num_samples: int = WAVEFORM_SAMPLES) -> str:
-    """Generate base64 waveform bytes for Discord. Tries soundfile, then pydub, then fallback."""
-    # Try soundfile
     try:
         import soundfile as sf
         data, _ = sf.read(filepath, dtype="float32", always_2d=True)
@@ -245,7 +204,6 @@ def _generate_waveform(filepath: str, num_samples: int = WAVEFORM_SAMPLES) -> st
     except Exception:
         pass
 
-    # Try pydub
     try:
         from pydub import AudioSegment
         seg = AudioSegment.from_file(filepath)
@@ -259,7 +217,6 @@ def _generate_waveform(filepath: str, num_samples: int = WAVEFORM_SAMPLES) -> st
     return _fallback_waveform(num_samples)
 
 def _downsample_to_waveform(pcm: np.ndarray, num_samples: int) -> list:
-    """Compress float32 PCM to num_samples amplitude bytes using RMS per chunk."""
     if len(pcm) == 0:
         return [0] * num_samples
 
@@ -280,15 +237,13 @@ def _downsample_to_waveform(pcm: np.ndarray, num_samples: int) -> list:
     return smoothed
 
 def _fallback_waveform(num_samples: int) -> str:
-    """Bell-curve waveform fallback when audio libraries are unavailable."""
     t = np.linspace(0, np.pi, num_samples)
-    envelope = np.sin(t) ** 0.6             # nice bell shape
+    envelope = np.sin(t) ** 0.6
     noise = np.random.uniform(0.5, 1.0, num_samples)
     wave = (envelope * noise * 200).astype(np.uint8)
     return base64.b64encode(bytes(wave)).decode()
 
 def _get_ogg_duration(filepath: str) -> float:
-    """Best-effort OGG duration extraction."""
     try:
         from mutagen.oggopus import OggOpus
         return OggOpus(filepath).info.length
@@ -303,38 +258,23 @@ def _get_ogg_duration(filepath: str) -> float:
         pass
     return 0.0
 
-# Load on first use, unload after WHISPER_IDLE_UNLOAD_SECS of inactivity,
-# explicitly free CUDA memory on unload.  All access goes through _WhisperManager.
-
-WHISPER_IDLE_UNLOAD_SECS = int(os.getenv("WHISPER_IDLE_UNLOAD_SECS", "300"))  # 5 min default
+WHISPER_IDLE_UNLOAD_SECS = int(os.getenv("WHISPER_IDLE_UNLOAD_SECS", "300"))
 
 class _WhisperManager:
-    """
-    Thread-safe Whisper model lifecycle manager.
-
-    • load()   — returns the model, loading it if necessary.
-    • touch()  — reset the idle timer (call after each successful transcription).
-    • unload() — explicitly free the model and CUDA context.
-
-    A background daemon thread calls unload() automatically after
-    WHISPER_IDLE_UNLOAD_SECS of inactivity (no touch() calls).
-    """
 
     def __init__(self):
         self._lock        = threading.Lock()
         self._model       = None
         self._device      = "cpu"
-        self._load_failed = False          # stops retrying after a hard failure
-        self._last_use    = 0.0            # epoch seconds of last touch()
+        self._load_failed = False
+        self._last_use    = 0.0
         self._watchdog: Optional[threading.Thread] = None
         self._stop_watchdog = threading.Event()
 
     def load(self, model_size: Optional[str] = None) -> Optional[object]:
-        """Return the loaded model, loading it now if needed. Returns None on failure."""
         size = model_size or WHISPER_MODEL_SIZE
         with self._lock:
             if self._model is not None:
-                # If a different size was requested, swap out.
                 if getattr(self._model, '_vms_size', None) != size:
                     self._unload_locked()
                 else:
@@ -346,16 +286,13 @@ class _WhisperManager:
             return self._model
 
     def touch(self):
-        """Reset the idle timer. Call after each successful transcription."""
         self._last_use = time.time()
 
     def unload(self):
-        """Explicitly free the model and CUDA context (safe to call when already unloaded)."""
         with self._lock:
             self._unload_locked()
 
     def start_watchdog(self):
-        """Start the idle-unload background thread (idempotent)."""
         if self._watchdog is not None and self._watchdog.is_alive():
             return
         self._stop_watchdog.clear()
@@ -367,11 +304,9 @@ class _WhisperManager:
         self._watchdog.start()
 
     def stop_watchdog(self):
-        """Stop the idle-unload watchdog (called on bot shutdown)."""
         self._stop_watchdog.set()
 
     def _load_locked(self, size: str):
-        """Must be called with self._lock held."""
         try:
             import whisper
             try:
@@ -379,7 +314,7 @@ class _WhisperManager:
                 self._device = "cuda"if torch.cuda.is_available() else "cpu"
             except ImportError:
                 self._device = "cpu"
-            model_dir = str(_whisper_model_dir())
+            model_dir = str(_WHISPER_MODEL_DIR)
             print(f"[{MODULE_NAME}] Loading Whisper '{size}' "
                   f"on {self._device} (cache: {model_dir})\u2026")
             m = whisper.load_model(size, device=self._device, download_root=model_dir)
@@ -395,15 +330,11 @@ class _WhisperManager:
             self._load_failed = True
 
     def _unload_locked(self):
-        """Free the model and CUDA context. Must be called with self._lock held."""
         if self._model is None:
             return
         print(f"[{MODULE_NAME}] Unloading Whisper model (idle for "
               f"{int(time.time() - self._last_use)}s)\u2026")
         try:
-            # Move tensors off GPU before dropping the reference so PyTorch
-            # can release the CUDA context immediately rather than waiting
-            # for the garbage collector.
             if self._device == "cuda":
                 try:
                     import torch
@@ -418,9 +349,8 @@ class _WhisperManager:
         print(f"[{MODULE_NAME}] Whisper model unloaded")
 
     def _watchdog_loop(self):
-        """Background thread: unload model after WHISPER_IDLE_UNLOAD_SECS of inactivity."""
         while not self._stop_watchdog.is_set():
-            self._stop_watchdog.wait(timeout=30)   # check every 30 s
+            self._stop_watchdog.wait(timeout=30)
             if self._stop_watchdog.is_set():
                 break
             with self._lock:
@@ -430,31 +360,23 @@ class _WhisperManager:
                 if idle >= WHISPER_IDLE_UNLOAD_SECS:
                     self._unload_locked()
 
-# Module-level singleton — all code that previously used _whisper_model
-# directly now goes through this object.
 _whisper_mgr = _WhisperManager()
 
-# These preserve the existing call-sites without any further changes.
-
-_whisper_lock = _whisper_mgr._lock   # BulkProcessor/backfill use this for size-swap guard
-
 def _load_whisper() -> Optional[object]:
-    """Load Whisper via the lifecycle manager (lazy, idle-unloading)."""
     model = _whisper_mgr.load()
     if model is not None:
         _whisper_mgr.start_watchdog()
     return model
 
 def _quarantine_file(filepath: str) -> str:
-    """Move a corrupt OGG to the broken dir. Returns the filename."""
     src = Path(filepath)
-    dst = _broken_dir() / src.name
+    dst = _BROKEN_DIR / src.name
     try:
         if src.exists():
             try:
                 src.rename(dst)
             except (FileExistsError, OSError):
-                src.unlink(missing_ok=True)  # dst already exists, drop src
+                src.unlink(missing_ok=True)
             print(f"[{MODULE_NAME}] Quarantined corrupt file → {dst}")
         return src.name
     except Exception as exc:
@@ -462,19 +384,44 @@ def _quarantine_file(filepath: str) -> str:
         return src.name
 
 def _is_audio_valid(audio) -> bool:
-    """Return False if the audio array is None, empty, or all-zero (silent)."""
     if audio is None or len(audio) == 0:
         return False
-    if len(audio) < 1600:          # < 0.1 s at 16 kHz
+    if len(audio) < 1600:
         return False
     return True
 
+def _transcribe_core(filepath: str, model: object) -> Tuple[Optional[str], Optional[str]]:
+    import whisper as _whisper
+
+    try:
+        audio = _whisper.load_audio(filepath)
+    except Exception as exc:
+        return None, f"Cannot read audio: {exc}"
+
+    if not _is_audio_valid(audio):
+        return None, "Audio too short/empty"
+
+    try:
+        audio = _whisper.pad_or_trim(audio)
+        mel   = _whisper.log_mel_spectrogram(audio).to(model.device)
+    except Exception as exc:
+        return None, f"Mel failed: {exc}"
+
+    try:
+        _, _probs = model.detect_language(mel)
+        options   = _whisper.DecodingOptions(fp16=False)
+        result    = _whisper.decode(model, mel, options)
+        _whisper_mgr.touch()
+        return (result.text or "").strip() or None, None
+    except (RuntimeError, ValueError) as exc:
+        return None, f"Decode failed: {exc}"
+    except Exception as exc:
+        exc_str = str(exc)
+        if "Linear(" in exc_str or "in_features" in exc_str:
+            return None, "Whisper internal error"
+        return None, f"Transcription error: {exc_str}"
+
 def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool, str]:
-    """
-    Transcribe one OGG file synchronously.
-    Returns (transcript, duration_secs, waveform_b64, is_broken, actual_filename).
-    Never raises — all errors result in is_broken=True.
-    """
     try:
         duration = _get_ogg_duration(filepath)
         waveform = _generate_waveform(filepath)
@@ -483,44 +430,12 @@ def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool, 
         if model is None:
             return None, duration, waveform, False, Path(filepath).name
 
-        import whisper as _whisper
-
-        try:
-            audio = _whisper.load_audio(filepath)
-        except Exception as exc:
-            print(f"[{MODULE_NAME}] Cannot read audio ({filepath}): {exc} — quarantining")
+        transcript, error = _transcribe_core(filepath, model)
+        if error is not None:
+            print(f"[{MODULE_NAME}] {error} ({filepath}) — quarantining")
             return None, 0.0, waveform, True, _quarantine_file(filepath)
 
-        if not _is_audio_valid(audio):
-            print(f"[{MODULE_NAME}] Audio too short/empty ({filepath}) — quarantining")
-            return None, 0.0, waveform, True, _quarantine_file(filepath)
-
-        try:
-            audio = _whisper.pad_or_trim(audio)
-            mel   = _whisper.log_mel_spectrogram(audio).to(model.device)
-        except Exception as exc:
-            print(f"[{MODULE_NAME}] Mel failed ({filepath}): {exc} — quarantining")
-            return None, 0.0, waveform, True, _quarantine_file(filepath)
-
-        try:
-            _, probs = model.detect_language(mel)
-            options  = _whisper.DecodingOptions(fp16=False)
-            result   = _whisper.decode(model, mel, options)
-            transcript = (result.text or "").strip() or None
-            _whisper_mgr.touch()   # reset idle-unload timer
-            return transcript, duration, waveform, False, Path(filepath).name
-
-        except (RuntimeError, ValueError) as exc:
-            print(f"[{MODULE_NAME}] Decode failed ({filepath}): {exc} — quarantining")
-            return None, duration, waveform, True, _quarantine_file(filepath)
-
-        except Exception as exc:
-            exc_str = str(exc)
-            if "Linear("in exc_str or "in_features"in exc_str:
-                print(f"[{MODULE_NAME}] Whisper internal error ({filepath}) — quarantining")
-            else:
-                print(f"[{MODULE_NAME}] Transcription error ({filepath}): {exc_str} — quarantining")
-            return None, duration, waveform, True, _quarantine_file(filepath)
+        return transcript, duration, waveform, False, Path(filepath).name
 
     except Exception as exc:
         print(f"[{MODULE_NAME}] Fatal processing error ({filepath}): {exc} — quarantining")
@@ -532,28 +447,15 @@ def _process_file_sync(filepath: str) -> Tuple[Optional[str], float, str, bool, 
         return None, 0.0, "", True, broken_name
 
 def _transcribe_with_model(filepath: str, model_size: str) -> Tuple[Optional[str], float, bool]:
-    """Transcribe with a specific model size. Returns (transcript, duration, is_broken). Does not touch the DB."""
     try:
         duration = _get_ogg_duration(filepath)
-        import whisper as _whisper
-
-        # Load (or swap to) the requested model size via the lifecycle manager.
         model = _whisper_mgr.load(model_size)
         if model is None:
             return None, duration, True
-
-        audio = _whisper.load_audio(filepath)
-        if not _is_audio_valid(audio):
+        transcript, error = _transcribe_core(filepath, model)
+        if error is not None:
             return None, duration, True
-
-        audio  = _whisper.pad_or_trim(audio)
-        mel    = _whisper.log_mel_spectrogram(audio).to(model.device)
-        _, _   = model.detect_language(mel)
-        opts   = _whisper.DecodingOptions(fp16=False)
-        result = _whisper.decode(model, mel, opts)
-        _whisper_mgr.touch()   # reset idle-unload timer
-        return (result.text or "").strip() or None, duration, False
-
+        return transcript, duration, False
     except Exception:
         return None, 0.0, True
 
@@ -565,7 +467,6 @@ async def _send_voice_message(
     waveform_b64: str,
     session: aiohttp.ClientSession,
 ) -> Optional[dict]:
-    """Upload an OGG and post it as a Discord voice message (flags: 8192)."""
     ogg_bytes = Path(ogg_path).read_bytes()
     file_size = len(ogg_bytes)
 
@@ -634,23 +535,9 @@ async def _send_voice_message(
         print(f"[{MODULE_NAME}] Message send error: {exc}")
         return None
 
-def _is_cuda() -> bool:
-    try:
-        import torch
-        return torch.cuda.is_available()
-    except ImportError:
-        return False
-
-_CUDA_AVAILABLE: bool = _is_cuda()
-
-_BULK_SENTINEL = object()   # pushed into the work queue to signal "no more files"
+_BULK_SENTINEL = object()
 
 class BulkProcessor:
-    """
-    Background thread processor for large OGG backlogs.
-    Feed files via feed(vm_id, filepath), call done_feeding() when finished.
-    Whisper runs sequentially (not thread-safe); results are committed per-file.
-    """
 
     def __init__(self, db_path: str, vms_dir: Path, logger, stop_event: threading.Event):
         self.db_path     = db_path
@@ -661,8 +548,6 @@ class BulkProcessor:
         self._thread: Optional[threading.Thread] = None
 
     def start(self, initial_files: Optional[List[Tuple[int, str]]] = None):
-        """Start the worker thread, optionally pre-seeding with (vm_id, filepath) pairs."""
-        # Drain stale sentinels from a previous run
         while not self._work_q.empty():
             try:
                 self._work_q.get_nowait()
@@ -681,26 +566,22 @@ class BulkProcessor:
         self._thread.start()
         self.logger.log(MODULE_NAME,
             f"BulkProcessor started "
-            f"(workers={'GPU×' + str(BULK_GPU_WORKERS) if _CUDA_AVAILABLE else 'CPU×' + str(BULK_CPU_WORKERS)})")
+            f"(workers={'GPU×' + str(BULK_GPU_WORKERS) if _is_cuda() else 'CPU×' + str(BULK_CPU_WORKERS)})")
 
     def feed(self, vm_id: int, filepath: str):
-        """Push one file onto the work queue — safe to call from any thread."""
         self._work_q.put((vm_id, filepath))
 
     def done_feeding(self):
-        """Signal that no more files will be fed; worker drains and exits."""
         self._work_q.put(_BULK_SENTINEL)
 
     def stop(self):
-        """Hard stop — signal the worker to exit after the current batch."""
         self.stop_event.set()
-        self._work_q.put(_BULK_SENTINEL)   # unblock queue.get() if idle
+        self._work_q.put(_BULK_SENTINEL)
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
     def _run(self):
-        """Sequential worker loop. Blocks on queue, processes files, commits results one-by-one."""
         done   = 0
         errors = 0
 
@@ -755,11 +636,10 @@ class BulkProcessor:
             f"BulkProcessor complete: {done} processed, {errors} errors")
 
     def _commit_batch(self, batch: list):
-        """Write transcription results to SQLite. Archived files stay at processed=2; others → 1."""
         try:
             conn = sqlite3.connect(self.db_path)
             conn.execute("PRAGMA journal_mode=WAL")
-            archive_name_set = {p.name for p in _archive_dir().glob("*.ogg")}
+            archive_name_set = {p.name for p in _ARCHIVE_DIR.glob("*.ogg")}
             try:
                 for vm_id, transcript, duration, waveform, filename in batch:
                     new_state = 2 if filename in archive_name_set else 1
@@ -782,7 +662,6 @@ class BulkProcessor:
                 f"BulkProcessor: DB commit error — {exc}", "ERROR")
 
     def _commit_broken(self, batch: list):
-        """Mark broken VM rows as processed=4."""
         if not batch:
             return
         try:
@@ -803,13 +682,12 @@ class BulkProcessor:
                 f"BulkProcessor: broken-batch commit error — {exc}", "ERROR")
 
 class VMSManager:
-    """Central manager: storage, transcription queuing, archiving, playback."""
 
     def __init__(self, bot):
         self.bot         = bot
         self.db_path     = _db_path()
-        self.vms_dir     = _vms_dir()
-        self.archive_dir = _archive_dir()
+        self.vms_dir     = _VMS_DIR
+        self.archive_dir = _ARCHIVE_DIR
         self._token: str = os.getenv("DISCORD_BOT_TOKEN", "")
         self._session: Optional[aiohttp.ClientSession] = None
         self._executor      = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vms_live")
@@ -830,12 +708,9 @@ class VMSManager:
         self.bot.logger.log(MODULE_NAME, "VMSManager initialised")
         self.bot.logger.log(MODULE_NAME,
             f"Paths — vms: {self.vms_dir} | archive: {self.archive_dir} "
-            f"| broken: {_broken_dir()} | db: {self.db_path}")
-
-    # -------------------------------------------------------- Migration ------
+            f"| broken: {_BROKEN_DIR} | db: {self.db_path}")
 
     def _migrate_filepath_column(self):
-        """Drop legacy filepath column from old DBs (paths are now resolved at runtime)."""
         conn = self._conn()
         try:
             cols = [row[1] for row in conn.execute("PRAGMA table_info(vms)").fetchall()]
@@ -845,7 +720,6 @@ class VMSManager:
             self.bot.logger.log(MODULE_NAME,
                 "Old DB detected: dropping filepath column…")
 
-            # Use table rebuild for SQLite <3.35 compatibility
             conn.executescript("""
                 BEGIN;
                 CREATE TABLE IF NOT EXISTS vms_new (
@@ -878,19 +752,17 @@ class VMSManager:
         finally:
             conn.close()
 
-    # ------------------------------------------------------- Path resolver ---
-
     def _resolve_path(self, filename: str) -> Optional[Path]:
-        """Find a VM file across known dirs (vms/, archive/, broken/). Returns Path or None."""
         if not filename or filename == "__pending__":
             return None
-        for d in (self.vms_dir, self.archive_dir, _broken_dir()):
+        for d in (self.vms_dir, self.archive_dir, _BROKEN_DIR):
             p = d / filename
             if p.exists():
                 return p
         return None
 
-    # ------------------------------------------------------------------ DB --
+    def _ensure_bulk_proc(self):
+        self._ensure_bulk_proc()
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -919,39 +791,29 @@ class VMSManager:
         finally:
             conn.close()
 
-    # -------------------------------------------------- Backfill Checkpoint --
-
     def _save_backfill_checkpoint(self, last_message_id: int):
-        """Persist the last successfully scanned Discord message ID."""
         self._db_exec(
             "INSERT OR REPLACE INTO vms_kv (key, value) VALUES ('backfill_checkpoint', ?)",
             (str(last_message_id),)
         )
 
     def _load_backfill_checkpoint(self) -> Optional[int]:
-        """Return the last checkpointed Discord message ID, or None if none exists."""
         row = self._db_one("SELECT value FROM vms_kv WHERE key='backfill_checkpoint'")
         return int(row[0]) if row else None
 
     def _clear_backfill_checkpoint(self):
-        """Remove the checkpoint once backfill has completed successfully."""
         self._db_exec("DELETE FROM vms_kv WHERE key='backfill_checkpoint'")
-
-    # -------------------------------------------------------------- Session --
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
         return self._session
 
-    # -------------------------------------------------- Live Transcription Queue --
-
     async def _start_queue_worker(self):
         self._queue_task = asyncio.create_task(self._queue_worker())
         self.bot.logger.log(MODULE_NAME, "Live transcription queue worker started")
 
     async def _queue_worker(self):
-        """Process live voice messages one at a time via run_in_executor."""
         while True:
             try:
                 vm_id, filepath, reply_to = await self.queue.get()
@@ -1019,14 +881,10 @@ class VMSManager:
 
     async def enqueue(self, vm_id: int, filepath: str,
                       reply_to: Optional[discord.Message] = None):
-        """Add a live voice message to the transcription queue."""
         await self.queue.put((vm_id, filepath, reply_to))
         self.bot.logger.log(MODULE_NAME, f"VM #{vm_id} queued for transcription")
 
-    # ----------------------------------------------- Transcription Opt-out --
-
     def is_transcription_disabled(self, user_id: str, guild_id: str) -> bool:
-        """Return True if the user has disabled auto-transcription in this guild."""
         row = self._db_one(
             "SELECT 1 FROM vms_transcription_disabled WHERE user_id=? AND guild_id=?",
             (user_id, guild_id)
@@ -1034,7 +892,6 @@ class VMSManager:
         return row is not None
 
     def set_transcription_disabled(self, user_id: str, guild_id: str, disabled: bool):
-        """Enable or disable auto-transcription for a user in a guild."""
         if disabled:
             self._db_exec(
                 "INSERT OR IGNORE INTO vms_transcription_disabled (user_id, guild_id) VALUES (?, ?)",
@@ -1046,12 +903,9 @@ class VMSManager:
                 (user_id, guild_id)
             )
 
-    # ------------------------------------------------------- Save Voice Msg --
-
     async def save_voice_message(
         self, message: discord.Message, attachment: discord.Attachment
     ) -> Optional[int]:
-        """Download and persist a voice message. Returns the DB row id or None on failure."""
         ts       = int(time.time())
         guild_id = str(message.guild.id) if message.guild else None
 
@@ -1093,20 +947,11 @@ class VMSManager:
             self.bot.logger.error(MODULE_NAME, "Failed to save voice message", exc)
         return None
 
-    # ----------------------------------------------- Retroactive Processing --
-
     def _scan_and_conform(self) -> list:
-        """
-        Synchronous startup scan (run in executor).
-        Phase 1: Conform existing filenames to canonical format.
-        Phase 2: Register untracked OGG files.
-        Phase 2b: Reset archived-but-untranscribed rows to pending.
-        Returns list of (vm_id, filepath) pairs ready for BulkProcessor.
-        """
         scan_dirs = [
             (self.vms_dir,     "vms",     0),
             (self.archive_dir, "archive", 2),
-            (_broken_dir(),    "broken",  4),
+            (_BROKEN_DIR,    "broken",  4),
         ]
 
         existing_canonical = {
@@ -1139,7 +984,7 @@ class VMSManager:
                     continue
 
                 old_path = None
-                for d in (self.vms_dir, self.archive_dir, _broken_dir()):
+                for d in (self.vms_dir, self.archive_dir, _BROKEN_DIR):
                     candidate = d / old_name
                     if candidate.exists():
                         old_path = candidate
@@ -1246,19 +1091,7 @@ class VMSManager:
             print(f"[{MODULE_NAME}] {missing} pending VM(s) have missing files — skipping")
         return valid
 
-    def _db_batch_update(self, query: str, params: list):
-        """Execute an executemany update in a single connection/commit."""
-        if not params:
-            return
-        conn = self._conn()
-        try:
-            conn.executemany(query, params)
-            conn.commit()
-        finally:
-            conn.close()
-
     async def process_unprocessed(self):
-        """Scan/conform files then feed pending ones into BulkProcessor."""
         self.bot.logger.log(MODULE_NAME,
             "Startup scan: conforming names and registering files in all dirs…")
 
@@ -1273,23 +1106,13 @@ class VMSManager:
         self.bot.logger.log(MODULE_NAME,
             f"Scan found {len(valid)} pending VM(s) — feeding BulkProcessor")
 
-        if self._bulk_proc is None or not self._bulk_proc.is_running():
-            self._bulk_stop.clear()
-            self._bulk_proc = BulkProcessor(
-                db_path=self.db_path,
-                vms_dir=self.vms_dir,
-                logger=self.bot.logger,
-                stop_event=self._bulk_stop,
-            )
-            self._bulk_proc.start()
+        self._ensure_bulk_proc()
 
         for vm_id, fp in valid:
             self._bulk_proc.feed(vm_id, fp)
 
         if not self._backfill_running:
             self._bulk_proc.done_feeding()
-
-    # ---------------------------------------------------------- Archive Job --
 
     async def run_archive_if_due(self):
         row      = self._db_one(
@@ -1310,7 +1133,6 @@ class VMSManager:
             self.bot.logger.log(MODULE_NAME, f"Archive job not due yet (next: {next_dt})")
 
     async def _do_archive(self):
-        """Move VMs ≥150 days → archive; delete VMs ≥365 days."""
         now            = int(time.time())
         archive_cutoff = now - (ARCHIVE_AFTER_DAYS * 86400)
         delete_cutoff  = now - (DELETE_AFTER_DAYS  * 86400)
@@ -1357,19 +1179,12 @@ class VMSManager:
         self.bot.logger.log(MODULE_NAME,
             f"Archive job complete — archived: {archived}, deleted: {deleted}")
 
-    # ------------------------------------------------------------ Playback --
-
     @staticmethod
     def _keywords(text: str) -> set:
         words = re.findall(r"\b[a-z]{3,}\b", text.lower())
         return {w for w in words if w not in STOP_WORDS}
 
     def _eligible_vms(self):
-        """
-        VMs that are transcribed, have an accessible file, and are outside
-        their 7-day cooldown.
-        Columns: id, filepath, transcript, duration_secs, created_at, last_played
-        """
         cutoff = int(time.time()) - (VM_COOLDOWN_DAYS * 86400)
         rows = self._db_all(
             """SELECT v.id, v.filename, v.transcript, v.duration_secs, v.created_at,
@@ -1443,7 +1258,6 @@ class VMSManager:
         )
 
     async def send_vm(self, channel, vm_id: int, filepath: str, duration: float) -> bool:
-        """Send a VM to a channel as a Discord voice message."""
         try:
             row      = self._db_one("SELECT waveform_b64 FROM vms WHERE id=?", (vm_id,))
             waveform = (row[0] if row and row[0] else None) or _generate_waveform(filepath)
@@ -1463,8 +1277,6 @@ class VMSManager:
         except Exception as exc:
             self.bot.logger.error(MODULE_NAME, f"send_vm error for #{vm_id}", exc)
             return False
-
-    # -------------------------------------------------- Message Counter --
 
     def _get_counter(self, guild_id: str, channel_id: str) -> Tuple[int, int]:
         row = self._db_one(
@@ -1495,8 +1307,6 @@ class VMSManager:
             (guild_id, channel_id, new_thresh)
         )
 
-    # -------------------------------------------------- Ping Cooldown --
-
     def ping_allowed(self, user_id: str) -> bool:
         row = self._db_one(
             "SELECT last_ping FROM vms_ping_cooldown WHERE user_id=?", (user_id,)
@@ -1512,8 +1322,6 @@ class VMSManager:
             (user_id, int(time.time()))
         )
 
-    # -------------------------------------------------- Context Helper --
-
     def recent_messages(self, guild_id: str, channel_id: str, limit: int = 20) -> List[str]:
         try:
             mod = getattr(self.bot, '_mod_system', None)
@@ -1524,10 +1332,7 @@ class VMSManager:
             pass
         return []
 
-    # ---------------------------------------------------------------- Backfill --
-
-    async def _backfill_from_discord(self, resume_after_id: Optional[int] = None):
-        """Scrape #general for the last BACKFILL_DAYS of VMs and download any not already in the DB."""
+    async def _backfill(self, scan_after, label="Backfill"):
         self._backfill_running = True
 
         general_channel = None
@@ -1539,43 +1344,24 @@ class VMSManager:
 
         if general_channel is None:
             self.bot.logger.log(MODULE_NAME,
-                "Backfill: could not find #general in any guild — skipping", "WARNING")
+                f"{label}: could not find #{GENERAL_CHANNEL_NAME} in any guild — skipping", "WARNING")
             self._backfill_running = False
             return
 
-        from datetime import timezone, timedelta
-        cutoff_dt = discord.utils.utcnow().replace(tzinfo=timezone.utc) - timedelta(days=BACKFILL_DAYS)
+        self.bot.logger.log(MODULE_NAME,
+            f"{label}: scanning #{general_channel.name} in '{general_channel.guild.name}' "
+            f"from {scan_after.strftime('%Y-%m-%d %H:%M:%S UTC')} onwards…")
 
-        if resume_after_id:
-            resume_dt = discord.utils.snowflake_time(resume_after_id)
-            scan_after = resume_dt
-            self.bot.logger.log(MODULE_NAME,
-                f"Backfill: RESUMING after message {resume_after_id} "
-                f"({resume_dt.strftime('%Y-%m-%d %H:%M:%S UTC')}) in #{general_channel.name}…")
-        else:
-            scan_after = cutoff_dt
-            self.bot.logger.log(MODULE_NAME,
-                f"Backfill: scanning #{general_channel.name} in '{general_channel.guild.name}' "
-                f"back to {cutoff_dt.strftime('%Y-%m-%d')}…")
-
-        self.bot.logger.log(MODULE_NAME, "Backfill: pre-loading Whisper model…")
+        self.bot.logger.log(MODULE_NAME, f"{label}: pre-loading Whisper model…")
         loop = asyncio.get_running_loop()
         model = await loop.run_in_executor(self._executor, _load_whisper)
         if model is None:
             self.bot.logger.log(MODULE_NAME,
-                "Backfill: Whisper failed to load — files will still be downloaded", "WARNING")
+                f"{label}: Whisper failed to load — files will still be downloaded", "WARNING")
         else:
-            self.bot.logger.log(MODULE_NAME, "Backfill: Whisper ready")
+            self.bot.logger.log(MODULE_NAME, f"{label}: Whisper ready")
 
-        if self._bulk_proc is None or not self._bulk_proc.is_running():
-            self._bulk_stop.clear()
-            self._bulk_proc = BulkProcessor(
-                db_path=self.db_path,
-                vms_dir=self.vms_dir,
-                logger=self.bot.logger,
-                stop_event=self._bulk_stop,
-            )
-            self._bulk_proc.start()
+        self._ensure_bulk_proc()
 
         known_ids = {
             r[0]
@@ -1601,156 +1387,7 @@ class VMSManager:
 
                 if msgs_seen % BACKFILL_SLEEP_EVERY == 0:
                     self.bot.logger.log(MODULE_NAME,
-                        f"Backfill: scanned {msgs_seen} messages "
-                        f"({downloaded} downloaded) — pausing {BACKFILL_SLEEP_SECS}s…")
-                    await asyncio.sleep(BACKFILL_SLEEP_SECS)
-
-                for att in message.attachments:
-                    is_vm = att.filename.lower() == "voice-message.ogg"
-                    if not is_vm:
-                        continue
-
-                    msg_id_str = str(message.id)
-                    if msg_id_str in known_ids:
-                        skipped += 1
-                        continue
-
-                    try:
-                        ts       = int(message.created_at.timestamp())
-                        guild_id = str(message.guild.id) if message.guild else None
-
-                        conn = self._conn()
-                        try:
-                            cur = conn.execute(
-                                """INSERT INTO vms
-                                   (filename, discord_message_id, discord_channel_id,
-                                    guild_id, duration_secs, processed, created_at)
-                                   VALUES ('__pending__', ?, ?, ?, 0.0, 0, ?)""",
-                                (msg_id_str, str(message.channel.id), guild_id, ts)
-                            )
-                            vm_id = cur.lastrowid
-                            conn.commit()
-                        finally:
-                            conn.close()
-
-                        username   = getattr(message.author, 'name', None)
-                        canon_name = _vm_canonical_name(vm_id, username, msg_id_str, ts)
-                        canon_path = self.vms_dir / canon_name
-                        raw        = await att.read()
-                        canon_path.write_bytes(raw)
-
-                        duration = await asyncio.get_running_loop().run_in_executor(
-                            None, _get_ogg_duration, str(canon_path)
-                        )
-                        self._db_exec(
-                            "UPDATE vms SET filename=?, duration_secs=? WHERE id=?",
-                            (canon_name, duration, vm_id)
-                        )
-
-                        self._bulk_proc.feed(vm_id, str(canon_path))
-
-                        known_ids.add(msg_id_str)
-                        downloaded += 1
-
-                        if downloaded % 100 == 0:
-                            self.bot.logger.log(MODULE_NAME,
-                                f"Backfill: {downloaded} downloaded so far…")
-
-                        await asyncio.sleep(BACKFILL_DL_SLEEP)
-
-                    except Exception as exc:
-                        self.bot.logger.log(MODULE_NAME,
-                            f"Backfill: failed to download message {message.id}: {exc}", "WARNING")
-                        errors += 1
-
-                self._save_backfill_checkpoint(message.id)
-
-        except discord.Forbidden:
-            self.bot.logger.log(MODULE_NAME,
-                f"Backfill: no permission to read #{general_channel.name} — skipping", "WARNING")
-        except Exception as exc:
-            self.bot.logger.log(MODULE_NAME,
-                f"Backfill: history scrape error — {exc}", "ERROR")
-        finally:
-            self._backfill_running = False
-            if self._bulk_proc and self._bulk_proc.is_running():
-                self._bulk_proc.done_feeding()
-
-        self.bot.logger.log(MODULE_NAME,
-            f"Backfill complete: {downloaded} downloaded, {skipped} already known, {errors} errors")
-        self._clear_backfill_checkpoint()
-
-    # --------------------------------------------------------- Date Backfill --
-
-    async def _backfill_from_date(self, since_dt):
-        """Like _backfill_from_discord but starts from an explicit datetime. Used by vms-resume."""
-        self._backfill_running = True
-
-        general_channel = None
-        for guild in self.bot.guilds:
-            ch = discord.utils.get(guild.text_channels, name=GENERAL_CHANNEL_NAME)
-            if ch is not None:
-                general_channel = ch
-                break
-
-        if general_channel is None:
-            self.bot.logger.log(MODULE_NAME,
-                "vms-resume: could not find #general in any guild — aborting", "WARNING")
-            self._backfill_running = False
-            return
-
-        self.bot.logger.log(MODULE_NAME,
-            f"vms-resume: scanning #{general_channel.name} in '{general_channel.guild.name}' "
-            f"from {since_dt.strftime('%Y-%m-%d %H:%M:%S UTC')} onwards…")
-
-        self.bot.logger.log(MODULE_NAME, "vms-resume: pre-loading Whisper model…")
-        loop = asyncio.get_running_loop()
-        model = await loop.run_in_executor(self._executor, _load_whisper)
-        if model is None:
-            self.bot.logger.log(MODULE_NAME,
-                "vms-resume: Whisper failed to load — files will still be downloaded", "WARNING")
-        else:
-            self.bot.logger.log(MODULE_NAME, "vms-resume: Whisper ready")
-
-        if self._bulk_proc is None or not self._bulk_proc.is_running():
-            self._bulk_stop.clear()
-            self._bulk_proc = BulkProcessor(
-                db_path=self.db_path,
-                vms_dir=self.vms_dir,
-                logger=self.bot.logger,
-                stop_event=self._bulk_stop,
-            )
-            self._bulk_proc.start()
-
-        known_ids = {
-            r[0]
-            for r in self._db_all(
-                "SELECT discord_message_id FROM vms WHERE discord_message_id IS NOT NULL"
-            )
-        }
-
-        downloaded = 0
-        skipped    = 0
-        errors     = 0
-        msgs_seen  = 0
-
-        BACKFILL_SLEEP_EVERY = 200
-        BACKFILL_SLEEP_SECS  = 2.0
-        BACKFILL_DL_SLEEP    = 0.5
-
-        try:
-            async for message in general_channel.history(
-                limit=None, after=since_dt, oldest_first=True
-            ):
-                msgs_seen += 1
-
-                if message.author.bot:
-                    self._save_backfill_checkpoint(message.id)
-                    continue
-
-                if msgs_seen % BACKFILL_SLEEP_EVERY == 0:
-                    self.bot.logger.log(MODULE_NAME,
-                        f"vms-resume: scanned {msgs_seen} messages "
+                        f"{label}: scanned {msgs_seen} messages "
                         f"({downloaded} downloaded) — pausing {BACKFILL_SLEEP_SECS}s…")
                     await asyncio.sleep(BACKFILL_SLEEP_SECS)
 
@@ -1802,39 +1439,33 @@ class VMSManager:
 
                         if downloaded % 100 == 0:
                             self.bot.logger.log(MODULE_NAME,
-                                f"vms-resume: {downloaded} downloaded so far…")
+                                f"{label}: {downloaded} downloaded so far…")
 
                         await asyncio.sleep(BACKFILL_DL_SLEEP)
 
                     except Exception as exc:
                         self.bot.logger.log(MODULE_NAME,
-                            f"vms-resume: failed to download message {message.id}: {exc}",
-                            "WARNING")
+                            f"{label}: failed to download message {message.id}: {exc}", "WARNING")
                         errors += 1
 
                 self._save_backfill_checkpoint(message.id)
 
         except discord.Forbidden:
             self.bot.logger.log(MODULE_NAME,
-                f"vms-resume: no permission to read #{general_channel.name} — aborting",
-                "WARNING")
+                f"{label}: no permission to read #{general_channel.name} — skipping", "WARNING")
         except Exception as exc:
             self.bot.logger.log(MODULE_NAME,
-                f"vms-resume: history scrape error — {exc}", "ERROR")
+                f"{label}: history scrape error — {exc}", "ERROR")
         finally:
             self._backfill_running = False
             if self._bulk_proc and self._bulk_proc.is_running():
                 self._bulk_proc.done_feeding()
 
         self.bot.logger.log(MODULE_NAME,
-            f"vms-resume complete: {downloaded} downloaded, "
-            f"{skipped} already known, {errors} errors")
+            f"{label} complete: {downloaded} downloaded, {skipped} already known, {errors} errors")
         self._clear_backfill_checkpoint()
-
-    # -------------------------------------------------------- Bot-VM Purge ------
 
     def _purge_bot_vms(self):
-        """Remove DB rows and files for VMs sent by the bot itself (vm_Embot_... filenames)."""
         bot_rows = self._db_all(
             "SELECT id, filename FROM vms WHERE filename LIKE 'vm\\_Embot\\_%' ESCAPE '\\'"
         )
@@ -1846,9 +1477,8 @@ class VMSManager:
             f"Purging {len(bot_rows)} DB entry/entries sent by the bot (Embot)…")
 
         purged_files = 0
-        purged_rows  = 0
-        for vm_id, filename in bot_rows:
-            for search_dir in (self.vms_dir, self.archive_dir, _broken_dir()):
+        for _, filename in bot_rows:
+            for search_dir in (self.vms_dir, self.archive_dir, _BROKEN_DIR):
                 candidate = search_dir / filename
                 if candidate.exists():
                     try:
@@ -1860,27 +1490,22 @@ class VMSManager:
                         self.bot.logger.log(MODULE_NAME,
                             f"Could not delete {candidate}: {exc}", "WARNING")
 
-            try:
-                conn = self._conn()
-                try:
-                    conn.execute("DELETE FROM vms_playback WHERE vm_id=?", (vm_id,))
-                    conn.execute("DELETE FROM vms WHERE id=?", (vm_id,))
-                    conn.commit()
-                    purged_rows += 1
-                finally:
-                    conn.close()
-            except Exception as exc:
-                self.bot.logger.log(MODULE_NAME,
-                    f"DB purge error for VM #{vm_id}: {exc}", "WARNING")
+        vm_ids = [(vid,) for vid, _ in bot_rows]
+        conn = self._conn()
+        try:
+            conn.executemany("DELETE FROM vms_playback WHERE vm_id=?", vm_ids)
+            conn.executemany("DELETE FROM vms WHERE id=?", vm_ids)
+            conn.commit()
+        except Exception as exc:
+            self.bot.logger.log(MODULE_NAME, f"DB purge error: {exc}", "WARNING")
+        finally:
+            conn.close()
 
         self.bot.logger.log(MODULE_NAME,
-            f"Bot-VM purge complete: {purged_rows} row(s) removed, "
+            f"Bot-VM purge complete: {len(vm_ids)} row(s) removed, "
             f"{purged_files} file(s) deleted")
 
-    # ---------------------------------------------------------------- Startup --
-
     async def startup(self):
-        """Start queue worker, run scan/backfill as needed, then archive check."""
         await self._start_queue_worker()
         await asyncio.sleep(0.5)
 
@@ -1888,34 +1513,24 @@ class VMSManager:
 
         resume_checkpoint = self._load_backfill_checkpoint()
 
+        from datetime import timezone, timedelta
+        cutoff_dt = discord.utils.utcnow().replace(tzinfo=timezone.utc) - timedelta(days=BACKFILL_DAYS)
+
         if not any(self.vms_dir.glob("*.ogg")):
             self.bot.logger.log(MODULE_NAME,
                 "Cache is empty — starting Discord backfill and scan concurrently…")
-            self._bulk_stop.clear()
-            self._bulk_proc = BulkProcessor(
-                db_path=self.db_path,
-                vms_dir=self.vms_dir,
-                logger=self.bot.logger,
-                stop_event=self._bulk_stop,
-            )
-            self._bulk_proc.start()
+            self._ensure_bulk_proc()
             await asyncio.gather(
-                self._backfill_from_discord(),
+                self._backfill(cutoff_dt),
                 self.process_unprocessed(),
             )
         elif resume_checkpoint is not None:
+            scan_after = discord.utils.snowflake_time(resume_checkpoint)
             self.bot.logger.log(MODULE_NAME,
                 f"Interrupted backfill detected — resuming from checkpoint {resume_checkpoint}…")
-            self._bulk_stop.clear()
-            self._bulk_proc = BulkProcessor(
-                db_path=self.db_path,
-                vms_dir=self.vms_dir,
-                logger=self.bot.logger,
-                stop_event=self._bulk_stop,
-            )
-            self._bulk_proc.start()
+            self._ensure_bulk_proc()
             await asyncio.gather(
-                self._backfill_from_discord(resume_after_id=resume_checkpoint),
+                self._backfill(scan_after, label="Backfill (resume)"),
                 self.process_unprocessed(),
             )
         else:
@@ -1925,10 +1540,8 @@ class VMSManager:
         self.bot.logger.log(MODULE_NAME, "VMS startup complete")
 
     async def shutdown(self):
-        """Gracefully shut down all background workers, executors, and the Whisper model."""
         self.bot.logger.log(MODULE_NAME, "VMS shutting down…")
 
-        # Cancel the live transcription queue worker
         if self._queue_task is not None and not self._queue_task.done():
             self._queue_task.cancel()
             try:
@@ -1937,19 +1550,15 @@ class VMSManager:
                 pass
             self._queue_task = None
 
-        # Stop the BulkProcessor
         if self._bulk_proc is not None and self._bulk_proc.is_running():
             self._bulk_proc.stop()
 
-        # Shut down thread-pool executors (wait for in-flight work to finish)
         self._executor.shutdown(wait=True)
         self._scan_executor.shutdown(wait=True)
 
-        # Unload Whisper and stop its idle-watchdog thread
         _whisper_mgr.stop_watchdog()
         _whisper_mgr.unload()
 
-        # Close the aiohttp session
         if self._session and not self._session.closed:
             await self._session.close()
 
@@ -1958,11 +1567,11 @@ class VMSManager:
 EXT_COOLDOWN_SECONDS = 30
 
 _ext_queue:        Optional[asyncio.Queue] = None
-_ext_pending:      list                    = []   # mirrors queue contents for position tracking
+_ext_pending:      list                    = []
 _ext_pending_lock: Optional[asyncio.Lock]  = None
-_ext_cooldowns:    dict                    = {}   # user_id → last request timestamp
+_ext_cooldowns:    dict                    = {}
 _ext_worker_task:  Optional[asyncio.Task]  = None
-_ext_avg_secs:     float                   = 5.0  # EMA of actual transcription times
+_ext_avg_secs:     float                   = 5.0
 _EXT_AVG_ALPHA:    float                   = 0.3
 
 def _ext_cooldown_remaining(user_id: str) -> float:
@@ -1970,15 +1579,13 @@ def _ext_cooldown_remaining(user_id: str) -> float:
     return max(0.0, EXT_COOLDOWN_SECONDS - (time.time() - last))
 
 def _ext_queue_eta(position: int) -> float:
-    """Estimated seconds until item at given 1-based queue position is processed."""
     return position * _ext_avg_secs
 
 def _ext_status_embed(position: int, total: int, done: bool = False,
                       transcript: str = None, error: str = None) -> discord.Embed:
-    """Build a status embed for an external transcription request."""
     if error:
         e = discord.Embed(color=0xe74c3c)
-        e.description = f"{error}"
+        e.description = error
         return e
     if done:
         e = discord.Embed(color=0x2ecc71)
@@ -1997,10 +1604,6 @@ def _ext_status_embed(position: int, total: int, done: bool = False,
     return e
 
 def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
-    """
-    Compute stats exclusively from active (processed=1) VMs in the Emball guild.
-    Runs synchronously — call via run_in_executor.
-    """
     from collections import Counter
 
     rows = manager._db_all(
@@ -2083,7 +1686,6 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
         return f"{m}m {s}s"
 
     def fmt_big(secs: float) -> str:
-        """Express a large duration in the most readable unit."""
         if secs < 3600:
             return f"{secs/60:.1f} minutes"
         if secs < 86400:
@@ -2096,7 +1698,6 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
         timestamp=_now(),
     )
 
-    # — Overview
     embed.add_field(
         name="Overview",
         value=(
@@ -2107,7 +1708,6 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
         inline=False,
     )
 
-    # — Duration
     embed.add_field(
         name="⏱ Duration",
         value=(
@@ -2118,7 +1718,6 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
         inline=True,
     )
 
-    # — Words
     embed.add_field(
         name="Words",
         value=(
@@ -2129,7 +1728,6 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
         inline=True,
     )
 
-    # — Playback
     embed.add_field(
         name="▶ Playback",
         value=(
@@ -2139,7 +1737,6 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
         inline=True,
     )
 
-    # — Fun facts
     peak_hour_fmt = datetime.strptime(str(peak_hour), "%H").strftime("%I %p").lstrip("0")
     facts = [
         f"Chattiest sender: **{top_user}** with {top_user_count} VMs"if top_user else None,
@@ -2163,7 +1760,6 @@ def setup(bot):
     global _ext_queue, _ext_pending_lock, _ext_worker_task
 
     async def _start_ext_worker():
-        """Initialise queue/lock and launch worker — called after event loop is ready."""
         global _ext_queue, _ext_pending_lock, _ext_worker_task
 
         _ext_queue        = asyncio.Queue()
@@ -2185,7 +1781,6 @@ def setup(bot):
                     item = await _ext_queue.get()
                     vm_att, temp_path, followup_msg = item['vm_att'], item['temp_path'], item['msg']
 
-                    # Mark current item as "processing now"and update rest
                     async with _ext_pending_lock:
                         total = len(_ext_pending)
                     try:
@@ -2201,7 +1796,6 @@ def setup(bot):
                             except Exception:
                                 pass
 
-                    # Transcribe
                     t_start    = time.time()
                     transcript = None
                     broken     = False
@@ -2226,7 +1820,6 @@ def setup(bot):
                     elapsed = time.time() - t_start
                     _ext_avg_secs = _EXT_AVG_ALPHA * elapsed + (1 - _EXT_AVG_ALPHA) * _ext_avg_secs
 
-                    # Edit result
                     try:
                         if broken or not transcript:
                             await followup_msg.edit(
@@ -2239,7 +1832,6 @@ def setup(bot):
                     except Exception as exc:
                         bot.logger.log(MODULE_NAME, f"Ext worker: failed to edit result: {exc}", "WARNING")
 
-                    # Remove from tracking list and update remaining positions
                     async with _ext_pending_lock:
                         try:
                             _ext_pending.remove(item)
@@ -2256,7 +1848,6 @@ def setup(bot):
                     await asyncio.sleep(1)
 
         async def _watchdog():
-            """Restart the worker if it ever dies unexpectedly."""
             global _ext_worker_task
             while True:
                 await asyncio.sleep(5)
@@ -2273,7 +1864,6 @@ def setup(bot):
     manager         = VMSManager(bot)
     bot.vms_manager = manager
 
-    # Scheduled archive loop
     @tasks.loop(hours=ARCHIVE_JOB_INTERVAL_HOURS)
     async def _archive_loop():
         await manager.run_archive_if_due()
@@ -2298,7 +1888,6 @@ def setup(bot):
 
     if hasattr(bot, 'console_commands'):
         async def handle_vms_resume(args_str: str):
-            """vms-resume <date> — downloads VMs after the given date not already in the DB."""
             from datetime import timezone as _tz
 
             date_str = args_str.strip()
@@ -2332,7 +1921,7 @@ def setup(bot):
             print("Progress will be logged to console — this runs in the background.")
 
             asyncio.run_coroutine_threadsafe(
-                manager._backfill_from_date(since_dt),
+                manager._backfill(since_dt, label="vms-resume"),
                 bot.loop,
             )
 
@@ -2367,7 +1956,6 @@ def setup(bot):
                 if row:
                     resolved = manager._resolve_path(row[0])
                     if resolved:
-                        # Skip auto-transcription if the user has opted out in this guild
                         guild_id = str(message.guild.id) if message.guild else None
                         opted_out = (
                             guild_id is not None and
@@ -2433,7 +2021,6 @@ def setup(bot):
 
     @bot.listen()
     async def on_close():
-        """Ensure all VMS background workers and the Whisper model are cleaned up on shutdown."""
         await manager.shutdown()
 
     bot.logger.log(MODULE_NAME, "VMS module setup complete")
@@ -2443,10 +2030,8 @@ def setup(bot):
         message: discord.Message,
         ephemeral: bool,
     ):
-        """Shared handler for both Transcribe VM context menu commands."""
         await interaction.response.defer(ephemeral=ephemeral, thinking=True)
 
-        # Find the voice attachment
         vm_att = None
         for att in message.attachments:
             if att.filename.lower() == "voice-message.ogg":
@@ -2465,7 +2050,6 @@ def setup(bot):
             and message.guild.id == EMBALL_GUILD_ID
         )
 
-        # DMs and external guilds — queue-based, ephemeral always, never touch the DB
         if not is_emball:
             user_id = str(interaction.user.id)
             remaining_cd = _ext_cooldown_remaining(user_id)
@@ -2478,7 +2062,7 @@ def setup(bot):
 
             _ext_cooldowns[user_id] = time.time()
 
-            temp_dir  = _temp_vms_dir()
+            temp_dir  = _TEMP_VMS_DIR
             safe_name = re.sub(r'[^\w\-.]', '_', vm_att.filename)
             temp_path = temp_dir / f"ext_{message.id}_{safe_name}"
 
@@ -2495,7 +2079,6 @@ def setup(bot):
             await _ext_queue.put(item)
             return
 
-        # Emball guild — check if already cached first
         try:
             existing = manager._db_one(
                 """SELECT transcript FROM vms
@@ -2609,7 +2192,7 @@ def setup(bot):
                     "You can re-enable at any time with `/vmtranscribe enable`.",
                     ephemeral=True
                 )
-        else:  # enable
+        else:
             if not manager.is_transcription_disabled(user_id, guild_id):
                 await interaction.response.send_message(
                     "Auto-transcription of your voice messages is already **enabled** in this server.",

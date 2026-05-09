@@ -6,7 +6,7 @@ from discord import app_commands
 MODULE_NAME = "MAGIC_EMBALL"
 
 RESPONSES = [
-    "Yeah", "Nah", "Maybe", 
+    "Yeah", "Nah", "Maybe",
     "Ask again later", "Most likely",
     "Don't count on it", "Nah bruh",
     "LMFAO no", "Huh?",
@@ -22,7 +22,7 @@ SPECIAL_RESPONSES = {
             (i|1|!)+[\W_]*   # i, 1, or !
             (v|\/)+[\W_]*    # v
             (a|4)+[\W_]*     # a or 4
-            (l|1|!)+         # l, 1, or !
+            (l|1|!)+
             """,
             re.IGNORECASE | re.VERBOSE
         ),
@@ -69,10 +69,8 @@ SPECIAL_RESPONSES = {
 }
 
 def setup(bot):
-    """Setup function called by main bot to initialize this module"""
     bot.logger.log(MODULE_NAME, "Setting up magic emball command")
 
-    # Per-user cooldown: user_id -> last_used timestamp
     import time as _time
     _user_last_used: dict = {}
     _COOLDOWN_SECONDS = 5
@@ -83,10 +81,8 @@ def setup(bot):
     @bot.tree.command(name="magicemball", description="Ask the magic Emball a yes/no question")
     @app_commands.describe(question="Your question for the magic 8-ball")
     async def magic_emball(interaction: discord.Interaction, question: str):
-        """Magic Emball with smart logic and regex-based detection"""
         nonlocal _cleanup_counter
         try:
-            # Periodic TTL cleanup of stale entries
             _cleanup_counter += 1
             if _cleanup_counter >= _CLEANUP_INTERVAL:
                 _cleanup_counter = 0
@@ -95,7 +91,6 @@ def setup(bot):
                 for uid in stale:
                     del _user_last_used[uid]
 
-            # Per-user rate limiting
             uid = interaction.user.id
             now = _time.monotonic()
             last = _user_last_used.get(uid, 0)
@@ -107,10 +102,9 @@ def setup(bot):
             _user_last_used[uid] = now
 
             bot.logger.log(MODULE_NAME, f"Question from {interaction.user}: {question}")
-            
+
             response = None
 
-            # Check for special patterns
             for category, data in SPECIAL_RESPONSES.items():
                 if data['pattern'].search(question):
                     bot.logger.log(MODULE_NAME, f"Matched special pattern: {category}")
@@ -120,7 +114,6 @@ def setup(bot):
                         response = random.choice(data['responses'])
                     break
 
-            # Default random response if no special pattern matched
             if not response:
                 response = random.choice(RESPONSES)
                 bot.logger.log(MODULE_NAME, "Using random response")

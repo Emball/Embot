@@ -11,10 +11,8 @@ ITUNES_SEARCH = "https://itunes.apple.com/search"
 ITUNES_LOOKUP = "https://itunes.apple.com/lookup"
 ART_SIZE = 3600
 
-
 def art_url(raw: str, size: int = ART_SIZE) -> str:
     return re.sub(r"\d+x\d+bb", f"{size}x{size}bb", raw)
-
 
 def _artist_score(query: str, name: str) -> float:
     q = query.casefold()
@@ -28,7 +26,6 @@ def _artist_score(query: str, name: str) -> float:
         return 1.0 + len(overlap) / len(q_words) + SequenceMatcher(None, q, a).ratio() * 0.1
     return SequenceMatcher(None, q, a).ratio()
 
-
 def _album_score(query: str, name: str) -> float:
     al = query.casefold()
     nm = name.casefold()
@@ -36,7 +33,6 @@ def _album_score(query: str, name: str) -> float:
     al_words = set(al.split())
     nm_words = set(nm.split())
     return ratio + len(al_words & nm_words) * 0.5
-
 
 async def _resolve_artist(session: aiohttp.ClientSession, query: str) -> dict | None:
     params = {"term": query, "entity": "musicArtist", "limit": 25}
@@ -68,7 +64,6 @@ def _rank_key(query: str, index: int, total: int, name: str) -> float:
     word_bonus = min(extra_words * 0.1, 0.3)
     return 2.0 + position_bonus + word_bonus
 
-
 async def _artist_albums(session: aiohttp.ClientSession, name: str, artist_id: int) -> list[dict]:
     params = {"id": artist_id, "entity": "album", "limit": 200}
     async with session.get(ITUNES_LOOKUP, params=params) as resp:
@@ -76,7 +71,6 @@ async def _artist_albums(session: aiohttp.ClientSession, name: str, artist_id: i
             return []
         results = json.loads(await resp.text()).get("results", [])
     return [a for a in results if a.get("artistId") == artist_id and a.get("wrapperType") == "collection"]
-
 
 async def search_itunes(artist: str, album: str) -> dict | None:
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -102,7 +96,6 @@ async def search_itunes(artist: str, album: str) -> dict | None:
                 best_score = s
                 best = a
         return best
-
 
 def setup(bot):
 

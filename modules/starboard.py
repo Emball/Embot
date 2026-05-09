@@ -1,9 +1,3 @@
-"""
-starboard.py — Dyno-style Starboard module for Embot
-
-Configure everything in the CONFIG block below, then restart/reload the module.
-No slash commands — all settings live here in the file.
-"""
 
 import discord
 from discord.ext import commands
@@ -17,18 +11,17 @@ from _utils import script_dir, _now
 MODULE_NAME = "STARBOARD"
 
 def _load_starboard_config() -> dict:
-    """Load config/starboard_config.json, migrating if schema has changed."""
     defaults = {
-        "channel_id": 0,     # Must be set in starboard_config.json
+        "channel_id": 0,
         "threshold": 3,
         "emoji": "⭐",
         "self_star": False,
-        "ignore_before": "",  # ISO date e.g. "2025-01-01"— messages before this are ignored
+        "ignore_before": "",
     }
     from _utils import migrate_config
     return migrate_config(script_dir() / "config" / "starboard_config.json", defaults)
 
-CONFIG: dict = {}  # populated during setup() and refreshable
+CONFIG: dict = {}
 
 def _db_path() -> Path:
     return script_dir() / "db"/ "starboard.db"
@@ -55,7 +48,6 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 def _init_db() -> None:
-    """Initialise DB (create tables). Must only be called once at startup."""
     _db_path().parent.mkdir(parents=True, exist_ok=True)
     conn = _get_conn()
     conn.executescript(DB_SCHEMA)
@@ -99,15 +91,11 @@ def _entry_count() -> int:
     with _get_conn() as conn:
         return conn.execute("SELECT COUNT(*) FROM starboard_entries").fetchone()[0]
 
-# Per-message-id asyncio locks so unrelated messages never block each other.
-# LRU-capped to prevent unbounded memory growth (each unique message_id that
-# ever receives a reaction would otherwise live here forever).
 from collections import OrderedDict
 
 _MSG_LOCK_CAPACITY = 10_000
 
 class _LRULockCache:
-    """Thread-safe LRU cache of asyncio.Lock objects keyed by message ID string."""
     def __init__(self, capacity: int):
         self._cap = capacity
         self._cache: OrderedDict[str, asyncio.Lock] = OrderedDict()
@@ -151,13 +139,11 @@ def _build_embed(message: discord.Message, count: int) -> discord.Embed:
     )
     embed.add_field(name="Source", value=f"[Jump to message]({message.jump_url})", inline=False)
 
-    # Attach first image attachment
     if message.attachments:
         first = message.attachments[0]
         if first.content_type and first.content_type.startswith("image/"):
             embed.set_image(url=first.url)
 
-    # Fall back to embed image/thumbnail (e.g. Tenor GIFs, link previews)
     if not embed.image and message.embeds:
         for e in message.embeds:
             if e.image:
@@ -194,7 +180,6 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
         bot.logger.log(MODULE_NAME, f"Starboard channel {CONFIG['channel_id']} not found", "WARNING")
         return
 
-    # Never process reactions inside the starboard channel itself
     if payload.channel_id == CONFIG["channel_id"]:
         return
 
@@ -211,7 +196,6 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
         except (discord.NotFound, discord.Forbidden):
             return
 
-        # Self-star guard
         if not CONFIG["self_star"] and payload.user_id == message.author.id:
             return
 
@@ -253,15 +237,13 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
             })
 
         else:
-            # ignore_before guard — only blocks *new* starboard entries for old messages.
-            # Already-tracked messages (entry is not None) keep updating regardless.
             if CONFIG.get("ignore_before"):
                 try:
                     cutoff = datetime.fromisoformat(CONFIG["ignore_before"]).replace(tzinfo=timezone.utc)
                     if message.created_at < cutoff:
                         return
                 except ValueError:
-                    pass  # Bad date format — ignore the guard
+                    pass
 
             try:
                 sb_msg = await starboard_channel.send(content=content, embed=embed)
@@ -306,7 +288,6 @@ def setup(bot: commands.Bot):
 
     @bot.listen("on_raw_message_delete")
     async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
-        """Remove the starboard post when the source message is deleted."""
         if payload.guild_id is None or not CONFIG["channel_id"]:
             return
 

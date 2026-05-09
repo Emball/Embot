@@ -47,7 +47,6 @@ async def run_yt_dlp(*args):
     return proc.returncode, stdout.decode(), stderr.decode()
 
 async def update_yt_dlp():
-    # Try uv first (UV venvs), fall back to pip
     for cmd in (["uv", "pip", "install", "--upgrade", "yt-dlp"],
                 ["pip", "install", "--upgrade", "--quiet", "yt-dlp"]):
         proc = await asyncio.create_subprocess_exec(
@@ -64,7 +63,6 @@ async def _cookies_args(cfg: dict) -> list:
     return ["--cookies", p] if p and Path(p).exists() else []
 
 async def extract_ogg(url: str, out_dir: str, cfg: dict = None) -> tuple[str | None, str | None]:
-    """Update yt-dlp then download opus stream as .ogg. Returns (filepath, error)."""
     await update_yt_dlp()
     out_template = os.path.join(out_dir, "%(title)s.%(ext)s")
     cookies = await _cookies_args(cfg or {})
@@ -94,7 +92,6 @@ async def extract_ogg(url: str, out_dir: str, cfg: dict = None) -> tuple[str | N
     return None, "No output file found after download."
 
 async def get_latest_video(channel_id: str, cfg: dict = None) -> tuple[str | None, str | None, str | None]:
-    """Returns (video_id, title, url) of latest upload."""
     cookies = await _cookies_args(cfg or {})
     code, stdout, stderr = await run_yt_dlp(
         f"https://www.youtube.com/channel/{channel_id}/videos",
@@ -112,7 +109,6 @@ async def get_latest_video(channel_id: str, cfg: dict = None) -> tuple[str | Non
     vid_id = parts[0].strip()
     title = parts[1].strip() if len(parts) > 1 else "New Video"
     return vid_id, title, f"https://www.youtube.com/watch?v={vid_id}"
-
 
 def setup(bot):
     cfg = load_config()

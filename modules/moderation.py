@@ -13,16 +13,12 @@ import os
 import sys
 from pathlib import Path
 import io
-from PIL import Image, ImageDraw, ImageFont
 import pytz
-import tempfile
 from collections import deque
 from cryptography.fernet import Fernet
 from _utils import script_dir, _now
 
 MODULE_NAME = "MODERATION"
-
-# These are UI copy — they stay in code. Everything else lives in the DB.
 
 ERROR_NO_PERMISSION      = "You need a moderation role (Moderator, Admin, or Owner) to use this command."
 ERROR_REASON_REQUIRED    = "You must provide a reason for this action."
@@ -38,19 +34,15 @@ def _db_path() -> str:
 DB_SCHEMA = """
 PRAGMA journal_mode=WAL;
 
--- ── Role persistence ──────────────────────────────────────────────────────────
--- Replaces member_roles.json
 CREATE TABLE IF NOT EXISTS mod_member_roles (
     guild_id    TEXT NOT NULL,
     user_id     TEXT NOT NULL,
-    role_ids    TEXT NOT NULL,   -- JSON array of integer role IDs
+    role_ids    TEXT NOT NULL,
     saved_at    TEXT NOT NULL,
     username    TEXT,
     PRIMARY KEY (guild_id, user_id)
 );
 
--- ── Strikes / warnings ───────────────────────────────────────────────────────
--- Replaces moderation_strikes.json
 CREATE TABLE IF NOT EXISTS mod_strikes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id     TEXT NOT NULL,
@@ -58,8 +50,6 @@ CREATE TABLE IF NOT EXISTS mod_strikes (
     reason      TEXT NOT NULL
 );
 
--- ── Active mutes ──────────────────────────────────────────────────────────────
--- Replaces muted_users.json
 CREATE TABLE IF NOT EXISTS mod_mutes (
     guild_id            TEXT NOT NULL,
     user_id             TEXT NOT NULL,
@@ -71,8 +61,6 @@ CREATE TABLE IF NOT EXISTS mod_mutes (
     PRIMARY KEY (guild_id, user_id)
 );
 
--- ── Pending oversight actions ─────────────────────────────────────────────────
--- Replaces mod_oversight_data.json
 CREATE TABLE IF NOT EXISTS mod_pending_actions (
     action_id           TEXT PRIMARY KEY,
     action              TEXT NOT NULL,
@@ -85,17 +73,15 @@ CREATE TABLE IF NOT EXISTS mod_pending_actions (
     channel_id          INTEGER,
     message_id          INTEGER,
     timestamp           TEXT NOT NULL,
-    context_messages    TEXT,           -- JSON array
+    context_messages    TEXT,
     duration            TEXT,
-    additional          TEXT,           -- JSON object
-    flags               TEXT,           -- JSON array
+    additional          TEXT,
+    flags               TEXT,
     embed_id_inchat     INTEGER,
     embed_id_botlog     INTEGER,
     status              TEXT NOT NULL DEFAULT 'pending'
 );
 
--- ── Ban appeals ───────────────────────────────────────────────────────────────
--- Replaces ban_appeals.json
 CREATE TABLE IF NOT EXISTS mod_appeals (
     appeal_id           TEXT PRIMARY KEY,
     user_id             INTEGER NOT NULL,
@@ -104,30 +90,25 @@ CREATE TABLE IF NOT EXISTS mod_appeals (
     submitted_at        TEXT NOT NULL,
     deadline            TEXT NOT NULL,
     status              TEXT NOT NULL DEFAULT 'pending',
-    votes_for           TEXT NOT NULL DEFAULT '[]',     -- JSON array of user_id strings
-    votes_against       TEXT NOT NULL DEFAULT '[]',     -- JSON array of user_id strings
+    votes_for           TEXT NOT NULL DEFAULT '[]',
+    votes_against       TEXT NOT NULL DEFAULT '[]',
     channel_message_id  INTEGER
 );
 
--- ── Ban reversal invites ──────────────────────────────────────────────────────
--- Replaces ban_reversal_invites.json
 CREATE TABLE IF NOT EXISTS mod_invites (
-    invite_key  TEXT PRIMARY KEY,   -- "{guild_id}_{user_id}"
+    invite_key  TEXT PRIMARY KEY,
     code        TEXT NOT NULL,
     user_id     INTEGER NOT NULL,
     guild_id    INTEGER NOT NULL,
     created_at  TEXT NOT NULL
 );
 
--- ── Rules state ───────────────────────────────────────────────────────────────
--- Replaces data/rules_state.json
 CREATE TABLE IF NOT EXISTS mod_rules_state (
     guild_id    TEXT PRIMARY KEY,
     message_id  INTEGER,
     rules_hash  TEXT
 );
 
--- ── Deletion attempt log (transient — cleared after daily report) ─────────────
 CREATE TABLE IF NOT EXISTS mod_deletion_attempts (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     log_id          TEXT NOT NULL,
@@ -138,41 +119,35 @@ CREATE TABLE IF NOT EXISTS mod_deletion_attempts (
     is_warning      INTEGER NOT NULL DEFAULT 0
 );
 
--- ── Startup log ───────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS mod_startup_log (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     startup_time INTEGER NOT NULL
 );
 
--- ── Suspicion / fed-fingerprint system ────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS mod_suspicion (
     guild_id        TEXT NOT NULL,
     user_id         TEXT NOT NULL,
     score           INTEGER NOT NULL DEFAULT 0,
-    flagged         INTEGER NOT NULL DEFAULT 0,   -- 1 = manually confirmed flagged
-    cleared         INTEGER NOT NULL DEFAULT 0,   -- 1 = manually cleared by mod
-    join_invite     TEXT,                          -- invite code used to join
-    invite_source   TEXT,                          -- 'leaktracker'|'youtube'|'custom'|'unknown'
+    flagged         INTEGER NOT NULL DEFAULT 0,
+    cleared         INTEGER NOT NULL DEFAULT 0,
+    join_invite     TEXT,
+    invite_source   TEXT,
     scored_at       TEXT NOT NULL,
     flagged_at      TEXT,
     cleared_at      TEXT,
     cleared_by      TEXT,
     note            TEXT,
-    signals         TEXT NOT NULL DEFAULT '[]',   -- JSON array of triggered signal keys
+    signals         TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (guild_id, user_id)
 );
-
 """
 
-# Applied once on first init; never overwrites existing rows.
-
 def _config_path() -> Path:
-    p = _script_dir() / "config"
+    p = script_dir() / "config"
     p.mkdir(parents=True, exist_ok=True)
     return p / "moderation.json"
 
 def _load_config() -> dict:
-    """Load config/moderation.json, migrating if schema has changed."""
     path = _config_path()
     defaults = {
         "owner_id": 0,
@@ -193,17 +168,10 @@ def _load_config() -> dict:
     return migrate_config(path, defaults)
 
 def _save_config(data: dict) -> None:
-    """Atomically write config/moderation.json."""
     from _utils import atomic_json_write
     atomic_json_write(_config_path(), data)
 
 def _migrate(db_path: str) -> None:
-    """
-    One-time migration: pull config/roles/wordlists out of the DB and
-    merge rules.json into config/moderation.json, then drop those DB tables.
-
-    Safe to call on every startup — it checks whether migration is needed first.
-    """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
@@ -218,16 +186,13 @@ def _migrate(db_path: str) -> None:
         has_rules_json = rules_file.exists()
 
         if not needs_migration and not has_rules_json:
-            return  # Nothing to do
+            return
 
-        # Load existing JSON config (or defaults) as the merge base
         cfg = _load_config()
 
         if "mod_config"in tables:
             for row in conn.execute("SELECT key, value FROM mod_config").fetchall():
                 k, v = row["key"], row["value"]
-                # Cast numeric strings back to int where the default is int
-                # Cast to int if value looks like a plain integer
                 try:
                     if str(v) == str(int(v)):
                         v = int(v)
@@ -246,7 +211,6 @@ def _migrate(db_path: str) -> None:
                     rules_data = json.load(f)
                 cfg["rules"] = rules_data
             except Exception as e:
-                import sys
                 print(f"[MODERATION] Migration: failed to read rules.json: {e}", file=sys.stderr)
 
         _save_config(cfg)
@@ -261,14 +225,11 @@ def _migrate(db_path: str) -> None:
                 rules_file.unlink()
             except Exception:
                 pass
-
-        import sys
         print("[MODERATION] Migration complete → config/moderation.json", file=sys.stderr)
     finally:
         conn.close()
 
 def _init_db(db_path: str) -> None:
-    """Create schema on first run. Safe to call on every startup."""
     conn = sqlite3.connect(db_path)
     try:
         conn.executescript(DB_SCHEMA)
@@ -311,24 +272,17 @@ def _db_all(db, query: str, params: tuple = ()):
     return c.execute(query, params).fetchall()
 
 class ModConfig:
-    """
-    Reads user-configurable values from config/moderation.json.
-    Mutations (add/remove role) write back to the JSON file atomically.
-    Call reload() to pick up manual edits without restarting.
-    """
 
     def __init__(self):
         self._data: dict = _load_config()
 
     def reload(self) -> None:
-        """Re-read config/moderation.json from disk."""
         self._data = _load_config()
 
     def get(self, key: str, default=None):
         return self._data.get(key, default)
 
     def set(self, key: str, value) -> None:
-        """Persist a single key change to disk."""
         self._data[key] = value
         _save_config(self._data)
 
@@ -392,14 +346,12 @@ class ModConfig:
             _save_config(self._data)
 
     def get_rules(self) -> Optional[dict]:
-        """Return the rules dict from config, or None if absent/empty."""
         rules = self._data.get("rules")
         if rules and rules.get("rules"):
             return rules
         return None
 
     def save_rules(self, rules_data: dict) -> None:
-        """Write updated rules content back to config."""
         self._data["rules"] = rules_data
         _save_config(self._data)
 
@@ -410,21 +362,16 @@ def has_elevated_role(member: discord.Member, cfg: ModConfig) -> bool:
     return any(role.name in elevated for role in member.roles)
 
 def has_owner_role(member: discord.Member, cfg: ModConfig) -> bool:
-    """True if member is guild owner, has the 'Owner' role, or matches owner_id."""
     if member.guild.owner_id == member.id:
         return True
-    if member.id == cfg.get_owner_id():
+    if member.id == cfg.owner_id:
         return True
     return any(role.name == "Owner" for role in member.roles)
 
-# Public API for other modules
-
 def is_mod(member: discord.Member) -> bool:
-    """True if the member passes the elevated-role check."""
     return has_elevated_role(member, _cfg)
 
 def is_owner(member: discord.Member) -> bool:
-    """True if the member is an owner (Owner role / guild owner / owner_id)."""
     return has_owner_role(member, _cfg)
 
 def validate_reason(reason: Optional[str], min_len: int) -> tuple:
@@ -435,7 +382,6 @@ def validate_reason(reason: Optional[str], min_len: int) -> tuple:
     return True, None
 
 def parse_duration(duration: str) -> tuple:
-    """Parse a duration string like '10m', '2h', '1d'. Returns (seconds, label)."""
     if not duration:
         return None, "Permanent"
     m = re.match(r'^(\d+)([smhd])$', duration.lower())
@@ -448,14 +394,16 @@ def parse_duration(duration: str) -> tuple:
     label   = f"{value} {labels[unit]}{'s' if value != 1 else ''}"
     return seconds, label
 
+def _parse_fake_suffix(text: str) -> tuple:
+    parts = text.rsplit(None, 1)
+    if parts and parts[-1].lower() == "fake":
+        return parts[0] if len(parts) > 1 else "", True
+    return text, False
+
 def get_event_logger(bot):
     return getattr(bot, '_logger_event_logger', None)
 
 class ModContext:
-    """
-    Wraps either a discord.Interaction (slash) or commands.Context (prefix)
-    into a single interface so command logic never has to branch on type.
-    """
     def __init__(self, source):
         self._source = source
         self._replied = False
@@ -537,7 +485,6 @@ class ActionReviewView(ui.View):
         self.moderation = moderation_system
         self.action_id  = action_id
         self.action     = action
-        # Stable custom_ids embed the action_id so they survive restarts
         self.approve_btn.custom_id  = f"action_approve:{action_id}"
         self.revert_btn.custom_id   = f"action_revert:{action_id}"
         self.view_chat_btn.custom_id = f"action_viewchat:{action_id}"
@@ -598,8 +545,6 @@ class AppealVoteView(ui.View):
         super().__init__(timeout=None)
         self.moderation = moderation_system
         self.appeal_id  = appeal_id
-        # Embed appeal_id in each custom_id so Discord can route interactions
-        # to the correct view instance after a bot restart.
         yes_btn = ui.Button(label="Vote Yes", style=discord.ButtonStyle.green,
                             emoji="✅", custom_id=f"appeal_accept:{appeal_id}")
         no_btn  = ui.Button(label="Vote No",  style=discord.ButtonStyle.red,
@@ -611,7 +556,6 @@ class AppealVoteView(ui.View):
 
     def _updated_embed(self, message: discord.Message,
                         votes_for: list, votes_against: list) -> discord.Embed:
-        """Return a copy of the message embed with the vote counts updated."""
         old = message.embeds[0] if message.embeds else None
         embed = discord.Embed(
             title=old.title if old else "Ban Appeal",
@@ -621,7 +565,7 @@ class AppealVoteView(ui.View):
         )
         for field in (old.fields if old else []):
             if field.name == "Votes":
-                continue  # will re-add below
+                continue
             embed.add_field(name=field.name, value=field.value, inline=field.inline)
         embed.add_field(
             name="Votes",
@@ -633,35 +577,12 @@ class AppealVoteView(ui.View):
         return embed
 
     async def _accept_callback(self, interaction: discord.Interaction):
-        cfg = self.moderation.cfg
-        if not has_elevated_role(interaction.user, cfg):
-            await interaction.response.send_message(
-                "Only moderators can vote on appeals.", ephemeral=True)
-            return
-        appeal = self.moderation._get_appeal(self.appeal_id)
-        if not appeal:
-            await interaction.response.send_message(
-                "Appeal no longer exists.", ephemeral=True)
-            return
-
-        uid           = str(interaction.user.id)
-        votes_for     = json.loads(appeal["votes_for"])
-        votes_against = json.loads(appeal["votes_against"])
-
-        if uid in votes_for:
-            await interaction.response.send_message(
-                "You already voted Yes.", ephemeral=True)
-            return
-        if uid in votes_against:
-            votes_against.remove(uid)
-        votes_for.append(uid)
-
-        self.moderation._update_appeal_votes(
-            self.appeal_id, votes_for, votes_against)
-        updated_embed = self._updated_embed(interaction.message, votes_for, votes_against)
-        await interaction.response.edit_message(embed=updated_embed, view=self)
+        await self._vote_callback(interaction, is_yes=True)
 
     async def _deny_callback(self, interaction: discord.Interaction):
+        await self._vote_callback(interaction, is_yes=False)
+
+    async def _vote_callback(self, interaction: discord.Interaction, is_yes: bool):
         cfg = self.moderation.cfg
         if not has_elevated_role(interaction.user, cfg):
             await interaction.response.send_message(
@@ -677,13 +598,16 @@ class AppealVoteView(ui.View):
         votes_for     = json.loads(appeal["votes_for"])
         votes_against = json.loads(appeal["votes_against"])
 
-        if uid in votes_against:
+        target, opposite = (votes_for, votes_against) if is_yes else (votes_against, votes_for)
+        label = "Yes" if is_yes else "No"
+
+        if uid in target:
             await interaction.response.send_message(
-                "You already voted No.", ephemeral=True)
+                f"You already voted {label}.", ephemeral=True)
             return
-        if uid in votes_for:
-            votes_for.remove(uid)
-        votes_against.append(uid)
+        if uid in opposite:
+            opposite.remove(uid)
+        target.append(uid)
 
         self.moderation._update_appeal_votes(
             self.appeal_id, votes_for, votes_against)
@@ -722,11 +646,6 @@ class BanAppealModal(ui.Modal, title="Ban Appeal"):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 class RulesManager:
-    """
-    Manages the server rules embed in the #rules channel.
-    Rules content lives in config/moderation.json under the "rules"key.
-    Only the *state* (posted message ID + hash) is persisted in the DB.
-    """
 
     def __init__(self, bot, db_path: str, cfg: ModConfig):
         self.bot      = bot
@@ -734,7 +653,6 @@ class RulesManager:
         self.cfg      = cfg
 
     def _get_state(self, guild_id: int) -> tuple:
-        """Returns (message_id, rules_hash) for the guild, or (None, None)."""
         row = _db_one(self._db,
                       "SELECT message_id, rules_hash FROM mod_rules_state WHERE guild_id=?",
                       (str(guild_id),))
@@ -750,14 +668,12 @@ class RulesManager:
                  (str(guild_id), message_id, rules_hash))
 
     def load_rules(self) -> Optional[dict]:
-        """Load rules content from config/moderation.json."""
         data = self.cfg.get_rules()
         if data is None:
             self.bot.logger.log("RULES", "No rules content found in config/moderation.json", "WARNING")
         return data
 
     def save_rules(self, data: dict) -> None:
-        """Persist updated rules content back to config/moderation.json."""
         self.cfg.save_rules(data)
 
     @staticmethod
@@ -877,30 +793,19 @@ class RulesManager:
                 self.bot.logger.log("RULES", f"Watcher error: {e}", "WARNING")
 
 class ModerationSystem:
-    """
-    Unified moderation and oversight system.
-    All persistent state lives in /data/moderation.db — no JSON files.
-    """
 
     def __init__(self, bot):
         self.bot     = bot
         self._db     = _db_path()
-        # Run migration before anything else (safe no-op if already done)
         _migrate(self._db)
 
-        # Initialise DB schema
         _init_db(self._db)
 
         self.cfg     = ModConfig()
 
-        # Persistent Fernet key — derived from FERNET_KEY env var.
-        # If the env var is absent a new random key is generated and a loud
-        # warning is emitted, because previously encrypted .enc files will
-        # be unreadable after a restart.
         import base64 as _b64, hashlib as _hl
         _fernet_secret = os.environ.get("FERNET_KEY")
         if _fernet_secret:
-            # Derive a 32-byte URL-safe base64 key from the secret
             _derived = _b64.urlsafe_b64encode(
                 _hl.sha256(_fernet_secret.encode()).digest()
             )
@@ -915,11 +820,9 @@ class ModerationSystem:
                 "WARNING",
             )
 
-        # Encrypted media staging directory
-        self.media_dir = _script_dir() / "cache"/ "moderation"
+        self.media_dir = script_dir() / "cache" / "moderation"
         self.media_dir.mkdir(exist_ok=True)
 
-        # Purge orphaned .enc files from previous run
         _purged = 0
         for _enc in self.media_dir.glob("*.enc"):
             try:
@@ -931,34 +834,23 @@ class ModerationSystem:
             bot.logger.log(MODULE_NAME,
                 f"Purged {_purged} orphaned .enc file(s) from previous session")
 
-        # In-memory caches (not persisted — rebuilt from events each run)
-        BOT_LOG_CACHE_SIZE      = 500
         self._bot_log_cache: Dict[int, Dict] = {}
         self._bot_log_order: deque           = deque()
-        self._bot_log_cache_size             = BOT_LOG_CACHE_SIZE
+        self._bot_log_cache_size             = 500
         self._deletion_warnings: Dict[int, str] = {}
 
-        # Message cache for context (guild_id -> channel_id -> list[msg_data])
-        # Bounded: max 200 channels per guild, 100 messages per channel.
-        MESSAGE_CACHE_MAX_CHANNELS = 200
-        self._msg_cache_max_channels = MESSAGE_CACHE_MAX_CHANNELS
+        self._msg_cache_max_channels = 200
         self.message_cache = {}
 
-        # Media cache index: message_id -> {'files': [...], 'author_id', 'guild_id', 'cached_at'}
-        # TTL: entries older than MEDIA_CACHE_TTL_SECS are evicted by the cleanup task.
-        MEDIA_CACHE_TTL_SECS = 3600   # 1 hour
-        self._media_cache_ttl = MEDIA_CACHE_TTL_SECS
+        self._media_cache_ttl = 3600
         self.media_cache = {}
 
-        # Tracked embeds for deletion monitoring
         self.tracked_embeds = {}
 
-        # Record this startup
         _db_exec(self._db,
                  "INSERT INTO mod_startup_log (startup_time) VALUES (?)",
                  (int(_now().timestamp()),))
 
-        # Background tasks
         self.check_expired_mutes.start()
         self.cleanup_invites.start()
         self.cleanup_media_cache.start()
@@ -966,9 +858,6 @@ class ModerationSystem:
         self.resolve_expired_appeals.start()
 
         bot.logger.log(MODULE_NAME, "Moderation system initialised (SQLite)")
-
-    def _conn(self) -> sqlite3.Connection:
-        return _conn(self._db)
 
     def _exec(self, query: str, params: tuple = ()):
         _db_exec(self._db, query, params)
@@ -1093,7 +982,6 @@ class ModerationSystem:
         channel_id = str(message.channel.id)
         guild_cache = self.message_cache.setdefault(guild_id, {})
 
-        #    evict the one that hasn't received a message longest (first key).
         if channel_id not in guild_cache and len(guild_cache) >= self._msg_cache_max_channels:
             evict_ch = next(iter(guild_cache))
             evicted_msgs = guild_cache.pop(evict_ch, [])
@@ -1158,49 +1046,6 @@ class ModerationSystem:
         start = max(0, target_idx - half)
         end   = min(len(messages), target_idx + half + 1)
         return messages[start:end]
-
-    def generate_context_screenshot(
-        self, messages: List[Dict], highlighted_msg_id: Optional[int] = None
-    ) -> io.BytesIO:
-        width       = 800
-        line_height = 60
-        padding     = 20
-        height      = len(messages) * line_height + padding * 2
-        img         = Image.new('RGB', (width, height), color='#36393f')
-        draw        = ImageDraw.Draw(img)
-        try:
-            font      = ImageFont.truetype(
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
-            font_bold = ImageFont.truetype(
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
-        except Exception:
-            font      = ImageFont.load_default()
-            font_bold = font
-        y = padding
-        for msg in messages:
-            if highlighted_msg_id and msg['id'] == highlighted_msg_id:
-                draw.rectangle([0, y - 5, width, y + line_height - 5], fill='#4a4d52')
-            timestamp   = datetime.fromisoformat(msg['timestamp']).strftime("%H:%M")
-            author_text = f"{msg['author']} - {timestamp}"
-            draw.text((padding, y), author_text, fill='#7289da', font=font_bold)
-            content = msg['content'][:100]
-            if msg['content'] and len(msg['content']) > 100:
-                content += "..."
-            if not content and msg['attachments']:
-                content = "[Attachment]"
-            if not content and msg['embeds'] > 0:
-                content = "[Embed]"
-            if not content:
-                content = "[Empty message]"
-            draw.text((padding, y + 20), content, fill='#dcddde', font=font)
-            y += line_height
-        buffer = io.BytesIO()
-        try:
-            img.save(buffer, format='PNG')
-        finally:
-            img.close()   # free PIL backing store; BytesIO stays alive for the caller
-        buffer.seek(0)
-        return buffer
 
     async def log_mod_action(self, action_data: Dict) -> Optional[str]:
         if action_data['action'] in ['mute', 'warn', 'timeout']:
@@ -1275,9 +1120,6 @@ class ModerationSystem:
         }
 
     def resolve_pending_action(self, user_id: int, action_type: str):
-        # Delete only the most recent pending action of this type for the user,
-        # to avoid accidentally wiping multiple records if the user was banned
-        # more than once.
         row = self._one(
             "SELECT action_id FROM mod_pending_actions "
             "WHERE user_id=? AND action=? AND status='pending' "
@@ -1417,17 +1259,9 @@ class ModerationSystem:
                 await user.send(embed=embed)
             except discord.Forbidden:
                 pass
-            bot_logs = self._get_bot_logs_channel(guild)
-            if bot_logs:
-                log_embed = discord.Embed(
-                    title="Ban Reverted (Review System)",
-                    description=f"**{user}** ({user_id}) has been unbanned after review.",
-                    color=0x2ecc71, timestamp=_now())
-                log_embed.add_field(name="Original Reason", value=action['reason'], inline=False)
-                log_embed.add_field(name="Original Moderator", value=action['moderator'], inline=True)
-                await self.send_bot_log(guild, log_embed)
-            self._exec(
-                "DELETE FROM mod_pending_actions WHERE action_id=?", (action['id'],))
+            await self._revert_botlog(action, guild,
+                title="Ban Reverted (Review System)",
+                description=f"**{user}** ({user_id}) has been unbanned after review.")
             return True
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, f"Failed to revert ban {action['id']}", e)
@@ -1451,21 +1285,24 @@ class ModerationSystem:
                 await member.send(embed=embed)
             except discord.Forbidden:
                 pass
-            bot_logs = self._get_bot_logs_channel(guild)
-            if bot_logs:
-                log_embed = discord.Embed(
-                    title="Mute Reverted (Review System)",
-                    description=f"**{member}** has been unmuted after review.",
-                    color=0x2ecc71, timestamp=_now())
-                log_embed.add_field(name="Original Reason", value=action['reason'], inline=False)
-                log_embed.add_field(name="Original Moderator", value=action['moderator'], inline=True)
-                await self.send_bot_log(guild, log_embed)
-            self._exec(
-                "DELETE FROM mod_pending_actions WHERE action_id=?", (action['id'],))
+            await self._revert_botlog(action, guild,
+                title="Mute Reverted (Review System)",
+                description=f"**{member}** has been unmuted after review.")
             return True
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, f"Failed to revert mute {action['id']}", e)
             return False
+
+    async def _revert_botlog(self, action: Dict, guild: discord.Guild, title: str, description: str):
+        bot_logs = self._get_bot_logs_channel(guild)
+        if bot_logs:
+            log_embed = discord.Embed(
+                title=title, description=description,
+                color=0x2ecc71, timestamp=_now())
+            log_embed.add_field(name="Original Reason", value=action['reason'], inline=False)
+            log_embed.add_field(name="Original Moderator", value=action['moderator'], inline=True)
+            await self.send_bot_log(guild, log_embed)
+        self._exec("DELETE FROM mod_pending_actions WHERE action_id=?", (action['id'],))
 
     async def _create_ban_reversal_invite(self, guild: discord.Guild, user_id: int) -> str:
         try:
@@ -1563,7 +1400,6 @@ class ModerationSystem:
         original_embed_data = record['embed']
         timestamp           = _now()
 
-        # Persist to deletion_attempts table for daily report
         self._exec(
             "INSERT INTO mod_deletion_attempts "
             "(log_id, deleter, deleter_id, timestamp, original_title, is_warning) "
@@ -1619,7 +1455,6 @@ class ModerationSystem:
 
     @staticmethod
     def _generate_appeal_id() -> str:
-        """Generate a short 11-character YouTube-style ID."""
         import string, secrets
         chars = string.ascii_letters + string.digits + "-_"
         return ''.join(secrets.choice(chars) for _ in range(11))
@@ -1679,14 +1514,12 @@ class ModerationSystem:
         row = self._get_appeal(appeal_id)
         if not row:
             return False
-        # Always delete the appeal record first so a partial failure never causes a retry loop.
         self._exec("DELETE FROM mod_appeals WHERE appeal_id=?", (appeal_id,))
         try:
             guild = self.bot.get_guild(row["guild_id"])
             if not guild:
                 return False
             user = await self.bot.fetch_user(row["user_id"])
-            # Attempt unban — user may already be unbanned; treat NotFound as a no-op.
             try:
                 await guild.unban(user, reason="Appeal approved")
             except discord.NotFound:
@@ -1794,12 +1627,10 @@ class ModerationSystem:
             if not owner:
                 return
 
-            # Pull deletion attempts from DB then clear them
             attempt_rows = self._all(
                 "SELECT * FROM mod_deletion_attempts ORDER BY id")
             self._exec("DELETE FROM mod_deletion_attempts")
 
-            # Flagged pending actions
             red_flags    = []
             yellow_flags = []
             for row in self._all(
@@ -1939,7 +1770,6 @@ class ModerationSystem:
                         self.bot.logger.error(
                             MODULE_NAME, f"Failed to auto-unmute {member}", e)
                 else:
-                    # Role already gone (e.g. manually removed); clean up DB entry
                     self.remove_mute(mute['guild_id'], mute['user_id'])
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Error in mute expiry checker", e)
@@ -1980,7 +1810,6 @@ class ModerationSystem:
 
     @tasks.loop(minutes=15)
     async def cleanup_media_cache(self):
-        """Evict media_cache entries whose TTL has expired."""
         try:
             cutoff = _now().timestamp() - self._media_cache_ttl
             expired = [
@@ -2010,7 +1839,6 @@ class ModerationSystem:
     @send_daily_report.before_loop
     async def before_send_daily_report(self):
         await self.bot.wait_until_ready()
-        # Sleep until the next midnight CST before the first run
         cst    = pytz.timezone('America/Chicago')
         now    = datetime.now(cst)
         target = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -2612,23 +2440,16 @@ def setup(bot):
     bot.mod_oversight      = mod_system
     bot.moderation         = mod_system
 
-    # Re-register persistent views so buttons work after bot restarts
     bot.add_view(BanAppealView(guild_id=0))
-    # Re-register one AppealVoteView per live appeal — custom_ids are per-appeal
-    # so a single placeholder view cannot cover them all after a restart.
     for appeal_row in mod_system._all("SELECT appeal_id FROM mod_appeals WHERE status='pending'"):
         bot.add_view(AppealVoteView(moderation_system=mod_system, appeal_id=appeal_row["appeal_id"]))
-    # Re-register one ActionReviewView per pending action so owner DM buttons still work
     for row in mod_system._all("SELECT * FROM mod_pending_actions WHERE status='pending'"):
         action = mod_system._row_to_action(row)
         bot.add_view(ActionReviewView(mod_system, action['id'], action))
 
-    # Convenience shorthand used throughout
     global _mod, _cfg
     _mod = mod_system
     _cfg = mod_system.cfg
-
-    # ---- SLASH COMMANDS ----
 
     @bot.tree.command(name="ban", description="[Mod] Ban a user from the server")
     @app_commands.describe(
@@ -2670,10 +2491,6 @@ def setup(bot):
 
         await interaction.response.defer(ephemeral=True)
 
-        # Create a single ModContext for the whole multiban operation and mark it
-        # as already replied (because we just deferred), so every subsequent
-        # ctx.reply() inside _do_ban correctly uses followup.send instead of
-        # response.send_message (which would raise InteractionResponded).
         ban_ctx = ModContext(interaction)
         ban_ctx._replied = True
 
@@ -2693,7 +2510,6 @@ def setup(bot):
                 skipped.append(f"`{raw}` — fetch failed, skipped")
                 continue
 
-            # Rate-limit: wait 10s between each ban (skip delay before the first)
             if banned_count > 0:
                 await asyncio.sleep(10)
 
@@ -2704,7 +2520,6 @@ def setup(bot):
             except Exception:
                 skipped.append(f"**{user}** (`{user.id}`) — ban failed")
 
-        # Only report skipped/failed entries; successful bans already have their own embeds
         summary_parts = [f"**Multiban complete** — {banned_count} banned"
                          + ("(dry run)"if fake else "")]
         if skipped:
@@ -2811,8 +2626,6 @@ def setup(bot):
                            channel: Optional[discord.TextChannel] = None):
         await _do_unlock(ModContext(interaction), _mod, channel)
 
-    # ---- PREFIX COMMANDS ----
-
     @bot.command(name="ban")
     async def prefix_ban(ctx, user: discord.User = None, *, args: str = ""):
         if not user:
@@ -2839,7 +2652,6 @@ def setup(bot):
 
     @bot.command(name="multiban")
     async def prefix_multiban(ctx, *args):
-        """Usage: ?multiban <id|@user> [id|@user ...] reason:<reason> [days:<0-7>] [fake]"""
         if not args:
             return await ctx.send(
                 "Usage: `?multiban <id/@user> [id/@user ...] reason:<text> [days:<0-7>] [fake]`",
@@ -2857,7 +2669,6 @@ def setup(bot):
         days_match  = re.search(r'days:(\d+)', "".join(args), re.IGNORECASE)
         delete_days = int(days_match.group(1)) if days_match else 0
 
-        # Everything before the first reason:/days:/fake token is a user ref
         user_refs = []
         for a in args:
             if re.match(r'reason:', a, re.IGNORECASE): break
@@ -2882,7 +2693,6 @@ def setup(bot):
                 skipped.append(f"`{raw}` — fetch failed, skipped")
                 continue
 
-            # Rate-limit: wait 10s between each ban (skip delay before the first)
             if banned_count > 0:
                 await asyncio.sleep(10)
 
@@ -2892,7 +2702,6 @@ def setup(bot):
             except Exception:
                 skipped.append(f"**{user}** (`{user.id}`) — ban failed")
 
-        # Only report skipped/failed entries; successful bans already have their own embeds
         summary_parts = [f"**Multiban complete** — {banned_count} banned"
                          + ("(dry run)"if fake else "")]
         if skipped:
@@ -2903,20 +2712,14 @@ def setup(bot):
     async def prefix_unban(ctx, user_id: str = None, *, reason: str = "No reason provided"):
         if not user_id:
             return await ctx.send("Usage: `?unban <user_id> [reason]`", delete_after=8)
-        parts = reason.split()
-        fake  = parts[-1].lower() == "fake"if parts else False
-        if fake:
-            reason = "".join(parts[:-1]) or "No reason provided"
+        reason, fake = _parse_fake_suffix(reason)
         await _do_unban(ModContext(ctx), _mod, user_id, reason, fake=fake)
 
     @bot.command(name="kick")
     async def prefix_kick(ctx, member: discord.Member = None, *, reason: str = ""):
         if not member:
             return await ctx.send("Usage: `?kick @member <reason>`", delete_after=8)
-        parts = reason.split()
-        fake  = parts[-1].lower() == "fake"if parts else False
-        if fake:
-            reason = "".join(parts[:-1])
+        reason, fake = _parse_fake_suffix(reason)
         await _do_kick(ModContext(ctx), _mod, member, reason, fake=fake)
 
     @bot.command(name="timeout")
@@ -2925,10 +2728,7 @@ def setup(bot):
         if not member or duration is None:
             return await ctx.send(
                 "Usage: `?timeout @member <minutes> <reason>`", delete_after=8)
-        parts = reason.split()
-        fake  = parts[-1].lower() == "fake"if parts else False
-        if fake:
-            reason = "".join(parts[:-1])
+        reason, fake = _parse_fake_suffix(reason)
         await _do_timeout(ModContext(ctx), _mod, member, duration, reason, fake=fake)
 
     @bot.command(name="untimeout")
@@ -2948,10 +2748,7 @@ def setup(bot):
         if parts and re.match(r'^\d+[smhd]$', parts[0].lower()):
             duration = parts[0]
             reason   = parts[1] if len(parts) > 1 else "No reason provided"
-        r_parts = reason.split()
-        fake    = r_parts[-1].lower() == "fake"if r_parts else False
-        if fake:
-            reason = "".join(r_parts[:-1]) or "No reason provided"
+        reason, fake = _parse_fake_suffix(reason)
         await _do_mute(ModContext(ctx), _mod, member, reason, duration, fake=fake)
 
     @bot.command(name="unmute")
@@ -2964,20 +2761,14 @@ def setup(bot):
     async def prefix_softban(ctx, member: discord.Member = None, *, reason: str = ""):
         if not member:
             return await ctx.send("Usage: `?softban @member <reason>`", delete_after=8)
-        parts = reason.split()
-        fake  = parts[-1].lower() == "fake"if parts else False
-        if fake:
-            reason = "".join(parts[:-1])
+        reason, fake = _parse_fake_suffix(reason)
         await _do_softban(ModContext(ctx), _mod, member, reason, fake=fake)
 
     @bot.command(name="warn")
     async def prefix_warn(ctx, member: discord.Member = None, *, reason: str = ""):
         if not member:
             return await ctx.send("Usage: `?warn @member <reason>`", delete_after=8)
-        parts = reason.split()
-        fake  = parts[-1].lower() == "fake"if parts else False
-        if fake:
-            reason = "".join(parts[:-1])
+        reason, fake = _parse_fake_suffix(reason)
         await _do_warn(ModContext(ctx), _mod, member, reason, fake=fake)
 
     @bot.command(name="warnings")
@@ -3010,17 +2801,12 @@ def setup(bot):
 
     @bot.command(name="lock")
     async def prefix_lock(ctx, channel: Optional[discord.TextChannel] = None, *, reason: str = ""):
-        parts = reason.split()
-        fake  = parts[-1].lower() == "fake"if parts else False
-        if fake:
-            reason = "".join(parts[:-1])
+        reason, fake = _parse_fake_suffix(reason)
         await _do_lock(ModContext(ctx), _mod, reason, channel, fake=fake)
 
     @bot.command(name="unlock")
     async def prefix_unlock(ctx, channel: discord.TextChannel = None):
         await _do_unlock(ModContext(ctx), _mod, channel)
-
-    # ---- OVERSIGHT COMMANDS ----
 
     @bot.tree.command(name="report",
                       description="[Owner only] Trigger the moderation report immediately")
@@ -3034,8 +2820,6 @@ def setup(bot):
             await _mod.generate_daily_report()
         except Exception as e:
             bot.logger.error(MODULE_NAME, "Manual report generation failed", e)
-
-    # ---- EVENT LISTENERS ----
 
     @bot.listen()
     async def on_message(message):
@@ -3248,8 +3032,6 @@ def setup(bot):
     async def on_member_join(member):
         await _mod.restore_member_roles(member)
 
-    # ---- RULES MANAGER ----
-
     rules_manager    = RulesManager(bot, _mod._db, _cfg)
     bot.rules_manager = rules_manager
 
@@ -3298,60 +3080,36 @@ def setup(bot):
     _setup_suspicion(bot, _mod, _cfg)
     bot.logger.log(MODULE_NAME, "Moderation setup complete")
 
-#  SUSPICION / FED-FINGERPRINT SYSTEM
-#  Each signal below contributes a point value to a member's suspicion score.
-#  If the score meets or exceeds SUSPICION_THRESHOLD the account is auto-flagged
-#  and access to sensitive bot features (e.g. remaster downloads) is silently
-#  denied. Mods can manually clear or flag any account.
-#  Public API for other modules:
-#      from moderation import is_flagged
-#      if is_flagged(guild_id, user_id): ...
-# Tune these freely. Score >= SUSPICION_THRESHOLD → auto-flagged.
-
 SUSPICION_THRESHOLD = 6
 
 SIGNAL_WEIGHTS: dict[str, int] = {
-    # Account characteristics
-    "account_age_under_7d":      4,   # created less than 7 days ago
-    "account_age_under_30d":     2,   # created less than 30 days ago
-    "default_avatar":            2,   # still using a Discord default avatar
-    "no_bio":                    1,   # no profile bio / about me set
-    "throwaway_username":        1,   # username matches random/throwaway patterns
+    "account_age_under_7d":      4,
+    "account_age_under_30d":     2,
+    "default_avatar":            2,
+    "no_bio":                    1,
+    "throwaway_username":        1,
 
-    # Server behaviour
-    "joined_recently_under_7d":  1,   # joined this server less than 7 days ago
-    "no_messages":               2,   # zero messages ever recorded in server
-    "only_releases_role":        2,   # only role is @everyone + releases (no others)
+    "joined_recently_under_7d":  1,
+    "no_messages":               2,
+    "only_releases_role":        2,
 
-    # Join vector — most significant signal
-    "invite_leaktracker":        5,   # joined via a known leak-tracker invite
-    "invite_youtube":            1,   # joined via the YouTube description invite
-    "invite_unknown":            2,   # joined via an invite we can't identify
-    # "invite_custom"contributes 0 — trusted member invite, no penalty
+    "invite_leaktracker":        5,
+    "invite_youtube":            1,
+    "invite_unknown":            2,
 }
 
-import re as _re
 _THROWAWAY_PATTERNS = [
-    _re.compile(r'^[a-z]{3,6}\d{4,}$'),          # word + 4+ digits  e.g. "user2847"
-    _re.compile(r'^\d{6,}$'),                      # all digits
-    _re.compile(r'^[a-z0-9]{20,}$'),               # very long random alphanumeric
-    _re.compile(r'^(user|account|member)\d+$', _re.I),
+    re.compile(r'^[a-z]{3,6}\d{4,}$'),
+    re.compile(r'^\d{6,}$'),
+    re.compile(r'^[a-z0-9]{20,}$'),
+    re.compile(r'^(user|account|member)\d+$', re.I),
 ]
 
-# Discord default avatars are served from /assets/ — we detect them by checking
-# if display_avatar.key is one of the known default keys, or if the URL contains
-# /embed/avatars/ (the legacy path) or /assets/ (the new path).
 def _is_default_avatar(member: discord.Member) -> bool:
     url = str(member.display_avatar.url)
     return "/embed/avatars/"in url or "/assets/"in url and "a_"not in url
 
-#  SuspicionEngine
 class SuspicionEngine:
-    """
-    Scores members against a set of risk signals and maintains a flag/clear
-    record in the moderation DB. Designed to be instantiated once in setup()
-    and stored on bot.suspicion.
-    """
 
     def __init__(self, bot: commands.Bot, db_path: str, cfg: "ModConfig"):
         self.bot      = bot
@@ -3362,28 +3120,8 @@ class SuspicionEngine:
     def _one(self, q, p=()):   return _db_one(self._db, q, p)
     def _all(self, q, p=()):   return _db_all(self._db, q, p)
 
-    def _label_invite(self, code: str) -> str:
-        """
-        Classify an invite code using config/moderation.json:
-            "invite_labels": {
-                "leaktracker": ["abc123", "xyz789"],
-                "youtube":     ["yt4ever"]
-            }
-        If the code matches a leaktracker or youtube entry, that label is returned.
-        Anything else is assumed to be a custom (member-created) invite — trusted.
-        """
-        labels: dict = self.cfg.get("invite_labels", {})
-        for label, codes in labels.items():
-            if code in (codes or []):
-                return label
-        return "custom"
-
     async def score_member(self, member: discord.Member,
                            invite_source: str = "custom") -> dict:
-        """
-        Evaluate all signals for a member and upsert their suspicion record.
-        Returns the record dict.
-        """
         gid = str(member.guild.id)
         uid = str(member.id)
         now = _now()
@@ -3405,11 +3143,6 @@ class SuspicionEngine:
         if _is_default_avatar(member):
             score += add("default_avatar")
 
-        # discord.py exposes bio via member.bio after fetch — we skip if absent
-        # to avoid an extra HTTP call on every join. Instead we check lazily.
-        # Mark it for deferred check.
-        bio_signal_pending = True   # resolved below via fetch if possible
-
         uname = (member.name or "").lower()
         if any(p.match(uname) for p in _THROWAWAY_PATTERNS):
             score += add("throwaway_username")
@@ -3419,16 +3152,9 @@ class SuspicionEngine:
             if join_age < 7:
                 score += add("joined_recently_under_7d")
 
-        # We can only know this if moderation.py has been tracking messages.
-        # We rely on the absence of any cached message history as a proxy.
-        # This is intentionally conservative — if we can't tell, we don't score.
-        # The no_messages signal is set to 0 for brand-new members; it updates
-        # when score_member is called again after observation time.
         existing = self._one(
             "SELECT * FROM mod_suspicion WHERE guild_id=? AND user_id=?", (gid, uid))
         if existing:
-            # Re-score: check if they've sent any messages since last scored
-            # (message counting is tracked via on_message below)
             msg_count = self._one(
                 "SELECT msg_count FROM mod_suspicion WHERE guild_id=? AND user_id=?", (gid, uid))
             if msg_count and msg_count["msg_count"] == 0:
@@ -3446,20 +3172,18 @@ class SuspicionEngine:
             score += add("invite_leaktracker")
         elif invite_source == "youtube":
             score += add("invite_youtube")
-        # "custom"→ 0 points (trusted member invite)
 
         try:
             fetched = await member.guild.fetch_member(member.id)
-            profile = await fetched.user.profile()   # type: ignore[attr-defined]
+            profile = await fetched.user.profile()
             if not profile.bio:
                 score += add("no_bio")
         except Exception:
-            pass  # Not available or rate-limited — skip
+            pass
 
         auto_flagged  = score >= SUSPICION_THRESHOLD
         flagged_at    = now.isoformat() if auto_flagged else None
 
-        # Don't overwrite a manual clear
         if existing and existing["cleared"]:
             auto_flagged = False
             flagged_at   = None
@@ -3499,7 +3223,6 @@ class SuspicionEngine:
         return record
 
     async def _notify_mods(self, member: discord.Member, record: dict) -> None:
-        """Post a quiet heads-up to the bot-logs channel."""
         bot_logs = None
         for guild in self.bot.guilds:
             ch_id = self.cfg.bot_logs_channel_id
@@ -3560,10 +3283,6 @@ class SuspicionEngine:
         )
 
     def is_flagged(self, guild_id: str, user_id: str) -> bool:
-        """
-        Returns True if the user is flagged and has NOT been manually cleared.
-        This is the function remasters.py (and any other module) should call.
-        """
         row = self._one(
             "SELECT flagged, cleared FROM mod_suspicion WHERE guild_id=? AND user_id=?",
             (str(guild_id), str(user_id))
@@ -3579,15 +3298,7 @@ class SuspicionEngine:
         )
         return dict(row) if row else None
 
-#  Module-level public API (imported by remasters.py and others)
 def is_flagged(guild_id, user_id: str) -> bool:
-    """
-    Convenience wrapper so other modules can do:
-        from moderation import is_flagged
-        if is_flagged(guild_id, user_id): ...
-    Requires bot.suspicion to have been set up (i.e. moderation module loaded).
-    Returns False safely if the suspicion system is unavailable.
-    """
     import sys as _sys
     mod = _sys.modules.get("moderation")
     if not mod:
@@ -3599,18 +3310,15 @@ def is_flagged(guild_id, user_id: str) -> bool:
 
 _suspicion_engine: SuspicionEngine | None = None
 
-#  SUSPICION SYSTEM — wired into setup()
 def _setup_suspicion(bot: commands.Bot, _mod: "ModerationSystem", _cfg: "ModConfig"):
-    """Called at the end of setup() to attach the suspicion system."""
     global _suspicion_engine
 
     engine = SuspicionEngine(bot, _mod._db, _cfg)
     _suspicion_engine = engine
-    bot.suspicion     = engine   # accessible as bot.suspicion from anywhere
+    bot.suspicion     = engine
 
     @bot.listen("on_member_join")
     async def _suspicion_on_member_join(member: discord.Member):
-        # Try to identify which invite was used; requires Manage Guild perm.
         invite_source = "custom"
         try:
             invites = await member.guild.invites()
@@ -3618,9 +3326,6 @@ def _setup_suspicion(bot: commands.Bot, _mod: "ModerationSystem", _cfg: "ModConf
             for inv in invites:
                 for label, codes in labels.items():
                     if inv.code in (codes or []):
-                        # We can't reliably diff without a pre-join snapshot,
-                        # but if the server only has one leaktracker/youtube
-                        # invite, seeing it in the list is sufficient signal.
                         invite_source = label
                         break
         except discord.Forbidden:
@@ -3630,7 +3335,6 @@ def _setup_suspicion(bot: commands.Bot, _mod: "ModerationSystem", _cfg: "ModConf
     @bot.listen("on_member_update")
     async def _suspicion_on_member_update(before: discord.Member, after: discord.Member):
         if [r.id for r in before.roles] != [r.id for r in after.roles]:
-            # Only rescore if they already have a record (don't create on every update)
             existing = engine.get_record(str(after.guild.id), str(after.id))
             if existing and not existing.get("cleared"):
                 await engine.score_member(after)
@@ -3641,7 +3345,6 @@ def _setup_suspicion(bot: commands.Bot, _mod: "ModerationSystem", _cfg: "ModConf
             return
         gid = str(message.guild.id)
         uid = str(message.author.id)
-        # Increment message counter — using an extra column we add lazily via ALTER
         try:
             engine._exec(
                 "UPDATE mod_suspicion SET msg_count = COALESCE(msg_count, 0) + 1 "
@@ -3649,7 +3352,7 @@ def _setup_suspicion(bot: commands.Bot, _mod: "ModerationSystem", _cfg: "ModConf
                 (gid, uid)
             )
         except Exception:
-            pass  # Column may not exist yet; migration handles it
+            pass
 
     @bot.tree.command(name="fedcheck",
                       description="[Mod] Show suspicion report for a member")
@@ -3796,7 +3499,7 @@ def _setup_suspicion(bot: commands.Bot, _mod: "ModerationSystem", _cfg: "ModConf
         _db_exec(_mod._db,
                  "ALTER TABLE mod_suspicion ADD COLUMN msg_count INTEGER NOT NULL DEFAULT 0")
     except Exception:
-        pass  # Column already exists — fine
+        pass
 
     bot.logger.log(MODULE_NAME, "Suspicion engine loaded — commands: /fedcheck /fedflag /fedclear /fedscan /fedinvites")
 

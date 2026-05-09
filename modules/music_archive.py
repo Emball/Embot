@@ -451,6 +451,7 @@ class ARCHIVEManager:
                 self.song_index = await build_song_index(self.bot)
             self.song_index_ready.set()
             self.bot.logger.log(MODULE_NAME, "Song index ready")
+            asyncio.create_task(self.backfill_cache())
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Background initialization failed", e)
 
@@ -460,6 +461,46 @@ class ARCHIVEManager:
                 await asyncio.wait_for(self.song_index_ready.wait(), timeout=30)
             except asyncio.TimeoutError:
                 self.bot.logger.log(MODULE_NAME, "Song index init timed out", "WARNING")
+
+    async def backfill_cache(self):
+        if not self.song_index:
+            self.bot.logger.log(MODULE_NAME, "No song index to backfill from", "WARNING")
+            return
+        seen = set()
+        total = 0
+        for fmt in FORMATS:
+            for entries in self.song_index.get(fmt, {}).values():
+                for e in entries:
+                    fp = e['path']
+                    if fp not in seen:
+                        seen.add(fp)
+                        total += 1
+        cached = 0
+        uploaded = 0
+        skipped = 0
+        for fp in sorted(seen):
+            if _cache_lookup(fp):
+                cached += 1
+                continue
+            p = Path(fp)
+            if not p.exists():
+                skipped += 1
+                continue
+            url = await _get_or_upload_cache(self.bot, fp)
+            if url and url != "FILE_TOO_LARGE":
+                uploaded += 1
+            elif url == "FILE_TOO_LARGE":
+                skipped += 1
+            else:
+                skipped += 1
+            await asyncio.sleep(3)
+            if (uploaded + cached) % 50 == 0:
+                self.bot.logger.log(MODULE_NAME,
+                    f"Cache backfill: {uploaded} uploaded, {cached} already cached, "
+                    f"{skipped} skipped out of {total} total")
+        self.bot.logger.log(MODULE_NAME,
+            f"Cache backfill complete: {uploaded} uploaded, {cached} already cached, "
+            f"{skipped} skipped")
 
 def setup(bot):
     bot.logger.log(MODULE_NAME, "Setting up ARCHIVE module")
@@ -527,5 +568,16 @@ def setup(bot):
         except Exception as e:
             bot.logger.error(MODULE_NAME, "Index rebuild failed", e)
             await interaction.followup.send("Failed to rebuild index.", ephemeral=True)
+
+    @bot.tree.command(name="cache_backfill",
+                      description="[Owner only] Pre-upload all uncached songs to the CDN cache")
+    async def cache_backfill(interaction: discord.Interaction):
+        from mod_core import is_owner
+        if not is_owner(interaction.user):
+            await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "Starting cache backfill in the background. Check the bot logs for progress.", ephemeral=True)
+        asyncio.create_task(ARCHIVE_manager.backfill_cache())
 
     bot.logger.log(MODULE_NAME, "ARCHIVE module setup complete")

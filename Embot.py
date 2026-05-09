@@ -33,6 +33,7 @@ _CONFIG_PATH = script_dir / "config"/ "embot.json"
 _CONFIG_DEFAULTS = {
     "command_prefixes":           ["!", "?"],
     "home_guild_id":              0,
+    "helpdoc_channel_id":         0,
     "latency_warning_threshold":  1.0,
     "heartbeat_interval_seconds": 60,
     "network": {

@@ -450,6 +450,22 @@ async def _auto_update_loop(bot):
             bot.logger.log("AUTO-UPDATE", f"Check error: {e}", "WARNING")
         await asyncio.sleep(interval)
 
+@bot.tree.command(name="update", description="[Owner only] Pull latest changes from git and restart")
+async def update_cmd(interaction: discord.Interaction):
+    if interaction.user.id != interaction.guild.owner_id:
+        await interaction.response.send_message("Owner only.", ephemeral=True)
+        return
+    await interaction.response.send_message("Checking for updates...")
+    if not _ensure_git_for_update(bot, bot.logger):
+        await interaction.edit_original_response(content="Git not available.")
+        return
+    updated = await _check_for_update(bot)
+    if updated:
+        await interaction.edit_original_response(content="Update pulled. Restarting...")
+        await _restart_async(bot)
+    else:
+        await interaction.edit_original_response(content="Already up to date.")
+
 @bot.event
 async def on_ready():
     # Only run initialization on first ready, not on reconnects

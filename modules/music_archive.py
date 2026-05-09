@@ -7,6 +7,7 @@ import time
 import io
 from pathlib import Path
 from typing import Optional
+from datetime import datetime, timezone
 from _utils import script_dir, _now
 from mutagen.flac import FLAC
 from mutagen.id3 import ID3
@@ -339,6 +340,21 @@ def _cache_store(file_path: str, cdn_url: str, message_id: str, channel_id: str,
         )
         c.commit()
 
+async def _cache_refresh_url(bot, file_path: str, entry: dict) -> Optional[str]:
+    try:
+        chan = bot.get_channel(int(entry["channel_id"]))
+        if not chan:
+            return None
+        msg = await chan.fetch_message(int(entry["message_id"]))
+        for att in msg.attachments:
+            if att.filename == entry["file_name"]:
+                _cache_store(file_path, att.url, entry["message_id"], entry["channel_id"],
+                             entry["file_name"], entry["file_size"])
+                return att.url
+    except Exception:
+        pass
+    return None
+
 def _cache_fail(file_path: str, reason: str) -> None:
     with _db_conn() as c:
         c.execute(
@@ -351,6 +367,12 @@ async def _get_or_upload_cache(bot, file_path: str) -> Optional[str]:
     p = Path(file_path)
     cached = _cache_lookup(file_path)
     if cached:
+        age = (_now() - datetime.fromisoformat(cached["cached_at"])).total_seconds()
+        if age > 86400:
+            fresh = await _cache_refresh_url(bot, file_path, cached)
+            if fresh:
+                bot.logger.log(MODULE_NAME, f"Cache refreshed: {p.name}")
+                return fresh
         bot.logger.log(MODULE_NAME, f"Cache hit: {p.name}")
         return cached["cdn_url"]
 

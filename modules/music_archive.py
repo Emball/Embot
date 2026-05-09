@@ -344,6 +344,11 @@ async def _get_or_upload_cache(bot, file_path: str) -> Optional[str]:
     if not p.exists():
         bot.logger.error(MODULE_NAME, f"File not found: {file_path}")
         return None
+    size = p.stat().st_size
+    max_bytes = getattr(getattr(chan, 'guild', None), 'filesize_limit', 25 * 1024 * 1024)
+    if size > max_bytes:
+        bot.logger.log(MODULE_NAME, f"File too large: {p.name} ({size // 1024 // 1024}MB)", "WARNING")
+        return "FILE_TOO_LARGE"
 
     try:
         bot.logger.log(MODULE_NAME, f"Uploading {p.name} to {CACHE_CHANNEL_NAME}")
@@ -466,6 +471,11 @@ class ARCHIVEManager:
         if not self.song_index:
             self.bot.logger.log(MODULE_NAME, "No song index to backfill from", "WARNING")
             return
+        chan = discord.utils.get(self.bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
+        if not chan:
+            self.bot.logger.log(MODULE_NAME, f"Cannot backfill — no #{CACHE_CHANNEL_NAME} channel", "WARNING")
+            return
+        max_bytes = getattr(chan.guild, 'filesize_limit', 25 * 1024 * 1024)
         seen = set()
         total = 0
         for fmt in FORMATS:
@@ -478,29 +488,45 @@ class ARCHIVEManager:
         cached = 0
         uploaded = 0
         skipped = 0
-        for fp in sorted(seen):
-            if _cache_lookup(fp):
-                cached += 1
-                continue
-            p = Path(fp)
-            if not p.exists():
-                skipped += 1
-                continue
-            url = await _get_or_upload_cache(self.bot, fp)
-            if url and url != "FILE_TOO_LARGE":
-                uploaded += 1
-            elif url == "FILE_TOO_LARGE":
-                skipped += 1
-            else:
-                skipped += 1
-            await asyncio.sleep(3)
-            if (uploaded + cached) % 50 == 0:
-                self.bot.logger.log(MODULE_NAME,
-                    f"Cache backfill: {uploaded} uploaded, {cached} already cached, "
-                    f"{skipped} skipped out of {total} total")
+        errors = 0
         self.bot.logger.log(MODULE_NAME,
-            f"Cache backfill complete: {uploaded} uploaded, {cached} already cached, "
-            f"{skipped} skipped")
+            f"Cache backfill: {total} unique files to check (max {max_bytes // 1024 // 1024}MB per file)")
+        for i, fp in enumerate(sorted(seen), 1):
+            try:
+                if _cache_lookup(fp):
+                    cached += 1
+                    continue
+                p = Path(fp)
+                if not p.exists():
+                    skipped += 1
+                    continue
+                if p.stat().st_size > max_bytes:
+                    self.bot.logger.log(MODULE_NAME,
+                        f"Skipping {p.name} ({p.stat().st_size // 1024 // 1024}MB exceeds limit)", "WARNING")
+                    skipped += 1
+                    continue
+                url = await _get_or_upload_cache(self.bot, fp)
+                if url and url != "FILE_TOO_LARGE":
+                    uploaded += 1
+                elif url == "FILE_TOO_LARGE":
+                    skipped += 1
+                else:
+                    errors += 1
+            except asyncio.CancelledError:
+                self.bot.logger.log(MODULE_NAME, "Cache backfill cancelled", "WARNING")
+                return
+            except Exception as exc:
+                self.bot.logger.log(MODULE_NAME, f"Backfill error on {Path(fp).name}: {exc}", "WARNING")
+                errors += 1
+            done = uploaded + cached + skipped
+            if done % 25 == 0 or i == total:
+                self.bot.logger.log(MODULE_NAME,
+                    f"Cache backfill: {uploaded} uploaded, {cached} cached, "
+                    f"{skipped} skipped, {errors} errors — {i}/{total}")
+            await asyncio.sleep(2)
+        self.bot.logger.log(MODULE_NAME,
+            f"Cache backfill complete: {uploaded} uploaded, {cached} cached, "
+            f"{skipped} skipped, {errors} errors")
 
 def setup(bot):
     bot.logger.log(MODULE_NAME, "Setting up ARCHIVE module")

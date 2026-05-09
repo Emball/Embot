@@ -4,8 +4,8 @@ import json
 import sqlite3
 import atexit
 from pathlib import Path
-from datetime import datetime
 from typing import Optional
+from _utils import script_dir, _now
 from mutagen.flac import FLAC
 from mutagen.id3 import ID3
 from mutagen.mp3 import MP3
@@ -27,7 +27,7 @@ def _load_eminem_root() -> Path:
     if env_val:
         return Path(env_val)
     from _utils import migrate_config
-    config_file = Path(__file__).parent.parent / "config"/ "archive_config.json"
+    config_file = script_dir() / "config"/ "archive_config.json"
     data = migrate_config(config_file, {"eminem_root": "."})
     if data.get("eminem_root"):
         return Path(data["eminem_root"])
@@ -46,8 +46,8 @@ except FileNotFoundError as _e:
 
 FORMATS = ["FLAC", "MP3"]
 CACHE_CHANNEL_NAME = "songcache"
-DB_PATH = str(Path(__file__).parent.parent / "db" / "archive.db")
-Path(__file__).parent.parent.joinpath("db").mkdir(parents=True, exist_ok=True)
+DB_PATH = str(script_dir() / "db" / "archive.db")
+script_dir().joinpath("db").mkdir(parents=True, exist_ok=True)
 VERSION_KEYWORDS = ['live', 'remix', 'demo', 'acoustic', 'version', 'edit', 'radio']
 SPECIAL_FOLDERS = {
     "8 - Features": "Feature",
@@ -331,7 +331,7 @@ def _cache_lookup(file_path: str) -> Optional[dict]:
     key = str(Path(file_path).resolve())
     with _db_conn() as c:
         c.execute("UPDATE song_cache SET accessed_at=? WHERE file_path=?",
-                  (datetime.utcnow().isoformat(), key))
+                  (_now().isoformat(), key))
         c.commit()
         row = c.execute("SELECT * FROM song_cache WHERE file_path=?", (key,)).fetchone()
     return dict(row) if row else None
@@ -339,7 +339,7 @@ def _cache_lookup(file_path: str) -> Optional[dict]:
 def _cache_store(file_path: str, cdn_url: str, message_id: str, channel_id: str,
                  file_name: str, file_size: int) -> None:
     key = str(Path(file_path).resolve())
-    now = datetime.utcnow().isoformat()
+    now = _now().isoformat()
     with _db_conn() as c:
         c.execute(
             "INSERT OR REPLACE INTO song_cache "
@@ -701,7 +701,7 @@ async def _log_delivery(bot, user, candidate: dict, source: str = "command"):
         if not channel:
             return
         md = candidate['metadata']
-        embed = discord.Embed(title="Archive Delivery", color=0x3498db, timestamp=datetime.utcnow())
+        embed = discord.Embed(title="Archive Delivery", color=0x3498db, timestamp=_now())
         embed.add_field(name="User", value=f"{user} ({user.id})", inline=False)
         embed.add_field(name="Source", value=source, inline=True)
         embed.add_field(name="Title", value=md.get('title', 'Unknown'), inline=True)
@@ -719,7 +719,7 @@ async def send_bot_log(bot, log_data):
         embed = discord.Embed(
             title="Command Execution Log",
             color=0x3498db if log_data.get('success') else 0xe74c3c,
-            timestamp=datetime.utcnow(),
+            timestamp=_now(),
         )
         embed.add_field(name="User", value=f"{log_data['user']} ({log_data['user_id']})", inline=False)
         if 'action' in log_data:

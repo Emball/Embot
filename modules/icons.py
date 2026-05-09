@@ -7,13 +7,15 @@ import pytz
 
 MODULE_NAME = "ICONS"
 
+from _utils import script_dir
+
 class IconManager:
     """Manages automatic server icon changes based on holidays and special dates"""
     
     def __init__(self, bot):
         self.bot = bot
         # Use path relative to the current script location (bot directory)
-        self.icons_dir = str(Path(__file__).parent.parent / 'icons')
+        self.icons_dir = str(script_dir() / 'icons')
         self.est = pytz.timezone('America/Detroit')
         
         # Icon configuration: filename -> (start_date, end_date, description)

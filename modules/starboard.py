@@ -12,12 +12,9 @@ from datetime import datetime, timezone
 import json
 import sqlite3
 import asyncio
+from _utils import script_dir, _now
 
 MODULE_NAME = "STARBOARD"
-
-#  Path helpers (must be defined before CONFIG is loaded)
-def _script_dir() -> Path:
-    return Path(__file__).parent.parent.absolute()  # modules/ → Embot/
 
 def _load_starboard_config() -> dict:
     """Load config/starboard_config.json, migrating if schema has changed."""
@@ -29,12 +26,12 @@ def _load_starboard_config() -> dict:
         "ignore_before": "",  # ISO date e.g. "2025-01-01"— messages before this are ignored
     }
     from _utils import migrate_config
-    return migrate_config(_script_dir() / "config" / "starboard_config.json", defaults)
+    return migrate_config(script_dir() / "config" / "starboard_config.json", defaults)
 
 CONFIG: dict = {}  # populated during setup() and refreshable
 
 def _db_path() -> Path:
-    return _script_dir() / "db"/ "starboard.db"
+    return script_dir() / "db"/ "starboard.db"
 
 DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS starboard_entries (
@@ -66,7 +63,7 @@ def _init_db() -> None:
     conn.close()
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return _now().isoformat()
 
 def _get_entry(msg_key: str) -> dict | None:
     with _get_conn() as conn:

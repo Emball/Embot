@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Tuple
 from discord.ext import tasks
+from _utils import script_dir, _now
 
 MODULE_NAME = "VMS"
 
@@ -67,43 +68,39 @@ STOP_WORDS = {
     'got', 'im', 'yeah', 'okay', 'ok', 'also', 'lol', 'um', 'uh', 'oh', 'yes',
 }
 
-def _script_dir() -> Path:
-    """Root Embot/ directory (two levels up from modules/)."""
-    return Path(__file__).parent.parent.absolute()
-
 def _vms_dir() -> Path:
     """Voice message audio files live here."""
-    p = _script_dir() / "cache"/ "vms"
+    p = script_dir() / "cache"/ "vms"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 def _archive_dir() -> Path:
     """Archived voice messages live here."""
-    p = _script_dir() / "cache"/ "vms"/ "archive"
+    p = script_dir() / "cache"/ "vms"/ "archive"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 def _db_path() -> str:
     """SQLite database path."""
-    p = _script_dir() / "db"
+    p = script_dir() / "db"
     p.mkdir(parents=True, exist_ok=True)
     return str(p / "vms.db")
 
 def _broken_dir() -> Path:
     """Corrupt or unprocessable voice message files are moved here."""
-    p = _script_dir() / "cache"/ "vms"/ "broken"
+    p = script_dir() / "cache"/ "vms"/ "broken"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 def _whisper_model_dir() -> Path:
     """Whisper model cache directory."""
-    p = _script_dir() / "cache"/ "whisper_models"
+    p = script_dir() / "cache"/ "whisper_models"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 def _temp_vms_dir() -> Path:
     """Temp dir for external (non-Emball) VM transcriptions — files deleted after use."""
-    p = _script_dir() / "cache"/ "vms"/ "temp"
+    p = script_dir() / "cache"/ "vms"/ "temp"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -2096,7 +2093,7 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
     embed = discord.Embed(
         title="Voice Message Stats",
         color=0x5865f2,
-        timestamp=datetime.utcnow(),
+        timestamp=_now(),
     )
 
     # — Overview

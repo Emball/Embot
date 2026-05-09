@@ -1,10 +1,9 @@
 import discord
 from discord import app_commands
-from datetime import datetime, timezone
 from typing import Optional
-from pathlib import Path
 import json
 import os
+from _utils import script_dir, _now
 
 MODULE_NAME = "LOGGER"
 
@@ -13,7 +12,7 @@ class EventLogger:
     
     def __init__(self, bot):
         self.bot = bot
-        config_dir = Path(__file__).parent.parent / "config"
+        config_dir = script_dir() / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
         self.config_file = str(config_dir / "logger_config.json")
         self.config = self.load_config()
@@ -117,7 +116,7 @@ class EventLogger:
         embed = discord.Embed(
             description=description,
             color=0xff4500,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         
         embed.set_author(
@@ -234,7 +233,7 @@ class EventLogger:
         embed = discord.Embed(
             description=description,
             color=0x3498db,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         
         embed.set_author(
@@ -264,7 +263,7 @@ class EventLogger:
         embed = discord.Embed(
             description=description,
             color=0xe74c3c,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         
         await self.log_to_channel(channel, embed)
@@ -280,7 +279,7 @@ class EventLogger:
             return
         
         # Calculate account age
-        account_age = datetime.now(timezone.utc) - member.created_at
+        account_age = _now() - member.created_at
         years = account_age.days // 365
         months = (account_age.days % 365) // 30
         days = (account_age.days % 365) % 30
@@ -298,7 +297,7 @@ class EventLogger:
         embed = discord.Embed(
             description=f"{member.mention} {member.name}",
             color=0x43b581,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         
         # Set author
@@ -330,7 +329,7 @@ class EventLogger:
         embed = discord.Embed(
             description=f"{member.mention} {member.name}",
             color=0xe67e22,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         
         # Set author
@@ -379,7 +378,7 @@ class EventLogger:
                 embed = discord.Embed(
                     description=description,
                     color=0x9b59b6,
-                    timestamp=datetime.now(timezone.utc)
+                    timestamp=_now()
                 )
                 
                 embed.set_author(
@@ -404,7 +403,7 @@ class EventLogger:
             embed = discord.Embed(
                 description=description,
                 color=0x3498db,
-                timestamp=datetime.now(timezone.utc)
+                timestamp=_now()
             )
             
             embed.set_author(
@@ -440,7 +439,7 @@ class EventLogger:
         embed = discord.Embed(
             description=description,
             color=0x2ecc71,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         
         await self.log_to_channel(channel, embed)
@@ -464,7 +463,7 @@ class EventLogger:
         embed = discord.Embed(
             description=description,
             color=0xe74c3c,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         
         await self.log_to_channel(channel, embed)
@@ -503,7 +502,7 @@ class EventLogger:
         embed = discord.Embed(
             description=description,
             color=0x3498db,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         
         embed.set_footer(text=f"Role ID: {after.id}")
@@ -530,7 +529,7 @@ class EventLogger:
         embed = discord.Embed(
             description=description,
             color=0x2ecc71,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         
         await self.log_to_channel(bot_logs, embed)
@@ -554,7 +553,7 @@ class EventLogger:
         embed = discord.Embed(
             description=description,
             color=0xe74c3c,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         
         await self.log_to_channel(bot_logs, embed)
@@ -587,7 +586,7 @@ class EventLogger:
         embed = discord.Embed(
             description=description,
             color=0x3498db,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         
         embed.set_footer(text=f"Channel ID: {after.id}")
@@ -611,7 +610,7 @@ class EventLogger:
             embed = discord.Embed(
                 description=description,
                 color=0x2ecc71,
-                timestamp=datetime.now(timezone.utc)
+                timestamp=_now()
             )
             
             embed.set_author(
@@ -629,7 +628,7 @@ class EventLogger:
             embed = discord.Embed(
                 description=description,
                 color=0xe74c3c,
-                timestamp=datetime.now(timezone.utc)
+                timestamp=_now()
             )
             
             embed.set_author(
@@ -647,7 +646,7 @@ class EventLogger:
             embed = discord.Embed(
                 description=description,
                 color=0x3498db,
-                timestamp=datetime.now(timezone.utc)
+                timestamp=_now()
             )
             
             embed.set_author(
@@ -687,7 +686,7 @@ class EventLogger:
         embed = discord.Embed(
             description=description,
             color=0x2ecc71,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         
         # Set author (user who created invite)
@@ -723,7 +722,7 @@ class EventLogger:
         embed = discord.Embed(
             description=description,
             color=0xe74c3c,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         
         await self.log_to_channel(channel, embed)
@@ -738,7 +737,7 @@ class EventLogger:
             title="User Banned",
             description=f"{user.mention} was banned from the server.",
             color=0x992d22,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         embed.set_thumbnail(url=user.display_avatar.url)
         embed.add_field(name="Moderator", value=moderator.mention, inline=False)
@@ -755,7 +754,7 @@ class EventLogger:
             title="User Unbanned",
             description=f"{user.mention} was unbanned from the server.",
             color=0x2ecc71,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         embed.set_thumbnail(url=user.display_avatar.url)
         embed.add_field(name="Moderator", value=moderator.mention, inline=False)
@@ -771,7 +770,7 @@ class EventLogger:
             title="Member Kicked",
             description=f"{member.mention} was kicked from the server.",
             color=0xe67e22,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         embed.set_thumbnail(url=member.display_avatar.url)
         embed.add_field(name="Moderator", value=moderator.mention, inline=False)
@@ -788,7 +787,7 @@ class EventLogger:
             title="Member Timed Out",
             description=f"{member.mention} was timed out.",
             color=0xe74c3c,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         embed.set_thumbnail(url=member.display_avatar.url)
         embed.add_field(name="Moderator", value=moderator.mention, inline=False)
@@ -806,7 +805,7 @@ class EventLogger:
             title="Member Muted",
             description=f"{member.mention} was muted.",
             color=0xf39c12,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         embed.set_thumbnail(url=member.display_avatar.url)
         embed.add_field(name="Moderator", value=moderator.mention, inline=False)
@@ -824,7 +823,7 @@ class EventLogger:
             title="Member Softbanned",
             description=f"{member.mention} was softbanned (messages deleted, can rejoin).",
             color=0x992d22,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         embed.set_thumbnail(url=member.display_avatar.url)
         embed.add_field(name="Moderator", value=moderator.mention, inline=False)
@@ -844,7 +843,7 @@ class EventLogger:
             title="Messages Purged",
             description=desc,
             color=0x2ecc71,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         if target_user:
             embed.set_thumbnail(url=target_user.display_avatar.url)
@@ -862,7 +861,7 @@ class EventLogger:
             title="Member Warned",
             description=f"{member.mention} was warned.",
             color=0xf39c12,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         embed.set_thumbnail(url=member.display_avatar.url)
         embed.add_field(name="Moderator", value=moderator.mention, inline=False)
@@ -879,7 +878,7 @@ class EventLogger:
             title="Channel Locked",
             description=f"{locked_channel.mention} was locked.",
             color=0xe74c3c,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         embed.add_field(name="Moderator", value=moderator.mention, inline=False)
         embed.add_field(name="Reason", value=reason, inline=False)
@@ -894,7 +893,7 @@ class EventLogger:
             title="AUTO-BAN",
             description=f"{user.mention} was automatically banned.",
             color=0xdc143c,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         embed.set_thumbnail(url=user.display_avatar.url)
         embed.add_field(name="Reason", value=reason, inline=False)
@@ -911,14 +910,14 @@ class EventLogger:
                 title="AUTO-BAN: Repeated Violation",
                 description=f"{user.mention} was automatically banned after {strike_count} strikes.",
                 color=0xdc143c,
-                timestamp=datetime.now(timezone.utc)
+                timestamp=_now()
             )
         else:
             embed = discord.Embed(
                 title=f"Auto-Mod Strike {strike_count}/2",
                 description=f"{user.mention} received a strike.",
                 color=0xf39c12,
-                timestamp=datetime.now(timezone.utc)
+                timestamp=_now()
             )
         embed.set_thumbnail(url=user.display_avatar.url)
         embed.add_field(name="Reason", value=reason, inline=False)
@@ -1081,7 +1080,7 @@ def setup(bot):
         embed = discord.Embed(
             title="Logging Configuration",
             color=0x5865f2,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=_now()
         )
         
         embed.add_field(

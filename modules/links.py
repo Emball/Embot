@@ -8,12 +8,14 @@ from pathlib import Path
 
 MODULE_NAME = "LINKS"
 
+from _utils import script_dir
+
 class LinkManager:
     """Manages custom link commands that can be easily configured"""
     
     def __init__(self, bot):
         self.bot = bot
-        self.config_file = str(Path(__file__).parent.parent / "config"/ "links_config.json")
+        self.config_file = str(script_dir() / "config"/ "links_config.json")
         self.links = self.load_links()
         self.prefix = "?" # Default prefix for link commands
     

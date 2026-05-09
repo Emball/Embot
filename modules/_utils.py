@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -41,3 +42,13 @@ def migrate_config(path, defaults):
 
     atomic_json_write(p, merged)
     return merged
+
+
+def script_dir() -> Path:
+    """Root Embot/ directory (two levels up from modules/)."""
+    return Path(__file__).parent.parent.absolute()
+
+
+def _now() -> datetime:
+    """Current UTC time as an aware datetime."""
+    return datetime.now(timezone.utc)

@@ -8,6 +8,8 @@ from pathlib import Path
 from discord import app_commands
 from discord.ext import tasks
 
+from _utils import script_dir
+
 MODULE_NAME = "YOUTUBE"
 
 CONFIG_DEFAULTS = {
@@ -21,7 +23,7 @@ CONFIG_DEFAULTS = {
 }
 
 def _config_path():
-    return Path(__file__).parent.parent / "config" / "youtube.json"
+    return script_dir() / "config" / "youtube.json"
 
 def load_config():
     from _utils import migrate_config

@@ -8,9 +8,11 @@ import re
 import asyncio
 import traceback
 
+from _utils import script_dir, atomic_json_write, _now
+
 MODULE_NAME = "DEV"
 
-DEV_CONFIG_PATH = Path(__file__).parent.parent / "config" / "dev.json"
+DEV_CONFIG_PATH = script_dir() / "config" / "dev.json"
 DEV_CONFIG_DEFAULTS = {
     "breaking_threshold": 500,
     "major_threshold": 100,
@@ -31,10 +33,7 @@ def _save_dev_config(data: dict) -> None:
             with open(DEV_CONFIG_PATH, "r", encoding="utf-8") as f:
                 existing = json.load(f)
         existing.update(data)
-        tmp = str(DEV_CONFIG_PATH) + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(existing, f, indent=4, ensure_ascii=False)
-        os.replace(tmp, str(DEV_CONFIG_PATH))
+        atomic_json_write(DEV_CONFIG_PATH, existing)
     except Exception as e:
         print(f"[DEV] Failed to save dev.json: {e}")
 
@@ -57,7 +56,7 @@ class DevManager:
         self._log_dev_features()
     
     def _auto_setup_git(self):
-        root = Path(__file__).parent.parent
+        root = script_dir()
         token_candidates = [root / "config" / "token", root / "token.json"]
         token_path = next((p for p in token_candidates if p.exists()), None)
         if not token_path:
@@ -154,7 +153,7 @@ class DevManager:
     def setup_github_with_token(self, token):
         """Setup GitHub using token from config/auth.json."""
         try:
-            root = Path(__file__).parent.parent
+            root = script_dir()
             token_path = (root / "config" / "auth.json")
             if token_path:
                 with open(token_path, 'r', encoding='utf-8') as f:
@@ -278,7 +277,7 @@ fix_spaces.py
     def _get_version_from_file(self):
         """Read version from _version.py file directly"""
         try:
-            version_file = Path(__file__).parent.parent / "_version.py"
+            version_file = script_dir() / "_version.py"
             if version_file.exists():
                 with open(version_file, 'r', encoding='utf-8') as f:
                     content = f.read()
@@ -298,7 +297,7 @@ fix_spaces.py
         try:
             version_content = f'__version__ = "{version}"\n'
             
-            with open(str(Path(__file__).parent.parent / "_version.py"), 'w', encoding='utf-8') as f:
+            with open(str(script_dir() / "_version.py"), 'w', encoding='utf-8') as f:
                 f.write(version_content)
 
             self.bot.logger.log(MODULE_NAME, f"Saved version to _version.py: v{version}")
@@ -445,7 +444,7 @@ fix_spaces.py
                 'version': new_version,
                 'previous_version': old_version,
                 'change_type': change_type,
-                'timestamp': datetime.utcnow().isoformat(),
+                'timestamp': _now().isoformat(),
                 'lines_changed': lines_changed,
                 'files': files,
             }
@@ -455,7 +454,7 @@ fix_spaces.py
 
             self._save_version_to_file(new_version)
             self.bot.version = new_version
-            self.last_check_time = datetime.utcnow().isoformat()
+            self.last_check_time = _now().isoformat()
 
             self.bot.logger.log(MODULE_NAME, f"Version bumped: v{old_version} -> v{new_version} ({change_type})")
 
@@ -489,7 +488,7 @@ fix_spaces.py
                 )
                 await proc.wait()
             else:
-                version_file = Path(__file__).parent.parent / "_version.py"
+                version_file = script_dir() / "_version.py"
                 proc = await asyncio.create_subprocess_exec(
                     'git', '-c', 'credential.helper=', 'add', str(version_file),
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,

@@ -19,6 +19,7 @@ import threading
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Tuple
 from pathlib import Path
+from _utils import script_dir, _now
 
 try:
     import aiohttp
@@ -49,9 +50,6 @@ SETUP_EMOJIS = ["🔥", "😐", "🗑️"]   # Bot reacts with these on every su
 
 MIN_DESCRIPTION_LENGTH = 10
 VERSION_REENTRY_DAYS   = 30          # Days before a group can re-enter spotlight
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 def _now_str() -> str:
     return _now().isoformat()
@@ -591,7 +589,7 @@ class CommunityDB:
 class CommunitySystem:
     def __init__(self, bot):
         self.bot = bot
-        db_path = Path(__file__).parent.parent / "db"/ "community.db"
+        db_path = script_dir() / "db"/ "community.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
         db_path.parent.mkdir(exist_ok=True)
         self.db = CommunityDB(db_path)

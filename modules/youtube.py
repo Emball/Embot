@@ -126,7 +126,7 @@ async def get_latest_video(channel_id: str, cfg: dict = None) -> tuple[str | Non
 def setup(bot):
     cfg = load_config()
 
-    @bot.tree.command(name="youtube", description="Extract and deliver opus audio from a YouTube link as .ogg")
+    @bot.tree.command(name="extract_audio", description="Extract and deliver opus audio from a YouTube link as .ogg")
     @app_commands.describe(url="YouTube video URL")
     async def youtube_cmd(interaction: discord.Interaction, url: str):
         if "youtube.com" not in url and "youtu.be" not in url:

@@ -1,12 +1,14 @@
 import asyncio
 import json
+import secrets
+import socket
 import sqlite3
 import re
 from pathlib import Path
 from datetime import datetime
 from aiohttp import web
 
-from _utils import script_dir, migrate_config
+from _utils import script_dir, migrate_config, atomic_json_write
 
 MODULE_NAME = "REMOTE_DEBUG"
 
@@ -21,7 +23,31 @@ RD_CONFIG_DEFAULTS = {
 
 
 def _load_config() -> dict:
-    return migrate_config(RD_CONFIG_PATH, RD_CONFIG_DEFAULTS)
+    cfg = migrate_config(RD_CONFIG_PATH, RD_CONFIG_DEFAULTS)
+    if not cfg.get("token", "").strip():
+        cfg["token"] = secrets.token_hex(32)
+        atomic_json_write(RD_CONFIG_PATH, cfg)
+    return cfg
+
+
+def _detect_lan_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(2)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(2)
+            s.connect(("1.1.1.1", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return "127.0.0.1"
 
 
 class RemoteDebugServer:
@@ -42,11 +68,8 @@ class RemoteDebugServer:
         self._app.router.add_get("/config/{name}", self._handle_config)
 
     def _check_auth(self, request) -> bool:
-        token = self._config.get("token", "")
-        if not token:
-            return True
         req_token = request.headers.get("X-Debug-Token", "")
-        return req_token == token
+        return req_token == self._config.get("token", "")
 
     def _check_ip(self, request) -> bool:
         allowed = self._config.get("allowed_ips", [])
@@ -194,8 +217,12 @@ class RemoteDebugServer:
         await self._runner.setup()
         site = web.TCPSite(self._runner, host, port)
         await site.start()
+
+        lan_ip = _detect_lan_ip()
         self.bot.logger.log(MODULE_NAME,
-            f"HTTP debug server on {host}:{port}{' (token auth)' if self._config.get('token') else ' (no auth!)'}")
+            f"Remote debug API online at http://{lan_ip}:{port}")
+        self.bot.logger.log(MODULE_NAME,
+            f"Auth token: {self._config['token']}")
 
     async def stop(self):
         if self._runner:

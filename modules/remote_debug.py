@@ -673,6 +673,7 @@ def _wait_for_server(cfg, timeout=30):
 
 
 def _auto_tail(cfg, lines=30):
+    time.sleep(8)
     print(f"\n--- Last {lines} lines of startup log ---")
     _cmd_logs(cfg, lines=lines)
 

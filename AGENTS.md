@@ -28,6 +28,9 @@ All run from the project root:
 | `uv run python modules/remote_debug.py logs --file session_20250101_120000.log` | Fetch from a specific log file |
 | `uv run python modules/remote_debug.py logs --lines 1000` | Fetch last N lines |
 | `uv run python modules/remote_debug.py logs-list` | List all session log files |
+| `uv run python modules/remote_debug.py logs-search <pattern>` | Regex search across all log files |
+| `uv run python modules/remote_debug.py logs --lines 1000` | Fetch last N lines |
+| `uv run python modules/remote_debug.py logs-list` | List all session log files |
 | `uv run python modules/remote_debug.py stream` | Live tail the console log (Ctrl+C to stop) |
 | `uv run python modules/remote_debug.py db-download <name>` | Download a .db file to temp/ |
 | `uv run python modules/remote_debug.py db-query <name> "<SQL>"` | Run a SELECT/PRAGMA query |

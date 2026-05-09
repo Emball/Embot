@@ -93,6 +93,7 @@ class RemoteDebugServer:
         self._app.router.add_get("/modules", self._handle_modules)
         self._app.router.add_get("/logs", self._handle_logs)
         self._app.router.add_get("/logs/list", self._handle_logs_list)
+        self._app.router.add_get("/logs/search", self._handle_logs_search)
         self._app.router.add_get("/logs/{name}", self._handle_logs_file)
         self._app.router.add_get("/logs/stream", self._handle_logs_stream)
         self._app.router.add_get("/db/{name}", self._handle_db_download)
@@ -196,6 +197,61 @@ class RemoteDebugServer:
                 "mtime": datetime.fromtimestamp(fp.stat().st_mtime).isoformat(),
             })
         return web.json_response(files)
+
+    async def _handle_logs_search(self, request):
+        if not self._check_auth(request) or not self._check_ip(request):
+            return self._fail()
+        query = request.query.get("q", "")
+        if not query:
+            return self._fail("missing query parameter 'q'", 400)
+        try:
+            pattern = re.compile(query, re.IGNORECASE)
+        except re.error as e:
+            return self._fail(f"invalid regex: {e}", 400)
+        try:
+            max_results = min(int(request.query.get("max", "100")), 500)
+        except ValueError:
+            max_results = 100
+        try:
+            max_files = int(request.query.get("files", "0") or "0")
+        except ValueError:
+            max_files = 0
+
+        logs_dir = self._logs_dir()
+        if not logs_dir.exists():
+            return web.json_response({"matches": [], "files_searched": 0})
+
+        log_files = sorted(logs_dir.glob("session_*.log"), key=lambda x: x.stat().st_mtime, reverse=True)
+        if max_files > 0:
+            log_files = log_files[:max_files]
+
+        matches = []
+        files_searched = 0
+        for fp in log_files:
+            files_searched += 1
+            try:
+                with open(fp, "r", encoding="utf-8") as f:
+                    for i, line in enumerate(f, 1):
+                        if pattern.search(line):
+                            matches.append({
+                                "file": fp.name,
+                                "line": i,
+                                "content": line.rstrip("\n"),
+                            })
+                            if len(matches) >= max_results:
+                                break
+                if len(matches) >= max_results:
+                    break
+            except Exception:
+                continue
+
+        return web.json_response({
+            "query": query,
+            "matches": matches,
+            "total_matches": len(matches),
+            "files_searched": files_searched,
+            "truncated": len(matches) >= max_results,
+        })
 
     async def _handle_logs_file(self, request):
         if not self._check_auth(request) or not self._check_ip(request):
@@ -474,6 +530,20 @@ def _cmd_logs_list(cfg):
     print(json.dumps(_client_request(cfg, "/logs/list"), indent=2))
 
 
+def _cmd_logs_search(cfg, query, max_results=100, max_files=0):
+    path = f"/logs/search?q={urllib.parse.quote(query)}&max={max_results}"
+    if max_files:
+        path += f"&files={max_files}"
+    result = _client_request(cfg, path)
+    matches = result.get("matches", [])
+    print(f"Found {result.get('total_matches', 0)} match(es) across {result.get('files_searched', 0)} file(s)")
+    if result.get("truncated"):
+        print("(results truncated — use --max for more)")
+    print()
+    for m in matches:
+        print(f"  {m['file']}:{m['line']}  {m['content']}")
+
+
 def _cmd_stream(cfg):
     url = cfg["url"].rstrip("/") + "/logs/stream"
     req = urllib.request.Request(url)
@@ -537,6 +607,11 @@ def main():
 
     sub.add_parser("logs-list", help="List all log files")
 
+    logs_search = sub.add_parser("logs-search", help="Search all log files")
+    logs_search.add_argument("query", help="Search pattern (regex)")
+    logs_search.add_argument("--max", type=int, default=100, help="Max results (default: 100)")
+    logs_search.add_argument("--files", type=int, default=0, help="Max files to search (0=all)")
+
     sub.add_parser("guilds", help="List guilds with details")
     sub.add_parser("modules", help="List loaded module names")
 
@@ -570,6 +645,8 @@ def main():
         _cmd_logs(run_cfg, args.lines, args.file)
     elif args.command == "logs-list":
         _cmd_logs_list(run_cfg)
+    elif args.command == "logs-search":
+        _cmd_logs_search(run_cfg, args.query, args.max, args.files)
     elif args.command == "stream":
         _cmd_stream(run_cfg)
     elif args.command == "db-download":

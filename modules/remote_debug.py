@@ -4,6 +4,7 @@ import secrets
 import socket
 import sqlite3
 import re
+import traceback
 from pathlib import Path
 from datetime import datetime
 from aiohttp import web
@@ -66,6 +67,18 @@ class RemoteDebugServer:
         self._app.router.add_get("/db/{name}", self._handle_db_download)
         self._app.router.add_get("/db/{name}/query", self._handle_db_query)
         self._app.router.add_get("/config/{name}", self._handle_config)
+        self._app.middlewares.append(self._error_middleware)
+
+    @web.middleware
+    async def _error_middleware(self, request, handler):
+        try:
+            return await handler(request)
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, f"API error on {request.path}", e)
+            return web.json_response(
+                {"error": str(e), "type": type(e).__name__},
+                status=500,
+            )
 
     def _check_auth(self, request) -> bool:
         req_token = request.headers.get("X-Debug-Token", "")
@@ -114,7 +127,8 @@ class RemoteDebugServer:
             all_lines = f.readlines()
         return web.Response(
             text="".join(all_lines[-lines:]),
-            content_type="text/plain; charset=utf-8",
+            content_type="text/plain",
+            charset="utf-8",
         )
 
     async def _handle_logs_stream(self, request):

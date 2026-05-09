@@ -17,10 +17,6 @@ import re
 import signal
 
 parser = argparse.ArgumentParser(description='Embot Discord Bot')
-parser.add_argument('-dev', '--development', action='store_true',
-                    help='Enable development mode (versioning, git integration)')
-parser.add_argument('-t', '--test', action='store_true',
-                    help='Dry-run: validate startup, sync commands, then exit')
 args = parser.parse_args()
 
 script_dir = Path(__file__).parent.absolute()
@@ -220,14 +216,6 @@ def load_modules():
         if not file.endswith('.py') or file.startswith('_'):
             continue
 
-        if file == 'dev.py' and not args.development:
-            bot.logger.log("MAIN", "Skipping dev.py (not in development mode)")
-            continue
-
-        if file == 'version.py' and args.development:
-            bot.logger.log("MAIN", "Skipping version.py (using dev.py instead)")
-            continue
-
         name = file[:-3]
 
         try:
@@ -239,10 +227,7 @@ def load_modules():
                 module = importlib.import_module(name)
 
             if hasattr(module, 'setup'):
-                if name == 'dev':
-                    module.setup(bot, register_console_command)
-                else:
-                    module.setup(bot)
+                module.setup(bot)
 
                 commands_after = {cmd.name: cmd for cmd in bot.tree.get_commands()}
                 new_commands = {cmd_name: cmd for cmd_name, cmd in commands_after.items() if cmd_name not in commands_before}
@@ -433,7 +418,7 @@ async def on_ready():
 
         bot.version = load_version()
 
-        mode = "DEVELOPMENT MODE"if args.development else "PRODUCTION MODE"
+        mode = "PRODUCTION MODE"
         bot.logger.log("MAIN", f"Embot online as {bot.user} - {mode} - v{bot.version}")
 
         start_console_thread()
@@ -450,10 +435,6 @@ async def on_ready():
             synced = await bot.tree.sync()
             bot.logger.log("MAIN", f"Commands synced successfully: {len(synced)} commands")
 
-            if getattr(args, 'test', False):
-                bot.logger.log("MAIN", f"TEST PASSED — {len(synced)} commands synced. Shutting down.")
-                await bot.close()
-                return
         except HTTPException as e:
             if e.status == 429 and e.code == 30034:
                 bot.logger.log("MAIN", "Daily command sync limit reached (200/200). Commands will sync tomorrow.", "WARNING")
@@ -582,7 +563,7 @@ def show_status():
     module_count = len(getattr(bot, '_module_commands', {}))
     print(f"│ Loaded modules: {module_count}{'' * (45 - len(str(module_count)))} │")
 
-    mode = "DEVELOPMENT"if args.development else "PRODUCTION"
+    mode = "PRODUCTION"
     print(f"│ Mode: {mode:<47} │")
 
     print(f"│ Console commands: {len(bot.console_commands)}{'' * (42 - len(str(len(bot.console_commands))))} │")
@@ -638,10 +619,7 @@ def setup_console_commands():
             if hasattr(module, 'setup'):
                 commands_before = {cmd.name: cmd for cmd in bot.tree.get_commands()}
 
-                if module_name == 'dev':
-                    module.setup(bot, register_console_command)
-                else:
-                    module.setup(bot)
+                module.setup(bot)
 
                 commands_after = {cmd.name: cmd for cmd in bot.tree.get_commands()}
                 new_commands = {name: cmd for name, cmd in commands_after.items() if name not in commands_before}
@@ -814,25 +792,7 @@ def run_bot(token):
                         bot.logger.log("MAIN", "Update pulled — restarting...")
                         _restart()
 
-        if args.development:
-            bot.logger.log("MAIN", "Pre-flight: running dev version check...")
-            from modules.dev import DevManager
-            dm = DevManager(bot)
-            bot.dev_manager = dm
-            result = asyncio.run(dm.check_and_update_version(auto_commit=True))
-            bot.version = dm._get_version_from_file()
-            if result:
-                bot.logger.log("MAIN", f"Pre-flight bumped to v{result['version']}")
-            else:
-                bot.logger.log("MAIN", f"Pre-flight complete — v{bot.version} (no change)")
-
-        if args.development:
-            mode_str = "DEVELOPMENT MODE"
-        elif args.test:
-            mode_str = "DRY-RUN TEST MODE"
-        else:
-            mode_str = "PRODUCTION MODE"
-        bot.logger.log("MAIN", f"Starting Embot v{load_version()} — {mode_str}")
+        bot.logger.log("MAIN", f"Starting Embot v{load_version()} — PRODUCTION MODE")
         bot.logger.log("MAIN", f"Log files: {data_dir}")
 
         bot.run(token)

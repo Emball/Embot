@@ -51,7 +51,13 @@ Quota is limited. Minimize tool calls and response length. Complete tasks fully 
 ## Versioning & Git
 
 - GitHub token lives in the auth file inside the project (`config/auth.json`).
-- Version format: `MAJOR.MINOR.PATCH.MICRO` (defined in `modules/dev.py:_increment_version`).
+- Version format: `MAJOR.MINOR.PATCH.MICRO` (e.g. `34.4.0.4`).
+- The agent handles all versioning and git operations automatically.
+- Version increment thresholds (based on total lines changed since last version bump commit):
+  - `>= 500` lines → **MAJOR** bump (M.m.p.m)
+  - `>= 100` lines → **minor** bump (m.M.p.m)
+  - `>= 20` lines → **patch** bump (m.m.P.m)
+  - `>= 1` lines → **micro** bump (m.m.p.M)
 - Increment the version file on every change.
 - Commit message = version number only.
 - Ensure the .gitignore file is up to date and you do not track files that shouldn't be pushed.
@@ -101,7 +107,6 @@ Each module exposes `setup(bot)` — called during boot. Private `_*.py` files a
 | `vms_transcribe.py` | OGG transcription via Whisper, waveform gen, bulk processing |
 | `vms_storage.py` | VM scan/conform, archival, backfill, purge |
 | `vms_playback.py` | VM selection (contextual/random), Discord CDN upload, counters, ping cooldown |
-| `dev.py` | Dev mode only (`-dev`): auto-versioning, auto-commit/push, dev console commands |
 | `starboard.py` | Dyno-style starboard — config-driven, no slash commands |
 | `icons.py` | Holiday icon rotation — date-based server icon + bot avatar changes |
 | `links.py` | Quick-link system — `?name` prefix triggers, JSON config-backed |
@@ -122,9 +127,9 @@ Each module exposes `setup(bot)` — called during boot. Private `_*.py` files a
 
 ### Embot Startup Flow
 
-1. Parse CLI args (`-dev`, `-t`)
+1. Parse CLI args
 2. Load `config/embot.json` (auto-create defaults if missing)
 3. Init `discord.ext.commands.Bot` with `!` and `?` prefixes
 4. Create ConsoleLogger (session-scoped log in `logs/`)
 5. `on_ready`: load `_version.py`, start console + heartbeat + auto-update loop, call `load_modules()`, sync slash commands
-6. Auto-update (production): pre-flight `git fetch`, merge remote if newer, restart on exit code 42
+6. Auto-update: pre-flight `git fetch`, merge remote if newer, restart on exit code 42

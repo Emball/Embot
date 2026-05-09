@@ -7,7 +7,7 @@ from discord import app_commands
 MODULE_NAME = "ARTWORK"
 
 ITUNES_SEARCH = "https://itunes.apple.com/search"
-ART_SIZE = 3000
+ART_SIZE = 100000
 
 
 def normalize(text: str) -> str:
@@ -85,7 +85,7 @@ def setup(bot):
 
         embed = discord.Embed(title=album, description=f"{artist} • {year}", color=0x000000)
         embed.set_image(url=url)
-        embed.set_footer(text="Apple Music • 3000×3000")
+        embed.set_footer(text="Apple Music • max resolution")
 
         await interaction.followup.send(embed=embed)
         bot.logger.log(MODULE_NAME, f"{interaction.user} fetched artwork: {artist} — {album}")

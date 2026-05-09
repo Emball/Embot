@@ -554,6 +554,8 @@ class ARCHIVEManager:
         files = []
         for fp, p, sz in batch:
             files.append(discord.File(p, filename=p.name))
+        total_mb = sum(sz for _, _, sz in batch) // 1024 // 1024
+        self.bot.logger.log(MODULE_NAME, f"Uploading batch: {len(batch)} file(s), {total_mb}MB")
         try:
             timeout = 120 + 30 * len(batch)
             msg = await asyncio.wait_for(chan.send(files=files), timeout=timeout)
@@ -566,16 +568,14 @@ class ARCHIVEManager:
         except Exception as e:
             self.bot.logger.log(MODULE_NAME, f"Batch upload error ({len(batch)} files): {e}", "WARNING")
             return False
-        att_map = {att.filename: att for att in msg.attachments}
         ok = True
-        for fp, p, sz in batch:
-            att = att_map.get(p.name)
-            if att:
-                _cache_store(fp, att.url, att.id, chan.id, p.name, sz)
-                self.bot.logger.log(MODULE_NAME, f"Cached: {p.name}")
-            else:
-                self.bot.logger.log(MODULE_NAME, f"Batch missing attachment for {p.name}", "WARNING")
-                ok = False
+        for (fp, p, sz), att in zip(batch, msg.attachments):
+            _cache_store(fp, att.url, att.id, chan.id, p.name, sz)
+            self.bot.logger.log(MODULE_NAME, f"Cached: {p.name}")
+        if len(msg.attachments) != len(batch):
+            self.bot.logger.log(MODULE_NAME,
+                f"Batch mismatch: sent {len(batch)} files, got {len(msg.attachments)} attachments", "WARNING")
+            ok = False
         return ok
 
 def setup(bot):

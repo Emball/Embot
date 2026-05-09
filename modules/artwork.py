@@ -17,7 +17,7 @@ def normalize(text: str) -> str:
 
 
 def art_url(raw: str, size: int = ART_SIZE) -> str:
-    return re.sub(r'\\d+x\\d+bb', f'{size}x{size}bb', raw)
+    return re.sub(r'\d+x\d+bb', f'{size}x{size}bb', raw)
 
 
 async def search_itunes(query: str, limit: int = 10) -> list[dict]:

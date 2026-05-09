@@ -12,7 +12,6 @@ ART_SIZE = 3600
 
 _STRIP = re.compile(r"[^\w\s]")
 _WS    = re.compile(r"\s+")
-_STOP  = {"the", "a", "an", "of", "in", "and", "feat", "ft", "with", "by", "da"}
 
 
 def normalize(text: str) -> str:
@@ -20,16 +19,13 @@ def normalize(text: str) -> str:
     return _WS.sub(" ", t).strip().casefold()
 
 
-def tokenize(text: str) -> set[str]:
-    return {w for w in normalize(text).split() if w not in _STOP}
-
-
 def art_url(raw: str, size: int = ART_SIZE) -> str:
     return re.sub(r"\d+x\d+bb", f"{size}x{size}bb", raw)
 
 
-async def search_itunes(query: str, limit: int = 25) -> list[dict]:
-    params = {"term": query, "entity": "album", "limit": limit}
+async def search_itunes(artist: str, album: str, limit: int = 10) -> list[dict]:
+    query = f"{artist} {album}".strip()
+    params = {"term": query, "entity": "album", "attribute": "albumTerm", "limit": limit}
     headers = {"User-Agent": "Mozilla/5.0"}
     async with aiohttp.ClientSession(headers=headers) as session:
         async with session.get(ITUNES_SEARCH, params=params) as resp:
@@ -39,53 +35,47 @@ async def search_itunes(query: str, limit: int = 25) -> list[dict]:
             return data.get("results", [])
 
 
-def score_result(q_tokens: set[str], q_norm: str, r: dict) -> float:
-    artist_tokens = tokenize(r.get("artistName", ""))
-    album_tokens  = tokenize(r.get("collectionName", ""))
-    full_norm     = normalize(f"{r.get('artistName', '')} {r.get('collectionName', '')}")
-
-    artist_overlap = len(q_tokens & artist_tokens)
-    album_overlap  = len(q_tokens & album_tokens)
-    ratio          = difflib.SequenceMatcher(None, q_norm, full_norm).ratio()
-
-    # Artist match weighted 3x over album — "royce rock city" should
-    # hit Royce da 5'9 (artist) before Riot - Rock City (album title match)
-    return artist_overlap * 3 + album_overlap * 1.5 + ratio
-
-
-def best_match(query: str, results: list[dict]) -> dict | None:
+def best_match(artist: str, album: str, results: list[dict]) -> dict | None:
     if not results:
         return None
 
-    q_tokens = tokenize(query)
-    q_norm   = normalize(query)
+    a_norm = normalize(artist)
+    b_norm = normalize(album)
 
-    scored = [(score_result(q_tokens, q_norm, r), r) for r in results]
+    scored = []
+    for r in results:
+        r_artist = normalize(r.get("artistName", ""))
+        r_album  = normalize(r.get("collectionName", ""))
+        artist_score = difflib.SequenceMatcher(None, a_norm, r_artist).ratio()
+        album_score  = difflib.SequenceMatcher(None, b_norm, r_album).ratio() if b_norm else 1.0
+        scored.append((artist_score + album_score, r))
+
     scored.sort(key=lambda x: x[0], reverse=True)
-
     best_score, best = scored[0]
-    if best_score < 0.5:
-        return None
-    return best
+    return best if best_score > 0.6 else None
 
 
 def setup(bot):
 
     @bot.tree.command(name="artwork", description="Fetch high-resolution album artwork from Apple Music")
-    @app_commands.describe(query="Artist and album name, e.g. 'Eminem Marshall Mathers LP 2'")
-    async def artwork_cmd(interaction: discord.Interaction, query: str):
+    @app_commands.describe(
+        artist="Artist name, e.g. 'Royce Da 5\\'9\"'",
+        album="Album name, e.g. 'Rock City' (optional — returns top album if omitted)",
+    )
+    async def artwork_cmd(interaction: discord.Interaction, artist: str, album: str = ""):
         await interaction.response.defer(thinking=True)
 
         try:
-            results = await search_itunes(query)
+            results = await search_itunes(artist, album)
         except Exception as e:
             bot.logger.error(MODULE_NAME, "iTunes search failed", e)
             await interaction.followup.send("Failed to reach Apple Music. Try again later.")
             return
 
-        result = best_match(query, results)
+        result = best_match(artist, album, results)
         if not result:
-            await interaction.followup.send(f"No results found for **{query}**.")
+            query_str = f"{artist} — {album}" if album else artist
+            await interaction.followup.send(f"No results found for **{query_str}**.")
             return
 
         raw_art = result.get("artworkUrl100", "")
@@ -94,24 +84,24 @@ def setup(bot):
             return
 
         url = art_url(raw_art)
-        artist = result.get("artistName", "Unknown Artist")
-        album  = result.get("collectionName", "Unknown Album")
-        year   = result.get("releaseDate", "")[:4]
+        r_artist = result.get("artistName", "Unknown Artist")
+        r_album  = result.get("collectionName", "Unknown Album")
+        year     = result.get("releaseDate", "")[:4]
 
         async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
             async with session.get(url) as resp:
                 if resp.status != 200:
-                    await interaction.followup.send(f"Found **{album}** by **{artist}** but couldn't download the artwork.")
+                    await interaction.followup.send(f"Found **{r_album}** by **{r_artist}** but couldn't download the artwork.")
                     return
                 data = await resp.read()
 
         import io
         ext = url.split(".")[-1].split("?")[0] or "jpg"
-        filename = f"{artist} - {album}.{ext}".replace("/", "-")
+        filename = f"{r_artist} - {r_album}.{ext}".replace("/", "-")
         await interaction.followup.send(
-            f"**{artist}** — **{album}** ({year})",
+            f"**{r_artist}** — **{r_album}** ({year})",
             file=discord.File(io.BytesIO(data), filename=filename)
         )
-        bot.logger.log(MODULE_NAME, f"{interaction.user} fetched artwork: {artist} — {album}")
+        bot.logger.log(MODULE_NAME, f"{interaction.user} fetched artwork: {r_artist} — {r_album}")
 
     bot.logger.log(MODULE_NAME, "Artwork module loaded")

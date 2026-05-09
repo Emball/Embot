@@ -92,6 +92,8 @@ class RemoteDebugServer:
         self._app.router.add_get("/guilds", self._handle_guilds)
         self._app.router.add_get("/modules", self._handle_modules)
         self._app.router.add_get("/logs", self._handle_logs)
+        self._app.router.add_get("/logs/list", self._handle_logs_list)
+        self._app.router.add_get("/logs/{name}", self._handle_logs_file)
         self._app.router.add_get("/logs/stream", self._handle_logs_stream)
         self._app.router.add_get("/db/{name}", self._handle_db_download)
         self._app.router.add_get("/db/{name}/query", self._handle_db_query)
@@ -177,16 +179,63 @@ class RemoteDebugServer:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
-    async def _handle_logs(self, request):
+    def _logs_dir(self):
+        return script_dir() / "logs"
+
+    async def _handle_logs_list(self, request):
         if not self._check_auth(request) or not self._check_ip(request):
             return self._fail()
-        if not hasattr(self.bot.logger, "log_file") or not self.bot.logger.log_file.exists():
-            return web.json_response({"error": "no log file"}, status=404)
+        logs_dir = self._logs_dir()
+        if not logs_dir.exists():
+            return web.json_response([], status=200)
+        files = []
+        for fp in sorted(logs_dir.glob("session_*.log"), key=lambda x: x.stat().st_mtime, reverse=True):
+            files.append({
+                "name": fp.name,
+                "size": fp.stat().st_size,
+                "mtime": datetime.fromtimestamp(fp.stat().st_mtime).isoformat(),
+            })
+        return web.json_response(files)
+
+    async def _handle_logs_file(self, request):
+        if not self._check_auth(request) or not self._check_ip(request):
+            return self._fail()
+        name = request.match_info["name"]
+        if not re.match(r'^session_\d{8}_\d{6}\.log$', name):
+            return self._fail("invalid log name", 400)
+        log_path = self._logs_dir() / name
+        if not log_path.exists():
+            return web.json_response({"error": "log file not found"}, status=404)
         try:
             lines = min(int(request.query.get("lines", "200")), 20000)
         except ValueError:
             lines = 200
-        log_path = self.bot.logger.log_file
+        with open(log_path, "r", encoding="utf-8") as f:
+            all_lines = f.readlines()
+        return web.Response(
+            text="".join(all_lines[-lines:]),
+            content_type="text/plain",
+            charset="utf-8",
+        )
+
+    async def _handle_logs(self, request):
+        if not self._check_auth(request) or not self._check_ip(request):
+            return self._fail()
+        log_name = request.query.get("file", "")
+        if log_name:
+            if not re.match(r'^session_\d{8}_\d{6}\.log$', log_name):
+                return self._fail("invalid log name", 400)
+            log_path = self._logs_dir() / log_name
+        else:
+            if not hasattr(self.bot.logger, "log_file") or not self.bot.logger.log_file.exists():
+                return web.json_response({"error": "no log file"}, status=404)
+            log_path = self.bot.logger.log_file
+        if not log_path.exists():
+            return web.json_response({"error": "log file not found"}, status=404)
+        try:
+            lines = min(int(request.query.get("lines", "200")), 20000)
+        except ValueError:
+            lines = 200
         with open(log_path, "r", encoding="utf-8") as f:
             all_lines = f.readlines()
         return web.Response(
@@ -415,9 +464,16 @@ def _cmd_modules(cfg):
     print(json.dumps(_client_request(cfg, "/modules"), indent=2))
 
 
-def _cmd_logs(cfg, lines=200):
-    data = _client_request(cfg, f"/logs?lines={lines}", raw=True)
+def _cmd_logs(cfg, lines=200, file=None):
+    path = f"/logs?lines={lines}"
+    if file:
+        path += f"&file={urllib.parse.quote(file)}"
+    data = _client_request(cfg, path, raw=True)
     sys.stdout.buffer.write(data + b"\n")
+
+
+def _cmd_logs_list(cfg):
+    print(json.dumps(_client_request(cfg, "/logs/list"), indent=2))
 
 
 def _cmd_stream(cfg):
@@ -479,6 +535,9 @@ def main():
 
     logs_parser = sub.add_parser("logs", help="Fetch recent logs")
     logs_parser.add_argument("--lines", type=int, default=200)
+    logs_parser.add_argument("--file", default=None, help="Specific log file to read (default: current session)")
+
+    sub.add_parser("logs-list", help="List all log files")
 
     sub.add_parser("guilds", help="List guilds with details")
     sub.add_parser("modules", help="List loaded module names")
@@ -510,7 +569,9 @@ def main():
     elif args.command == "modules":
         _cmd_modules(run_cfg)
     elif args.command == "logs":
-        _cmd_logs(run_cfg, args.lines)
+        _cmd_logs(run_cfg, args.lines, args.file)
+    elif args.command == "logs-list":
+        _cmd_logs_list(run_cfg)
     elif args.command == "stream":
         _cmd_stream(run_cfg)
     elif args.command == "db-download":

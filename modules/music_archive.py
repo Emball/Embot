@@ -479,6 +479,16 @@ class ARCHIVEManager:
             return
         max_bytes = getattr(chan.guild, 'filesize_limit', 25 * 1024 * 1024)
 
+        try:
+            async for msg in chan.history(limit=20):
+                if msg.author == self.bot.user and msg.embeds:
+                    for e in msg.embeds:
+                        if e.title and "Cache Backfill" in e.title:
+                            await msg.delete()
+                            break
+        except Exception:
+            pass
+
         seen = set()
         for fmt in FORMATS:
             for entries in self.song_index.get(fmt, {}).values():

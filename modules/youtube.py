@@ -24,19 +24,8 @@ def _config_path():
     return Path(__file__).parent.parent / "config" / "youtube.json"
 
 def load_config():
-    path = _config_path()
-    cfg = dict(CONFIG_DEFAULTS)
-    if path.exists():
-        try:
-            with open(path) as f:
-                cfg.update(json.load(f))
-        except Exception:
-            pass
-    else:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(CONFIG_DEFAULTS, f, indent=2)
-    return cfg
+    from _utils import migrate_config
+    return migrate_config(_config_path(), CONFIG_DEFAULTS)
 
 def save_config(cfg):
     try:

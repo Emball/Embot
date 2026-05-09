@@ -21,18 +21,8 @@ DEV_CONFIG_DEFAULTS = {
 }
 
 def _load_dev_config() -> dict:
-    cfg = dict(DEV_CONFIG_DEFAULTS)
-    if DEV_CONFIG_PATH.exists():
-        try:
-            with open(DEV_CONFIG_PATH, "r", encoding="utf-8") as f:
-                cfg.update(json.load(f))
-        except Exception:
-            pass
-    else:
-        DEV_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(DEV_CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(DEV_CONFIG_DEFAULTS, f, indent=4)
-    return cfg
+    from _utils import migrate_config
+    return migrate_config(DEV_CONFIG_PATH, DEV_CONFIG_DEFAULTS)
 
 def _save_dev_config(data: dict) -> None:
     try:

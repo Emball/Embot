@@ -19,3 +19,25 @@ def atomic_json_write(filepath, data, indent=2, ensure_ascii=False):
         except Exception:
             pass
         raise
+
+
+def migrate_config(path, defaults):
+    """Load a JSON config, merging with defaults and pruning retired keys.
+
+    Keys still in *defaults* keep their current value from disk.
+    Keys added to *defaults* since last run get the default value.
+    Keys on disk that no longer exist in *defaults* are removed.
+    The cleaned config is written back atomically.
+
+    Returns the merged dict.
+    """
+    p = Path(path)
+    existing: dict = {}
+    if p.exists():
+        with open(p, "r", encoding="utf-8") as f:
+            existing = json.load(f)
+
+    merged = {k: existing.get(k, v) for k, v in defaults.items()}
+
+    atomic_json_write(p, merged)
+    return merged

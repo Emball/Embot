@@ -20,8 +20,7 @@ def _script_dir() -> Path:
     return Path(__file__).parent.parent.absolute()  # modules/ → Embot/
 
 def _load_starboard_config() -> dict:
-    """Load config/starboard_config.json, falling back to defaults."""
-    config_path = _script_dir() / "config"/ "starboard_config.json"
+    """Load config/starboard_config.json, migrating if schema has changed."""
     defaults = {
         "channel_id": 0,     # Must be set in starboard_config.json
         "threshold": 3,
@@ -29,14 +28,8 @@ def _load_starboard_config() -> dict:
         "self_star": False,
         "ignore_before": "",  # ISO date e.g. "2025-01-01"— messages before this are ignored
     }
-    if config_path.exists():
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            defaults.update(data)
-        except Exception as e:
-            print(f"[STARBOARD] Failed to load starboard_config.json: {e}")
-    return defaults
+    from _utils import migrate_config
+    return migrate_config(_script_dir() / "config" / "starboard_config.json", defaults)
 
 CONFIG: dict = {}  # populated during setup() and refreshable
 

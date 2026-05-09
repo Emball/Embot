@@ -175,30 +175,25 @@ def _config_path() -> Path:
     return p / "moderation.json"
 
 def _load_config() -> dict:
-    """Load config/moderation.json, auto-creating defaults if missing."""
+    """Load config/moderation.json, migrating if schema has changed."""
     path = _config_path()
-    if not path.exists():
-        defaults = {
-            "owner_id": 0,
-            "join_logs_channel_id": 0,
-            "bot_logs_channel_id": 0,
-            "rules_channel_name": "rules",
-            "min_reason_length": 10,
-            "muted_role_name": "Muted",
-            "report_time_cst": "00:00",
-            "context_message_count": 30,
-            "invite_cleanup_days": 7,
-            "elevated_roles": [],
-            "rules": "",
-            "strike_thresholds": {"warn": 3, "mute": 5, "kick": 7, "ban": 10},
-            "invite_labels": {},
-        }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        import json as _json
-        path.write_text(_json.dumps(defaults, indent=2), encoding="utf-8")
-        return defaults
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    defaults = {
+        "owner_id": 0,
+        "join_logs_channel_id": 0,
+        "bot_logs_channel_id": 0,
+        "rules_channel_name": "rules",
+        "min_reason_length": 10,
+        "muted_role_name": "Muted",
+        "report_time_cst": "00:00",
+        "context_message_count": 30,
+        "invite_cleanup_days": 7,
+        "elevated_roles": [],
+        "rules": "",
+        "strike_thresholds": {"warn": 3, "mute": 5, "kick": 7, "ban": 10},
+        "invite_labels": {},
+    }
+    from _utils import migrate_config
+    return migrate_config(path, defaults)
 
 def _save_config(data: dict) -> None:
     """Atomically write config/moderation.json."""

@@ -22,33 +22,24 @@ class EventLogger:
         self._scanner = None  # MediaScanner, set lazily
         
     def load_config(self):
-        """Load logger configuration, auto-creating defaults if missing."""
-        try:
-            with open(self.config_file, 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            defaults = {
-                "join_logs_channel_id": 0,
-                "bot_logs_channel_id": 0,
-                "log_message_edits": True,
-                "log_message_deletes": True,
-                "log_member_joins": True,
-                "log_member_leaves": True,
-                "log_bans": True,
-                "log_unbans": True,
-                "log_role_changes": True,
-                "log_channel_changes": True,
-                "log_voice_changes": True,
-                "log_invite_changes": True,
-                "log_nickname_changes": True,
-            }
-            Path(self.config_file).parent.mkdir(parents=True, exist_ok=True)
-            with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(defaults, f, indent=2)
-            return defaults
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "Failed to load logger config", e)
-            return {}
+        """Load logger configuration, migrating if schema has changed."""
+        defaults = {
+            "join_logs_channel_id": 0,
+            "bot_logs_channel_id": 0,
+            "log_message_edits": True,
+            "log_message_deletes": True,
+            "log_member_joins": True,
+            "log_member_leaves": True,
+            "log_bans": True,
+            "log_unbans": True,
+            "log_role_changes": True,
+            "log_channel_changes": True,
+            "log_voice_changes": True,
+            "log_invite_changes": True,
+            "log_nickname_changes": True,
+        }
+        from _utils import migrate_config
+        return migrate_config(self.config_file, defaults)
     
     def save_config(self, config=None):
         """Save logger configuration atomically"""

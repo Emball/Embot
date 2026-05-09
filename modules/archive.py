@@ -26,16 +26,11 @@ def _load_eminem_root() -> Path:
     env_val = os.environ.get("EMINEM_ROOT")
     if env_val:
         return Path(env_val)
+    from _utils import migrate_config
     config_file = Path(__file__).parent.parent / "config"/ "archive_config.json"
-    if config_file.exists():
-        try:
-            data = json.loads(config_file.read_text(encoding="utf-8"))
-            if "eminem_root"in data:
-                return Path(data["eminem_root"])
-        except Exception:
-            pass
-    config_file.parent.mkdir(parents=True, exist_ok=True)
-    config_file.write_text(json.dumps({"eminem_root": "."}, indent=2), encoding="utf-8")
+    data = migrate_config(config_file, {"eminem_root": "."})
+    if data.get("eminem_root"):
+        return Path(data["eminem_root"])
     raise FileNotFoundError(
         "EMINEM_ROOT is not configured. Set the EMINEM_ROOT environment variable "
         "or edit config/archive_config.json and set 'eminem_root' to your Eminem music folder."

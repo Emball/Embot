@@ -610,23 +610,28 @@ class ARCHIVEManager:
         else:
             embed.set_footer(text="Complete!")
 
-        try:
-            if msg:
-                await msg.edit(embed=embed)
-                return msg
-        except (discord.NotFound, discord.Forbidden):
-            pass
+        if msg:
+            try:
+                await msg.delete()
+            except Exception:
+                pass
         return await chan.send(embed=embed)
 
     async def _send_batch(self, chan, batch) -> bool:
+        read_start = time.time()
         files = []
         for fp, p, sz in batch:
             files.append(discord.File(p, filename=p.name))
+        read_elapsed = time.time() - read_start
         total_mb = sum(sz for _, _, sz in batch) // 1024 // 1024
-        self.bot.logger.log(MODULE_NAME, f"Uploading batch: {len(batch)} file(s), {total_mb}MB")
+        self.bot.logger.log(MODULE_NAME,
+            f"Uploading batch: {len(batch)} file(s), {total_mb}MB "
+            f"(read: {read_elapsed:.1f}s)")
         try:
             timeout = 120 + 30 * len(batch)
+            up_start = time.time()
             msg = await asyncio.wait_for(chan.send(files=files), timeout=timeout)
+            up_elapsed = time.time() - up_start
         except asyncio.TimeoutError:
             self.bot.logger.log(MODULE_NAME, f"Batch upload timed out ({len(batch)} files)", "WARNING")
             return False
@@ -639,7 +644,9 @@ class ARCHIVEManager:
         ok = True
         for (fp, p, sz), att in zip(batch, msg.attachments):
             _cache_store(fp, att.url, att.id, chan.id, p.name, sz)
-            self.bot.logger.log(MODULE_NAME, f"Cached: {p.name}")
+        self.bot.logger.log(MODULE_NAME,
+            f"Cached batch: {len(batch)} file(s), {total_mb}MB "
+            f"(read: {read_elapsed:.1f}s, upload: {up_elapsed:.1f}s)")
         if len(msg.attachments) != len(batch):
             self.bot.logger.log(MODULE_NAME,
                 f"Batch mismatch: sent {len(batch)} files, got {len(msg.attachments)} attachments", "WARNING")

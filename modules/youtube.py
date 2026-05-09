@@ -57,7 +57,7 @@ async def run_yt_dlp(*args):
 
 async def update_yt_dlp():
     proc = await asyncio.create_subprocess_exec(
-        "yt-dlp", "-U",
+        "pip", "install", "--upgrade", "--quiet", "yt-dlp",
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
@@ -79,7 +79,7 @@ async def extract_ogg(url: str, out_dir: str, cfg: dict = None) -> tuple[str | N
         "--embed-thumbnail",
         "--extractor-retries", "3",
         "--no-check-certificates",
-        "--extractor-args", "youtube:player_client=ios",
+        "--extractor-args", "youtube:player_client=android_vr",
         *cookies,
         "-o", out_template,
         "--no-playlist",
@@ -107,7 +107,7 @@ async def get_latest_video(channel_id: str, cfg: dict = None) -> tuple[str | Non
         "--print", "%(id)s|%(title)s",
         "--no-warnings",
         "--no-check-certificates",
-        "--extractor-args", "youtube:player_client=ios",
+        "--extractor-args", "youtube:player_client=android_vr",
         *cookies,
     )
     if code != 0 or not stdout.strip():

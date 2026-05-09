@@ -455,7 +455,7 @@ async def update_cmd(interaction: discord.Interaction):
     if interaction.user.id != interaction.guild.owner_id:
         await interaction.response.send_message("Owner only.", ephemeral=True)
         return
-    await interaction.response.send_message("Checking for updates...")
+    await interaction.response.send_message("Checking for updates...", ephemeral=True)
     if not _ensure_git_for_update(bot, bot.logger):
         await interaction.edit_original_response(content="Git not available.")
         return
@@ -465,6 +465,23 @@ async def update_cmd(interaction: discord.Interaction):
         await _restart_async(bot)
     else:
         await interaction.edit_original_response(content="Already up to date.")
+
+@bot.command(name="update")
+async def prefix_update(ctx):
+    if ctx.author.id != ctx.guild.owner_id:
+        return await ctx.message.delete()
+    msg = await ctx.send("Checking for updates...")
+    if not _ensure_git_for_update(bot, bot.logger):
+        await msg.edit(content="Git not available.")
+        await msg.delete(delay=8)
+        return
+    updated = await _check_for_update(bot)
+    if updated:
+        await msg.edit(content="Update pulled. Restarting...")
+        await _restart_async(bot)
+    else:
+        await msg.edit(content="Already up to date.")
+        await msg.delete(delay=8)
 
 @bot.event
 async def on_ready():

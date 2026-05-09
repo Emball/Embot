@@ -444,6 +444,7 @@ class ARCHIVEManager:
         self.song_index = None
         self.song_index_ready = asyncio.Event()
         self.initialization_task = None
+        self._status_msg_id = None
 
     async def initialize(self):
         self.bot.logger.log(MODULE_NAME, "Starting song index initialization...")
@@ -480,7 +481,7 @@ class ARCHIVEManager:
         max_bytes = getattr(chan.guild, 'filesize_limit', 25 * 1024 * 1024)
 
         try:
-            async for msg in chan.history(limit=20):
+            async for msg in chan.history(limit=100):
                 if msg.author == self.bot.user and msg.embeds:
                     for e in msg.embeds:
                         if e.title and "Cache Backfill" in e.title:
@@ -519,8 +520,6 @@ class ARCHIVEManager:
         uploaded_bytes = 0
         total_bytes = 0
         start = time.time()
-        status_msg = None
-        current_name = "Scanning..."
 
         batch = []
         batch_size = 0
@@ -532,18 +531,15 @@ class ARCHIVEManager:
                 continue
             p = Path(fp)
             try:
-                sz = await asyncio.wait_for(
-                    loop.run_in_executor(METADATA_EXECUTOR, lambda: p.stat().st_size),
-                    timeout=15)
+                sz = await loop.run_in_executor(METADATA_EXECUTOR, lambda: p.stat().st_size)
             except (OSError, asyncio.TimeoutError):
                 self.bot.logger.log(MODULE_NAME, f"Skipping {p.name} — stat timed out", "WARNING")
                 continue
             if sz > max_bytes:
                 continue
-            current_name = p.name
             if batch and batch_size + sz > max_bytes:
-                status_msg = await self._update_backfill_embed(
-                    chan, status_msg, start, total, cached, uploaded, errors,
+                await self._update_backfill_embed(
+                    chan, start, total, cached, uploaded, errors,
                     uploaded_bytes, total_bytes, f"Uploading batch ({len(batch)} files)...")
                 ok = await self._send_batch(chan, batch)
                 if ok:
@@ -562,8 +558,8 @@ class ARCHIVEManager:
         if batch:
             batch = [(fp, p, sz) for fp, p, sz in batch if not _cache_lookup(fp)]
             if batch:
-                status_msg = await self._update_backfill_embed(
-                    chan, status_msg, start, total, cached, uploaded, errors,
+                await self._update_backfill_embed(
+                    chan, start, total, cached, uploaded, errors,
                     uploaded_bytes, total_bytes, f"Uploading batch ({len(batch)} files)...")
                 ok = await self._send_batch(chan, batch)
                 if ok:
@@ -573,8 +569,8 @@ class ARCHIVEManager:
                     errors += len(batch)
                 sent_batches += 1
 
-        status_msg = await self._update_backfill_embed(
-            chan, status_msg, start, total, cached, uploaded, errors,
+        await self._update_backfill_embed(
+            chan, start, total, cached, uploaded, errors,
             uploaded_bytes, total_bytes, None)
         self.bot.logger.log(MODULE_NAME,
             f"Cache backfill complete: {uploaded} uploaded in {sent_batches} batch(es), "
@@ -593,7 +589,7 @@ class ARCHIVEManager:
                 pass
         return pending, cached, len(seen) - len(pending) - cached
 
-    async def _update_backfill_embed(self, chan, msg, start, total, cached, uploaded, errors, uploaded_bytes, total_bytes, current_name):
+    async def _update_backfill_embed(self, chan, start, total, cached, uploaded, errors, uploaded_bytes, total_bytes, current_name):
         elapsed = time.time() - start
         done = uploaded + cached
         pct = done / total * 100 if total else 0
@@ -603,10 +599,10 @@ class ARCHIVEManager:
         bar = "▓" * filled + "░" * (bar_len - filled)
 
         if elapsed > 0 and uploaded > 0:
-            rate = uploaded_bytes / elapsed
-            remaining = total_bytes - uploaded_bytes
-            eta_secs = remaining / rate if rate > 0 else 0
-            speed = f"{rate / 1024 / 1024:.1f} MB/s"
+            files_per_sec = uploaded / elapsed
+            remaining = total - done
+            eta_secs = remaining / files_per_sec if files_per_sec > 0 else 0
+            speed = f"{uploaded_bytes / 1024 / 1024 / elapsed:.1f} MB/s"
         else:
             eta_secs = 0
             speed = "—"
@@ -626,12 +622,17 @@ class ARCHIVEManager:
         else:
             embed.set_footer(text="Complete!")
 
-        if msg:
+        if self._status_msg_id:
             try:
-                await msg.delete()
+                msg = await chan.fetch_message(self._status_msg_id)
+                await msg.edit(embed=embed)
+                return
+            except discord.NotFound:
+                self._status_msg_id = None
             except Exception:
                 pass
-        return await chan.send(embed=embed)
+        msg = await chan.send(embed=embed)
+        self._status_msg_id = msg.id
 
     async def _send_batch(self, chan, batch) -> bool:
         read_start = time.time()

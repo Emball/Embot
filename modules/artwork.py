@@ -22,11 +22,14 @@ def art_url(raw: str, size: int = ART_SIZE) -> str:
 
 async def search_itunes(query: str, limit: int = 10) -> list[dict]:
     params = {"term": query, "entity": "album", "limit": limit}
-    async with aiohttp.ClientSession() as session:
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    async with aiohttp.ClientSession(headers=headers) as session:
         async with session.get(ITUNES_SEARCH, params=params) as resp:
             if resp.status != 200:
                 return []
-            data = await resp.json()
+            text = await resp.text()
+            import json
+            data = json.loads(text)
             return data.get("results", [])
 
 

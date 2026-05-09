@@ -71,14 +71,14 @@ Each module exposes `setup(bot)` — called during boot. Private `_*.py` files a
 | `artwork.py` | Apple Music album artwork fetcher |
 | `magic_emball.py` | Magic 8-ball with Eminem flavor |
 | `youtube.py` | YouTube audio extraction + upload notification monitor |
-| `_utils.py` | Shared utilities: `atomic_json_write()` and `migrate_config()` — imported by multiple modules |
+| `_utils.py` | Shared utilities: `atomic_json_write()`, `migrate_config()`, `script_dir()`, `_now()` — imported by multiple modules |
 
 ### Cross-Module Dependencies
 
 - `moderation.py` is the central dependency hub — its `is_owner()`, `is_flagged()` are imported by archive, community, links, logger at call time (lazy imports inside handlers).
 - Modules attach themselves to `bot` via attributes (e.g. `bot.ARCHIVE_manager`, `bot._mod_system`, `bot._community_system`).
 - `bot.logger` (ConsoleLogger) is available to all modules — set by `Embot.py`.
-- `_utils.py` provides `atomic_json_write()` shared by links, logger, youtube, and `migrate_config()` used by moderation, youtube, dev, starboard, logger, archive.
+- `_utils.py` provides `atomic_json_write()` shared by links, logger, youtube; `migrate_config()` used by moderation, youtube, dev, starboard, logger, archive; `script_dir()` used by every module; `_now()` used by moderation, logger, starboard, vms, archive, dev, community.
 
 ### Startup Flow
 

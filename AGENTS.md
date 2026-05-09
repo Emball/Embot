@@ -37,3 +37,7 @@ quota is limited. Minimize tool calls and response length. Complete tasks fully 
 ## Before Pushing
 
 - Test code for errors and sanity-check before every push.
+-e 
+## Agentic Behaviour
+
+- Do not spawn sub-agents or delegate to separate processes without explicitly confirming with the user first.

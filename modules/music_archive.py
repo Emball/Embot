@@ -488,9 +488,10 @@ class ARCHIVEManager:
                         seen.add(fp)
         total = len(seen)
 
+        self.bot.logger.log(MODULE_NAME, f"Scanning {total} files against cache DB...")
         loop = asyncio.get_running_loop()
         pending, cached, _ = await loop.run_in_executor(
-            METADATA_EXECUTOR, self._scan_pending, list(seen), max_bytes)
+            METADATA_EXECUTOR, self._scan_pending, list(seen))
 
         self.bot.logger.log(MODULE_NAME,
             f"Cache backfill: {len(pending)}/{total} files need upload "
@@ -506,7 +507,7 @@ class ARCHIVEManager:
         uploaded = 0
         errors = 0
         uploaded_bytes = 0
-        total_bytes = sum(sz for _, _, sz in pending)
+        total_bytes = 0
         start = time.time()
         status_msg = None
         current_name = "Scanning..."
@@ -515,9 +516,16 @@ class ARCHIVEManager:
         batch_size = 0
         sent_batches = 0
 
-        for fp, p, sz in pending:
+        for fp in pending:
             if _cache_lookup(fp):
                 cached += 1
+                continue
+            p = Path(fp)
+            try:
+                sz = p.stat().st_size
+            except OSError:
+                continue
+            if sz > max_bytes:
                 continue
             current_name = p.name
             if batch and batch_size + sz > max_bytes:
@@ -536,6 +544,7 @@ class ARCHIVEManager:
                 await asyncio.sleep(2)
             batch.append((fp, p, sz))
             batch_size += sz
+            total_bytes += sz
 
         if batch:
             batch = [(fp, p, sz) for fp, p, sz in batch if not _cache_lookup(fp)]
@@ -558,7 +567,7 @@ class ARCHIVEManager:
             f"Cache backfill complete: {uploaded} uploaded in {sent_batches} batch(es), "
             f"{cached} cached, {errors} errors")
 
-    def _scan_pending(self, seen, max_bytes):
+    def _scan_pending(self, seen):
         pending = []
         cached = 0
         for fp in sorted(seen):
@@ -566,13 +575,7 @@ class ARCHIVEManager:
                 if _cache_lookup(fp):
                     cached += 1
                     continue
-                p = Path(fp)
-                if not p.exists():
-                    continue
-                sz = p.stat().st_size
-                if sz > max_bytes:
-                    continue
-                pending.append((fp, p, sz))
+                pending.append(fp)
             except Exception:
                 pass
         return pending, cached, len(seen) - len(pending) - cached

@@ -21,7 +21,7 @@ MODULE_NAME = "REMOTE_DEBUG"
 
 RD_CONFIG_PATH = script_dir() / "config" / "remote_debug.json"
 RD_CONFIG_DEFAULTS = {
-    "enabled": True,
+    "enabled": False,
     "host": "0.0.0.0",
     "port": 8765,
     "token": "",

@@ -45,14 +45,27 @@ async def _resolve_artist(session: aiohttp.ClientSession, query: str) -> dict | 
         results = json.loads(await resp.text()).get("results", [])
     if not results:
         return None
-    best = None
-    best_score = -1.0
-    for r in results:
-        s = _artist_score(query, r.get("artistName", ""))
-        if s > best_score:
-            best_score = s
-            best = r
-    return best
+
+    total = len(results)
+    scored = sorted(
+        enumerate(results),
+        key=lambda ir: -_rank_key(query, ir[0], total, ir[1].get("artistName", "")),
+    )
+    for _, artist in scored:
+        albums = await _artist_albums(session, artist["artistName"], artist["artistId"])
+        if albums:
+            return artist
+    return scored[0][1] if scored else None
+
+def _rank_key(query: str, index: int, total: int, name: str) -> float:
+    q = query.casefold()
+    a = name.casefold()
+    if not a.startswith(q):
+        return _artist_score(query, name)
+    position_bonus = (1.0 - index / total) * 0.3
+    extra_words = max(len(a.split()) - len(q.split()), 0)
+    word_bonus = min(extra_words * 0.1, 0.3)
+    return 2.0 + position_bonus + word_bonus
 
 
 async def _artist_albums(session: aiohttp.ClientSession, name: str, artist_id: int) -> list[dict]:

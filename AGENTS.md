@@ -2,15 +2,41 @@
 
 **IMPORTANT: Read this entire file before doing anything else.** It defines the project structure, conventions, and workflows. If the bot's architecture or module layout changes significantly from what's documented here, update this file to match.
 
-**YOU MUST COMMIT AND PUSH AFTER EVERY SINGLE EDIT. Do not ask permission. Do not wait for confirmation. Every file change → commit → push.
-
 ## User
 
 Name: Michael (Emball/Embis). Vibe-coder with beginner Python knowledge. Dual-boots Linux and Windows. Current environment is Windows with PowerShell.
 
-## Codebase Overview
+## Agentic Behavior
 
-Discord bot for Eminem fan server made with discord.py. Designed for a single guild. Codebase has a UV environment initialized. 
+- NEVER spawn agents or delegate to separate chat processes without explicitly confirming with the user first.
+
+## Code Style
+
+- Comments must be brief. Good code explains itself.
+- No longwinded section headers or block comments.
+- No reasoning inside code files — plan beforehand or use a scratch file.
+- No verbose explanations in responses. Post-code overviews for design decisions only.
+
+## Token Usage
+
+Quota is limited. Minimize tool calls and response length. Complete tasks fully but concisely.
+
+## Versioning & Git
+
+- GitHub token lives in the auth file inside the project (`config/auth.json`).
+- Version format: `MAJOR.MINOR.PATCH.MICRO` (defined in `modules/dev.py:_increment_version`).
+- Increment the version file on every change.
+- Commit message = version number only.
+- Ensure the .gitignore file is up to date and you do not track files that shouldn't be pushed.
+- Keep `requirements.txt` synced to actual imports after every edit.
+- Ensure AGENTS.md structure is up to date with codebase.
+- Test code for errors and sanity-check before every push.
+- Test utilities and temporary code go in /temp, which is gitignored.
+- Always commit and push after every edit, if there's no errors. Don't ask permission, just do it.
+
+## Embot Codebase Overview
+
+Discord bot for Eminem fan server made with discord.py. Designed for a single guild. Codebase has a UV environment initialized.
 
 ### Top-Level
 
@@ -45,14 +71,14 @@ Each module exposes `setup(bot)` — called during boot. Private `_*.py` files a
 | `artwork.py` | Apple Music album artwork fetcher |
 | `magic_emball.py` | Magic 8-ball with Eminem flavor |
 | `youtube.py` | YouTube audio extraction + upload notification monitor |
-| `_utils.py` | Shared `atomic_json_write()` — imported by links, logger, youtube |
+| `_utils.py` | Shared utilities: `atomic_json_write()` and `migrate_config()` — imported by multiple modules |
 
 ### Cross-Module Dependencies
 
 - `moderation.py` is the central dependency hub — its `is_owner()`, `is_flagged()` are imported by archive, community, links, logger at call time (lazy imports inside handlers).
 - Modules attach themselves to `bot` via attributes (e.g. `bot.ARCHIVE_manager`, `bot._mod_system`, `bot._community_system`).
 - `bot.logger` (ConsoleLogger) is available to all modules — set by `Embot.py`.
-- `_utils.py` provides `atomic_json_write()` shared by links, logger, youtube.
+- `_utils.py` provides `atomic_json_write()` shared by links, logger, youtube, and `migrate_config()` used by moderation, youtube, dev, starboard, logger, archive.
 
 ### Startup Flow
 
@@ -69,38 +95,4 @@ Each module exposes `setup(bot)` — called during boot. Private `_*.py` files a
 - **Python:** 3.11 (pinned in `.python-version`).
 - **GitHub:** repo `Emball/Embot`, token in `config/auth.json`.
 - **Gitignore:** `pyproject.toml`, `uv.lock`, `config/*.json`, start scripts, `logs/`, `db/`, `cache/`, `temp/`.
-- **Config pattern:** JSON files in `config/` auto-generate with defaults if missing. Only `auth.json` holds secrets.
-
-## Code Style
-
-- Comments must be brief. Good code explains itself.
-- No longwinded section headers or block comments.
-- No reasoning inside code files — plan beforehand or use a scratch file.
-- No verbose explanations in responses. Post-code overviews for design decisions only.
-
-## Token Usage
-
-Quota is limited. Minimize tool calls and response length. Complete tasks fully but concisely.
-
-## Before Pushing
-
-- Test code for errors and sanity-check before every push.
-- Test utilities and temporary code go in /temp, which is gitignored.
-
-## Versioning & Git
-
-- Version format: `MAJOR.MINOR.PATCH.MICRO` (defined in `modules/dev.py:_increment_version`).
-- GitHub token lives in the auth file inside the project (`config/auth.json`).
-- Increment the version file on every change.
-- Commit message = version number only.
-- Always commit and push after every edit.
-- Ensure the .gitignore file is up to date and you do not track files that shouldn't be pushed.
-- The commit/push instruction at the top of this file is absolute — do not override it.
-
-## Requirements
-
-- Keep `requirements.txt` synced to actual imports after every edit.
-
-## Agentic Behavior
-
-- Do not spawn sub-agents or delegate to separate processes without explicitly confirming with the user first.
+- **Config pattern:** JSON files in `config/` auto-generate with defaults if missing. On every load, `migrate_config()` merges them against the module's defaults dict — new keys get defaults, retired keys are pruned. Only `auth.json` holds secrets.

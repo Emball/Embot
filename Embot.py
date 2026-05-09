@@ -49,7 +49,11 @@ def load_config() -> dict:
         try:
             with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
                 user_cfg = json.load(f)
-            cfg.update(user_cfg)
+            for key, val in user_cfg.items():
+                if isinstance(val, dict) and isinstance(cfg.get(key), dict):
+                    cfg[key] = {**cfg[key], **val}
+                else:
+                    cfg[key] = val
         except Exception as e:
             print(f"[MAIN] [WARNING] Failed to read {_CONFIG_PATH}, using defaults: {e}")
     else:
@@ -481,7 +485,7 @@ async def on_ready():
             if getattr(args, 'test', False):
                 bot.logger.log("MAIN", f"TEST PASSED — {len(synced)} commands synced. Shutting down.")
                 await bot.close()
-                os._exit(0)
+                return
         except HTTPException as e:
             if e.status == 429 and e.code == 30034:
                 bot.logger.log("MAIN", "Daily command sync limit reached (200/200). Commands will sync tomorrow.", "WARNING")
@@ -559,7 +563,7 @@ def run_console():
                 ).result(timeout=30)
             elif command == "exit"or command == "quit":
                 print("Shutting down bot...")
-                asyncio.run_coroutine_threadsafe(bot.close(), bot.loop)
+                asyncio.run_coroutine_threadsafe(bot.close(), bot.loop).result(timeout=15)
                 break
             else:
                 print(f"Unknown command: {command}. Type 'help' for available commands.")
@@ -589,7 +593,8 @@ def print_help():
     
     # Add module-registered commands
     for cmd_name, cmd_info in sorted(bot.console_commands.items()):
-        help_text += f"\n│ {cmd_name:<17} - {cmd_info['description']:<35} │"
+        desc = cmd_info['description'][:35] if len(cmd_info['description']) > 35 else cmd_info['description']
+        help_text += f"\n│ {cmd_name:<17} - {desc:<35} │"
     
     help_text += """
 │ exit / quit       - Shutdown bot gracefully                         │
@@ -621,17 +626,9 @@ def show_status():
     latency = getattr(bot, 'latency', 0) * 1000
     print(f"│ Latency: {latency:.0f}ms{' ' * (48 - len(f'{latency:.0f}ms'))} │")
     
-    # Module info - dynamic discovery (snapshot to avoid race with load_modules())
-    bot_modules = []
-    for name, module in list(sys.modules.items()):
-        if (hasattr(module, '__file__') and 
-            module.__file__ and 
-            'site-packages' not in module.__file__ and
-            os.path.dirname(os.path.abspath(__file__)) in module.__file__ and
-            name not in ['main', '__main__']):
-            bot_modules.append(name)
-    
-    print(f"│ Loaded modules: {len(bot_modules)}{'' * (45 - len(str(len(bot_modules))))} │")
+    # Module info
+    module_count = len(getattr(bot, '_module_commands', {}))
+    print(f"│ Loaded modules: {module_count}{'' * (45 - len(str(module_count)))} │")
     
     # Development mode
     mode = "DEVELOPMENT"if args.development else "PRODUCTION"
@@ -686,7 +683,7 @@ def setup_console_commands():
                     try:
                         bot.tree.remove_command(cmd_name)
                         removed_count += 1
-                    except:
+                    except Exception:
                         pass
                 print(f" Removed {removed_count} existing command(s)")
             

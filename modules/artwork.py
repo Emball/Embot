@@ -12,7 +12,7 @@ ART_SIZE = 3600
 
 _STRIP = re.compile(r"[^\w\s]")
 _WS    = re.compile(r"\s+")
-_STOP  = {"the", "a", "an", "of", "in", "and", "feat", "ft", "with", "by"}
+_STOP  = {"the", "a", "an", "of", "in", "and", "feat", "ft", "with", "by", "da"}
 
 
 def normalize(text: str) -> str:
@@ -39,6 +39,20 @@ async def search_itunes(query: str, limit: int = 25) -> list[dict]:
             return data.get("results", [])
 
 
+def score_result(q_tokens: set[str], q_norm: str, r: dict) -> float:
+    artist_tokens = tokenize(r.get("artistName", ""))
+    album_tokens  = tokenize(r.get("collectionName", ""))
+    full_norm     = normalize(f"{r.get('artistName', '')} {r.get('collectionName', '')}")
+
+    artist_overlap = len(q_tokens & artist_tokens)
+    album_overlap  = len(q_tokens & album_tokens)
+    ratio          = difflib.SequenceMatcher(None, q_norm, full_norm).ratio()
+
+    # Artist match weighted 3x over album — "royce rock city" should
+    # hit Royce da 5'9 (artist) before Riot - Rock City (album title match)
+    return artist_overlap * 3 + album_overlap * 1.5 + ratio
+
+
 def best_match(query: str, results: list[dict]) -> dict | None:
     if not results:
         return None
@@ -46,20 +60,10 @@ def best_match(query: str, results: list[dict]) -> dict | None:
     q_tokens = tokenize(query)
     q_norm   = normalize(query)
 
-    scored = []
-    for r in results:
-        candidate = f"{r.get('artistName', '')} {r.get('collectionName', '')}"
-        c_tokens  = tokenize(candidate)
-        c_norm    = normalize(candidate)
-
-        overlap = len(q_tokens & c_tokens)
-        ratio   = difflib.SequenceMatcher(None, q_norm, c_norm).ratio()
-        score   = overlap * 2 + ratio
-        scored.append((score, r))
-
+    scored = [(score_result(q_tokens, q_norm, r), r) for r in results]
     scored.sort(key=lambda x: x[0], reverse=True)
-    best_score, best = scored[0]
 
+    best_score, best = scored[0]
     if best_score < 0.5:
         return None
     return best

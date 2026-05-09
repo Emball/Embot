@@ -522,7 +522,7 @@ class ARCHIVEManager:
                 continue
             p = Path(fp)
             try:
-                sz = p.stat().st_size
+                sz = await loop.run_in_executor(METADATA_EXECUTOR, lambda: p.stat().st_size)
             except OSError:
                 continue
             if sz > max_bytes:

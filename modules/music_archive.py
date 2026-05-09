@@ -296,6 +296,13 @@ CREATE TABLE IF NOT EXISTS song_cache (
     cached_at   TEXT NOT NULL,
     accessed_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS song_cache_fails (
+    file_path   TEXT NOT NULL,
+    failed_at   TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    PRIMARY KEY (file_path, failed_at)
+);
 """
 
 def _db_conn() -> sqlite3.Connection:
@@ -329,6 +336,14 @@ def _cache_store(file_path: str, cdn_url: str, message_id: str, channel_id: str,
             "(file_path, cdn_url, message_id, channel_id, file_name, file_size, cached_at, accessed_at) "
             "VALUES (?,?,?,?,?,?,?,?)",
             (key, cdn_url, str(message_id), str(channel_id), file_name, file_size, now, now)
+        )
+        c.commit()
+
+def _cache_fail(file_path: str, reason: str) -> None:
+    with _db_conn() as c:
+        c.execute(
+            "INSERT INTO song_cache_fails (file_path, failed_at, reason) VALUES (?,?,?)",
+            (str(Path(file_path)), _now().isoformat(), reason)
         )
         c.commit()
 
@@ -478,7 +493,7 @@ class ARCHIVEManager:
         if not chan:
             self.bot.logger.log(MODULE_NAME, f"Cannot backfill — no #{CACHE_CHANNEL_NAME} channel", "WARNING")
             return
-        max_bytes = getattr(chan.guild, 'filesize_limit', 25 * 1024 * 1024)
+        max_bytes = min(getattr(chan.guild, 'filesize_limit', 25 * 1024 * 1024), 95 * 1024 * 1024)
 
         try:
             async for msg in chan.history(limit=100):
@@ -546,7 +561,8 @@ class ARCHIVEManager:
                     uploaded += len(batch)
                     uploaded_bytes += sum(s for _, _, s in batch)
                 else:
-                    errors += len(batch)
+                    uploaded, uploaded_bytes, errors = await self._fallback_batch(
+                        chan, batch, uploaded, uploaded_bytes, errors)
                 sent_batches += 1
                 batch = []
                 batch_size = 0
@@ -566,7 +582,8 @@ class ARCHIVEManager:
                     uploaded += len(batch)
                     uploaded_bytes += sum(s for _, _, s in batch)
                 else:
-                    errors += len(batch)
+                    uploaded, uploaded_bytes, errors = await self._fallback_batch(
+                        chan, batch, uploaded, uploaded_bytes, errors)
                 sent_batches += 1
 
         await self._update_backfill_embed(
@@ -588,6 +605,18 @@ class ARCHIVEManager:
             except Exception:
                 pass
         return pending, cached, len(seen) - len(pending) - cached
+
+    async def _fallback_batch(self, chan, batch, uploaded, uploaded_bytes, errors):
+        for fp, p, sz in batch:
+            ok = await self._send_batch(chan, [(fp, p, sz)])
+            if ok:
+                uploaded += 1
+                uploaded_bytes += sz
+            else:
+                _cache_fail(fp, "individual upload failed")
+                errors += 1
+            await asyncio.sleep(1)
+        return uploaded, uploaded_bytes, errors
 
     async def _update_backfill_embed(self, chan, start, total, cached, uploaded, errors, uploaded_bytes, total_bytes, current_name):
         elapsed = time.time() - start

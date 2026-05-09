@@ -79,6 +79,7 @@ async def extract_ogg(url: str, out_dir: str, cfg: dict = None) -> tuple[str | N
         "--embed-thumbnail",
         "--extractor-retries", "3",
         "--no-check-certificates",
+        "--extractor-args", "youtube:player_client=ios",
         *cookies,
         "-o", out_template,
         "--no-playlist",
@@ -106,6 +107,7 @@ async def get_latest_video(channel_id: str, cfg: dict = None) -> tuple[str | Non
         "--print", "%(id)s|%(title)s",
         "--no-warnings",
         "--no-check-certificates",
+        "--extractor-args", "youtube:player_client=ios",
         *cookies,
     )
     if code != 0 or not stdout.strip():

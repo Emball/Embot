@@ -5,7 +5,7 @@ from discord import HTTPException
 import os
 import sys
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 import importlib
 import argparse
 import threading
@@ -77,7 +77,7 @@ class ConsoleLogger:
         self._cleanup_old_logs(retention_days=30)
 
     def _generate_session_id(self) -> str:
-        return f"session_{datetime.now().strftime('%Y%m%d')}"
+        return f"session_{datetime.now(timezone.utc).strftime('%Y%m%d')}"
 
     def _count_sessions(self, filepath):
         if not filepath.exists():
@@ -97,18 +97,18 @@ class ConsoleLogger:
         self.log_file = data_dir / log_filename
         file_exists = self.log_file.exists()
         self.session_number = self._count_sessions(self.log_file) + 1
-        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
         with open(self.log_file, 'a', encoding='utf-8') as f:
             if not file_exists:
-                f.write(f"=== Embot Log — {datetime.now().strftime('%Y-%m-%d')} ===\n\n")
+                f.write(f"=== Embot Log — {datetime.now(timezone.utc).strftime('%Y-%m-%d')} ===\n\n")
             f.write(f"--- Session {self.session_number} — {now_str} UTC ---\n\n")
 
         print(f"[LOGGER] Day log: {self.log_file.name} (session #{self.session_number})")
 
     def _cleanup_old_logs(self, retention_days=30):
         try:
-            cutoff = datetime.now().timestamp() - (retention_days * 86400)
+            cutoff = datetime.now(timezone.utc).timestamp() - (retention_days * 86400)
             for log_file in data_dir.glob("session_*.log"):
                 try:
                     if log_file.stat().st_mtime < cutoff:
@@ -137,7 +137,7 @@ class ConsoleLogger:
 
     def log(self, module_name: str, message: str, level: str = "INFO"):
         with self.lock:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             log_message = f"[{timestamp}] [{module_name}] [{level}] {message}"
 
             self._clear_line()
@@ -148,7 +148,7 @@ class ConsoleLogger:
 
     def error(self, module_name: str, message: str, exception: Exception = None):
         with self.lock:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             log_message = f"[{timestamp}] [{module_name}] [ERROR] {message}"
 
             self._clear_line()
@@ -500,7 +500,7 @@ def run_console():
                     cmd_info['handler'](args_str),
                     bot.loop
                 ).result(timeout=30)
-            elif command == "exit"or command == "quit":
+            elif command == "exit" or command == "quit":
                 print("Shutting down bot...")
                 asyncio.run_coroutine_threadsafe(bot.close(), bot.loop).result(timeout=15)
                 break
@@ -553,18 +553,18 @@ def show_status():
             guild_name = guild.name[:45] + "..." if len(guild.name) > 45 else guild.name
             print(f"│   • {guild_name:<47} │")
         if len(bot.guilds) > 3:
-            print(f"│   ... and {len(bot.guilds) - 3} more{'' * (40 - len(str(len(bot.guilds) - 3)))}│")
+            print(f"│   ... and {len(bot.guilds) - 3} more{' ' * (40 - len(str(len(bot.guilds) - 3)))}│")
 
     latency = getattr(bot, 'latency', 0) * 1000
     print(f"│ Latency: {latency:.0f}ms{' ' * (48 - len(f'{latency:.0f}ms'))} │")
 
     module_count = len(getattr(bot, '_module_commands', {}))
-    print(f"│ Loaded modules: {module_count}{'' * (45 - len(str(module_count)))} │")
+    print(f"│ Loaded modules: {module_count}{' ' * (45 - len(str(module_count)))} │")
 
     mode = "PRODUCTION"
     print(f"│ Mode: {mode:<47} │")
 
-    print(f"│ Console commands: {len(bot.console_commands)}{'' * (42 - len(str(len(bot.console_commands))))} │")
+    print(f"│ Console commands: {len(bot.console_commands)}{' ' * (42 - len(str(len(bot.console_commands))))} │")
 
     if hasattr(bot.logger, 'log_file'):
         log_file_name = bot.logger.log_file.name
@@ -803,7 +803,6 @@ if __name__ == "__main__":
     TOKEN = ""
     if TOKEN_FILE.exists():
         try:
-            import json
             with open(TOKEN_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             TOKEN = data.get("bot_token", "")

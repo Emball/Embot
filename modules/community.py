@@ -247,8 +247,10 @@ class CommunityDB:
             """)
             c.commit()
 
+        with self._conn() as c:
+            current_version = self._get_schema_version(c)
         pending = [m for m in self._MIGRATIONS
-                   if m[0] > self._get_schema_version(self._conn())]
+                   if m[0] > current_version]
 
         if not pending:
             return
@@ -468,16 +470,12 @@ class CommunityDB:
 
     def link_owner(self, link: str, exclude_user: int) -> Optional[sqlite3.Row]:
         with self._conn() as c:
-            rows = c.execute(
-                "SELECT * FROM submissions WHERE user_id!=? AND is_deleted=0", (exclude_user,)
-            ).fetchall()
-            for row in rows:
-                try:
-                    if link in json.loads(row["links"]):
-                        return row
-                except Exception:
-                    pass
-            return None
+            return c.execute(
+                """SELECT s.* FROM submissions s, json_each(s.links) AS l
+                   WHERE l.value = ? AND s.user_id != ? AND s.is_deleted = 0
+                   LIMIT 1""",
+                (link, exclude_user)
+            ).fetchone()
 
     def group_for_hash(self, h: str) -> Optional[str]:
         with self._conn() as c:
@@ -490,17 +488,13 @@ class CommunityDB:
 
     def group_for_link(self, link: str, user_id: int) -> Optional[str]:
         with self._conn() as c:
-            rows = c.execute(
-                "SELECT group_id, links FROM submissions WHERE user_id=? AND is_deleted=0",
-                (user_id,)
-            ).fetchall()
-            for row in rows:
-                try:
-                    if link in json.loads(row["links"]):
-                        return row["group_id"]
-                except Exception:
-                    pass
-            return None
+            row = c.execute(
+                """SELECT s.group_id FROM submissions s, json_each(s.links) AS l
+                   WHERE l.value = ? AND s.user_id = ? AND s.is_deleted = 0
+                   LIMIT 1""",
+                (link, user_id)
+            ).fetchone()
+            return row["group_id"] if row else None
 
     def get_checkable_submissions(self, limit: int = 50) -> List[sqlite3.Row]:
         cutoff = (_now() - timedelta(days=VERSION_REENTRY_DAYS)).isoformat()
@@ -518,7 +512,6 @@ class CommunitySystem:
         self.bot = bot
         db_path = script_dir() / "db"/ "community.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        db_path.parent.mkdir(exist_ok=True)
         self.db = CommunityDB(db_path)
         self._submission_channel_ids: set[int] = set()
 
@@ -1232,6 +1225,8 @@ class CommunitySystem:
 
 def setup(bot):
 
+    from mod_core import is_owner
+
     cs = CommunitySystem(bot)
     bot._community_system = cs
 
@@ -1245,7 +1240,6 @@ def setup(bot):
                 local = now.astimezone(ZoneInfo("America/Chicago"))
             except Exception:
                 local = now - timedelta(hours=6)
-                local = local.replace(tzinfo=timezone.utc)
         return local.weekday() == 4 and local.hour == 15
 
     @bot.listen()
@@ -1285,21 +1279,42 @@ def setup(bot):
             return
         await cs.handle_delete(payload)
 
-    @tasks.loop(minutes=1)
-    async def spotlight_task():
+    async def _run_spotlight_if_due():
         try:
             if not _is_spotlight_time():
+                return
+            if cs.db.spotlight_ran_this_week():
                 return
             for guild in bot.guilds:
                 await cs.run_spotlight(guild)
         except Exception as e:
             cs.cerr("Spotlight task error", e)
 
-    @spotlight_task.before_loop
-    async def before_spotlight():
+    async def _spotlight_loop():
         await bot.wait_until_ready()
+        while not bot.is_closed():
+            now = _now()
+            if CST:
+                local = now.astimezone(CST)
+            else:
+                try:
+                    from zoneinfo import ZoneInfo
+                    local = now.astimezone(ZoneInfo("America/Chicago"))
+                except Exception:
+                    local = now - timedelta(hours=6)
+            days_until_friday = (4 - local.weekday()) % 7
+            target = local.replace(hour=15, minute=0, second=0, microsecond=0)
+            if days_until_friday == 0 and local.hour >= 15:
+                await _run_spotlight_if_due()
+                target += timedelta(days=7)
+            elif days_until_friday > 0:
+                target += timedelta(days=days_until_friday)
+            else:
+                target += timedelta(days=7)
+            wait_seconds = (target - local).total_seconds()
+            await asyncio.sleep(min(wait_seconds, 3600))
 
-    spotlight_task.start()
+    asyncio.create_task(_spotlight_loop())
 
     @tasks.loop(minutes=10)
     async def integrity_task():
@@ -1329,7 +1344,6 @@ def setup(bot):
         announcements_channel: Optional[discord.TextChannel] = None,
         spotlight_exclude_user: Optional[str] = None,
     ):
-        from mod_core import is_owner
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return
@@ -1447,7 +1461,6 @@ def setup(bot):
 
     @bot.tree.command(name="spotlight_preview", description="[Owner only] Preview this week's Spotlight Friday winner")
     async def spotlight_preview(interaction: discord.Interaction):
-        from mod_core import is_owner
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return
@@ -1472,7 +1485,6 @@ def setup(bot):
 
     @bot.tree.command(name="spotlight_run", description="[Owner only] Force-run Spotlight Friday now")
     async def spotlight_run(interaction: discord.Interaction):
-        from mod_core import is_owner
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return

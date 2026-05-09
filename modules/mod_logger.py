@@ -13,7 +13,7 @@ class EventLogger:
 
     @property
     def mod_cfg(self):
-        ms = getattr(self.bot, 'moderation_manager', None)
+        ms = getattr(self.bot, 'moderation', None) or getattr(self.bot, 'moderation_manager', None)
         return ms.cfg if ms else None
 
     def get_join_logs_channel(self, guild):
@@ -745,6 +745,8 @@ class EventLogger:
 
 def setup(bot):
 
+    from mod_core import is_owner
+
     event_logger = EventLogger(bot)
 
     bot._logger_event_logger = event_logger
@@ -819,7 +821,6 @@ def setup(bot):
     @bot.tree.command(name="setjoinlogs", description="[Owner only] Set the channel for join/leave logs")
     @app_commands.describe(channel="Channel to send join/leave logs to")
     async def set_join_logs(interaction: discord.Interaction, channel: discord.TextChannel):
-        from mod_core import is_owner
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return
@@ -837,7 +838,6 @@ def setup(bot):
     @bot.tree.command(name="setbotlogs", description="[Owner only] Set the channel for bot/moderation logs")
     @app_commands.describe(channel="Channel to send bot/moderation logs to")
     async def set_bot_logs(interaction: discord.Interaction, channel: discord.TextChannel):
-        from mod_core import is_owner
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return
@@ -854,7 +854,6 @@ def setup(bot):
 
     @bot.tree.command(name="logconfig", description="[Owner only] View or toggle logging settings")
     async def log_config(interaction: discord.Interaction):
-        from mod_core import is_owner
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return

@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import asyncio
+import time
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
@@ -279,11 +280,24 @@ def _conn(db_path: str) -> sqlite3.Connection:
     return c
 
 _conn_cache: dict = {}
+_CONN_CACHE_TTL = 3600
 
 def _get_cached_conn(db_path: str) -> sqlite3.Connection:
-    if db_path not in _conn_cache:
-        _conn_cache[db_path] = _conn(db_path)
-    return _conn_cache[db_path]
+    now = time.time()
+    if db_path in _conn_cache:
+        entry = _conn_cache[db_path]
+        if now - entry['created'] < _CONN_CACHE_TTL:
+            return entry['conn']
+        entry['conn'].close()
+    conn = _conn(db_path)
+    _conn_cache[db_path] = {'conn': conn, 'created': now}
+    if len(_conn_cache) > 20:
+        cutoff = now - _CONN_CACHE_TTL
+        stale = [k for k, v in _conn_cache.items() if v['created'] < cutoff]
+        for k in stale:
+            _conn_cache[k]['conn'].close()
+            del _conn_cache[k]
+    return conn
 
 def _db_exec(db, query: str, params: tuple = ()):
     if isinstance(db, sqlite3.Connection):
@@ -872,10 +886,8 @@ def setup(bot):
     import mod_core as _self
 
     mod_system = ModerationSystem(bot)
-    bot._mod_system        = mod_system
-    bot.moderation_manager = mod_system
-    bot.mod_oversight      = mod_system
-    bot.moderation         = mod_system
+    bot._mod_system = mod_system
+    bot.moderation  = mod_system
 
     _self._cfg = mod_system.cfg
 

@@ -316,7 +316,7 @@ def setup(bot):
 
         voice_channel = interaction.user.voice.channel
 
-        if not hasattr(bot, 'archive_manager') or not bot.ARCHIVE_manager.song_index_ready.is_set():
+        if not hasattr(bot, 'ARCHIVE_manager') or not bot.ARCHIVE_manager.song_index_ready.is_set():
             await interaction.response.send_message(
                 "Music index not ready—please try again shortly.",
                 ephemeral=True

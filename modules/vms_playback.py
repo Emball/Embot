@@ -1,4 +1,5 @@
 import aiohttp
+import asyncio
 import random
 import re
 import time
@@ -170,7 +171,11 @@ async def send_voice_message_api(
 async def send_vm(manager, channel, vm_id: int, filepath: str, duration: float) -> bool:
     try:
         row = manager._db_one("SELECT waveform_b64 FROM vms WHERE id=?", (vm_id,))
-        waveform = (row[0] if row and row[0] else None) or generate_waveform(filepath)
+        if row and row[0]:
+            waveform = row[0]
+        else:
+            loop = asyncio.get_running_loop()
+            waveform = await loop.run_in_executor(manager._executor, generate_waveform, filepath)
         session = await _get_or_create_session(manager)
         result = await send_voice_message_api(
             manager._token, channel.id, filepath, duration, waveform, session

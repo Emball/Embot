@@ -75,6 +75,8 @@ class LinkManager:
 
 def setup(bot):
 
+    from mod_core import is_owner
+
     link_manager = LinkManager(bot)
 
     @bot.listen()
@@ -96,7 +98,6 @@ def setup(bot):
         url: str,
         description: Optional[str] = None
     ):
-        from mod_core import is_owner
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return
@@ -136,7 +137,6 @@ def setup(bot):
     @bot.tree.command(name="linkremove", description="[Owner only] Remove a quick-link command")
     @app_commands.describe(name="Name of the link command to remove (without ?)")
     async def link_remove(interaction: discord.Interaction, name: str):
-        from mod_core import is_owner
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return
@@ -164,7 +164,6 @@ def setup(bot):
     @bot.tree.command(name="linktoggle", description="[Owner only] Enable or disable a quick-link command")
     @app_commands.describe(name="Name of the link command to toggle (without ?)")
     async def link_toggle(interaction: discord.Interaction, name: str):
-        from mod_core import is_owner
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return

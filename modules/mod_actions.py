@@ -471,7 +471,7 @@ async def _do_purge(ctx: ModContext, ms, amount: int, target: Optional[discord.M
         check   = (lambda m: m.author.id == target.id) if target else (lambda m: True)
         deleted = [] if fake else await ctx.channel.purge(limit=amount, check=check)
         if fake:
-            deleted = [None] * amount
+            deleted = []
 
         reason = f"Purged {len(deleted)} message(s)" + (
             f"from {target}" if target else "")

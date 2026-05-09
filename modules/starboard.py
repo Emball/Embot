@@ -118,14 +118,16 @@ def _get_msg_lock(msg_id: str) -> asyncio.Lock:
     return _msg_locks.get(msg_id)
 
 def _star_label(count: int) -> str:
-    if count >= 15:
-        return ""
+    if count >= 25:
+        return "🏆"
+    elif count >= 15:
+        return "🌟"
     elif count >= 10:
-        return ""
+        return "✨"
     elif count >= 5:
         return "⭐"
     else:
-        return ""
+        return "⭐"
 
 def _build_content(count: int, source_channel: discord.TextChannel) -> str:
     return f"{_star_label(count)} **{count}** | {source_channel.mention}"

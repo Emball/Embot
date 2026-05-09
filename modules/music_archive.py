@@ -731,6 +731,8 @@ class ARCHIVEManager:
         return ok
 
 def setup(bot):
+    from mod_core import is_owner
+
     bot.logger.log(MODULE_NAME, "Setting up ARCHIVE module")
 
     ARCHIVE_manager = ARCHIVEManager(bot)
@@ -782,7 +784,6 @@ def setup(bot):
 
     @bot.tree.command(name="rebuild_index", description="[Owner only] Rebuild the song index cache")
     async def rebuild_index(interaction: discord.Interaction):
-        from mod_core import is_owner
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return
@@ -801,7 +802,6 @@ def setup(bot):
     @bot.tree.command(name="cache_backfill",
                       description="[Owner only] Pre-upload all uncached songs to the CDN cache")
     async def cache_backfill(interaction: discord.Interaction):
-        from mod_core import is_owner
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return

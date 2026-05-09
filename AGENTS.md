@@ -10,6 +10,72 @@ Name: Michael (Emball/Embis). Vibe-coder with beginner Python knowledge. Dual-bo
 
 - NEVER spawn agents or delegate to separate chat processes without explicitly confirming with the user first.
 
+## Remote Debugging & Testing Workflow
+
+**CRITICAL: NEVER load the bot on Windows for testing.** The live bot runs on the Linux laptop 24/7. Running a duplicate instance on Windows would register two bots at once and corrupt the workflow. All testing MUST go through the remote debug API.
+
+### Architecture
+
+| Machine | Role |
+|---|---|
+| Windows (current) | Development — edit code, commit, push |
+| Linux laptop | Deployment — runs the bot 24/7, holds live DBs, configs, and console output |
+
+`modules/remote_debug.py` runs a lightweight HTTP API inside the bot on Linux. `temp/remote_client.py` on Windows connects to it over the local network.
+
+### Default Testing Path
+
+For every code change, follow this order:
+
+1. **Syntax-check individual modules locally:**
+   `uv run python -c "import ast; ast.parse(open('modules/<name>.py').read()); print('OK')"`
+2. **Optional: import check** for modules that have no startup side-effects:
+   `uv run python -c "from modules.<name> import setup; print('OK')"`
+3. **Commit and push** (per Versioning & Git rules)
+4. **Test against the live bot via remote client** — this is the final word on whether code works, because it exercises against the real server-level configs, DBs, and runtime state.
+
+### Remote Client Setup (Windows)
+
+Create `temp/remote.json`:
+```json
+{"url": "http://<linux-lan-ip>:8765", "token": "<token-from-linux-console>"}
+```
+
+The Linux laptop logs its LAN IP and token on startup:
+```
+[REMOTE_DEBUG] Remote debug API online at http://192.168.x.x:8765
+[REMOTE_DEBUG] Auth token: <64-char-hex>
+```
+
+If `temp/remote.json` is missing, the client falls back to env vars `REMOTE_URL` and `REMOTE_TOKEN`.
+
+### Remote Client Commands
+
+All run from the project root:
+
+| Command | Purpose |
+|---|---|
+| `uv run temp/remote_client.py ping` | Test connectivity |
+| `uv run temp/remote_client.py status` | Bot vitals (version, latency, uptime log file) |
+| `uv run temp/remote_client.py logs` | Fetch last 200 lines of console log |
+| `uv run temp/remote_client.py logs --lines 1000` | Fetch last N lines |
+| `uv run temp/remote_client.py stream` | Live tail the console log (Ctrl+C to stop) |
+| `uv run temp/remote_client.py db-download <name>` | Download a .db file to temp/ |
+| `uv run temp/remote_client.py db-query <name> "<SQL>"` | Run a SELECT/PRAGMA query |
+| `uv run temp/remote_client.py config <name>` | View a config file (auth blocked) |
+
+### Post-Commit Testing Checklist
+
+After pushing changes and Linux pulls/restarts:
+
+1. `uv run temp/remote_client.py status` — verify version matches, no crash
+2. `uv run temp/remote_client.py logs --lines 300` — scan for ERROR lines
+3. If error found: `uv run temp/remote_client.py logs --lines 1000` and grep for traceback
+4. If data issue suspected: `uv run temp/remote_client.py db-query <name> "<relevant query>"`
+5. Fix, repeat from step 1
+
+**The remote test against Linux is mandatory before considering any change complete.** Local syntax checks alone are insufficient — the real server environment is the only true validator.
+
 ## Code Style
 
 - Comments must be brief. Good code explains itself.
@@ -30,7 +96,7 @@ Quota is limited. Minimize tool calls and response length. Complete tasks fully 
 - Ensure the .gitignore file is up to date and you do not track files that shouldn't be pushed.
 - Keep `requirements.txt` synced to actual imports after every edit.
 - Ensure AGENTS.md structure is up to date with codebase.
-- Test code for errors and sanity-check before every push.
+- Test code for errors and sanity-check before every push (see Remote Debugging & Testing Workflow above).
 - Test utilities and temporary code go in /temp, which is gitignored.
 - Always commit and push after every edit, if there's no errors. Don't ask permission, just do it.
 

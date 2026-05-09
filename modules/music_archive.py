@@ -524,12 +524,30 @@ class ARCHIVEManager:
         max_bytes = min(getattr(chan.guild, 'filesize_limit', 25 * 1024 * 1024), 95 * 1024 * 1024)
 
         try:
+            orphaned = 0
             async for msg in chan.history(limit=100):
-                if msg.author == self.bot.user and msg.embeds:
+                if msg.author != self.bot.user:
+                    continue
+                if msg.embeds:
                     for e in msg.embeds:
                         if e.title and "Cache Backfill" in e.title:
                             await msg.delete()
+                            orphaned += 1
                             break
+                    continue
+                if msg.attachments:
+                    tracked = False
+                    for att in msg.attachments:
+                        row = _db_one(DB_PATH,
+                            "SELECT 1 FROM song_cache WHERE message_id=?", (str(msg.id),))
+                        if row:
+                            tracked = True
+                            break
+                    if not tracked:
+                        await msg.delete()
+                        orphaned += 1
+            if orphaned:
+                self.bot.logger.log(MODULE_NAME, f"Cleaned up {orphaned} orphaned message(s) from #{CACHE_CHANNEL_NAME}")
         except Exception:
             pass
 

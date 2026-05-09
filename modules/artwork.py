@@ -23,43 +23,35 @@ def art_url(raw: str, size: int = ART_SIZE) -> str:
     return re.sub(r"\d+x\d+bb", f"{size}x{size}bb", raw)
 
 
-async def _search(params: dict) -> list[dict]:
+async def search_itunes(query: str, limit: int = 25) -> list[dict]:
     headers = {"User-Agent": "Mozilla/5.0"}
+    params = {"term": query, "entity": "album", "limit": limit}
     async with aiohttp.ClientSession(headers=headers) as session:
-        async with session.get(ITUNES_SEARCH, params=params, headers=headers) as resp:
+        async with session.get(ITUNES_SEARCH, params=params) as resp:
             if resp.status != 200:
                 return []
             return json.loads(await resp.text()).get("results", [])
 
 
-async def search_itunes(artist: str, album: str) -> list[dict]:
-    # Primary: search by artistTerm only so iTunes filters to that artist's catalogue
-    results = await _search({
-        "term": artist,
-        "entity": "album",
-        "attribute": "artistTerm",
-        "limit": 25,
-    })
-    # If album specified, filter down; otherwise return as-is
-    if album and results:
-        a = normalize(album)
-        results.sort(
-            key=lambda r: difflib.SequenceMatcher(None, a, normalize(r.get("collectionName", ""))).ratio(),
-            reverse=True,
-        )
-    return results
-
-
 def best_match(artist: str, album: str, results: list[dict]) -> dict | None:
     if not results:
         return None
-    # Top result is already the best artist+album match from search_itunes sort
-    r = results[0]
-    # Sanity: artist name should at least partially match
-    artist_ratio = difflib.SequenceMatcher(None, normalize(artist), normalize(r.get("artistName", ""))).ratio()
+
+    a_norm = normalize(artist)
+    b_norm = normalize(album)
+
+    def score(r: dict) -> tuple[float, float]:
+        artist_ratio = difflib.SequenceMatcher(None, a_norm, normalize(r.get("artistName", ""))).ratio()
+        album_ratio  = difflib.SequenceMatcher(None, b_norm, normalize(r.get("collectionName", ""))).ratio() if b_norm else 1.0
+        return (artist_ratio, album_ratio)
+
+    results.sort(key=score, reverse=True)
+    best = results[0]
+
+    artist_ratio, _ = score(best)
     if artist_ratio < 0.3:
         return None
-    return r
+    return best
 
 
 def setup(bot):
@@ -73,7 +65,7 @@ def setup(bot):
         await interaction.response.defer(thinking=True)
 
         try:
-            results = await search_itunes(artist, album)
+            results = await search_itunes(f"{artist} {album}".strip())
         except Exception as e:
             bot.logger.error(MODULE_NAME, "iTunes search failed", e)
             await interaction.followup.send("Failed to reach Apple Music. Try again later.")

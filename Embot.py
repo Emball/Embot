@@ -319,7 +319,6 @@ def _ensure_git_for_update(bot, logger) -> bool:
 async def _check_for_update(bot) -> bool:
     git_env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GCM_INTERACTIVE': 'never'}
     local_ver = _parse_version_tuple(bot.version if hasattr(bot, 'version') else load_version())
-    bot.logger.log("AUTO-UPDATE", f"Pre-flight: local v{'.'.join(map(str,local_ver))}")
     proc = await asyncio.create_subprocess_exec(
         'git', '-C', str(script_dir), '-c', 'credential.helper=',
         'fetch', 'origin', 'main',

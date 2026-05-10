@@ -12,6 +12,8 @@ Michael (Emball/Embis). Vibe-coder with beginner Python knowledge. Dual-boots Li
 
 ## Environment & Testing
 
+**The bot auto-updates.** After every push it polls git every ~30s, detects the version bump, pulls, and restarts on its own. Never manually trigger `update` after a push — just wait a moment and test.
+
 NEVER run Embot.py locally for testing — the live bot runs on the Linux machine 24/7. A duplicate instance registers two bots at once and causes issues. All testing happens against the live server via remote debug.
 
 **EXEC IS READ-ONLY.** Never use `exec` to edit files on the server. Editing files directly creates uncommitted changes that block `git pull --ff-only`. All code edits go through git: edit locally → commit → push → server pulls clean commit. Exec is for reading files, checking logs, and running diagnostics only. Exceptions require explicit approval.
@@ -116,7 +118,7 @@ Workflow:
   - `300+` → MAJOR, `100+` → minor, `20+` → patch, `1+` → micro
 - Commit message = version number only.
 - Increment version, commit, and push after every edit. No permission needed.
-- After pushing, force the server to update via bridge (`update` command) — don't wait for auto-update.
+- After pushing, **do nothing** — the bot auto-updates. It polls git every 30s, detects the new version, pulls, and restarts automatically. Never manually run `update` after a push unless something is broken.
 - Keep `requirements.txt` synced. Keep `.gitignore` clean. Keep AGENTS.md current.
 - Temp/test code goes in `/temp` (gitignored).
 

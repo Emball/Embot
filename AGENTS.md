@@ -92,20 +92,7 @@ Private `_*.py` files are skipped by the loader.
 - `bot.logger` (ConsoleLogger) available to all modules
 - `_utils.py` used broadly across modules
 
-### Startup Flow
-
-1. Parse CLI args
-2. Load `config/embot.json` (auto-create defaults if missing)
-3. Init `discord.ext.commands.Bot` with `!` and `?` prefixes
-4. Create ConsoleLogger (session-scoped log in `logs/`)
-5. `on_ready`: load `_version.py`, start console + heartbeat + auto-update loop, call `load_modules()`, sync slash commands
-6. Auto-update: `git fetch`, compare version, fast-forward merge, restart on exit code 42
-
-## Environment & Testing
-
-**The bot auto-updates.** After every push it polls git every ~1 minute, detects the version bump, pulls, and restarts. Use `bridge update` or `bridge restart` to trigger this immediately rather than waiting out the interval — these are not last-resort commands, just faster than waiting.
-
-NEVER run Embot.py locally for testing — the live bot runs on the Linux machine 24/7. A duplicate instance causes issues. All testing happens against the live server via remote debug.
+ debug.
 
 **EXEC IS READ-ONLY.** Never use `exec` to edit files on the server. Editing files directly creates uncommitted changes that block `git pull --ff-only`. All code edits go through git: edit locally → commit → push → server pulls. Exec is for reading files, checking logs, and running diagnostics only. Exceptions require explicit approval.
 
@@ -148,7 +135,7 @@ python modules/remote_debug.py bridge update
 python modules/remote_debug.py bridge restart
 ```
 
-Use `--timeout N` to extend the wait window (default 45s). `restart`/`update` wait smartly for the bot to come back online.
+`restart`/`update` wait smartly for the bot to come back online.
 
 ## Debugging
 

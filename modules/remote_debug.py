@@ -13,6 +13,7 @@ import urllib.error
 import ssl
 from datetime import datetime
 import time
+import pathlib
 from aiohttp import web
 
 from _utils import script_dir, migrate_config, atomic_json_write

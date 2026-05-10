@@ -522,10 +522,11 @@ async def slash_dbquery(interaction: discord.Interaction, name: str, query: str)
     await _send_inline_or_file(interaction, text, "query.txt", f"{len(rows)} row(s)")
     bot.logger.log("MAIN", f"/dbquery {name} used by {interaction.user}")
 
-@bot.tree.command(name="restart", description="[Server owner only] Restart the bot")
+@bot.tree.command(name="restart", description="[Owner role only] Restart the bot")
 async def slash_restart(interaction: discord.Interaction):
-    if not _is_guild_owner(interaction):
-        return await _deny_owner(interaction)
+    from modules.mod_core import is_owner
+    if not is_owner(interaction.user):
+        return await interaction.response.send_message("Owner role only.", ephemeral=True)
     await interaction.response.send_message("Restarting...", ephemeral=True)
     bot.logger.log("MAIN", f"/restart used by {interaction.user}")
     await _restart_async(bot)

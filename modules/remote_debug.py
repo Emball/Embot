@@ -880,7 +880,7 @@ def _cmd_session_init(token):
     print(f"Session initialised — token stored in {RD_CONFIG_PATH}")
 
 
-def _cmd_bridge(bridge_cfg, command, args, timeout=45):
+def _cmd_bridge(bridge_cfg, command, args, timeout=20):
     """Send a command via Claude bridge using plain git. Fresh clone to send, pull to poll."""
     import shutil, subprocess
 
@@ -1051,7 +1051,7 @@ def main():
     bridge_p = sub.add_parser("bridge", help="Send a command via Claude bridge and wait for result")
     bridge_p.add_argument("bridge_command", help="Command to send (e.g. status, logs, exec)")
     bridge_p.add_argument("bridge_args", nargs=argparse.REMAINDER, help="Arguments for the command")
-    bridge_p.add_argument("--timeout", type=int, default=45, help="Seconds to wait for result (default: 45)")
+
 
     args = parser.parse_args()
     cfg["token"] = args.token
@@ -1084,7 +1084,7 @@ def main():
         _cmd_session_init(args.github_token)
     elif args.command == "bridge":
         bridge_cfg = cfg.get("claude_bridge", {})
-        _cmd_bridge(bridge_cfg, args.bridge_command, args.bridge_args, args.timeout)
+        _cmd_bridge(bridge_cfg, args.bridge_command, args.bridge_args)
 
 
 if __name__ == "__main__":

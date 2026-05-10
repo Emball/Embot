@@ -86,22 +86,30 @@ class RulesManager:
 
         posted_msg_id, posted_hash = self._get_state(guild.id)
 
-        existing_ok = False
-        if posted_msg_id and not force:
+        existing_msg = None
+        if posted_msg_id:
             try:
-                msg = await channel.fetch_message(posted_msg_id)
-                if current_hash == posted_hash:
-                    existing_ok = True
-                else:
-                    await msg.delete()
+                existing_msg = await channel.fetch_message(posted_msg_id)
             except discord.NotFound:
-                pass
+                self.bot.logger.log("RULES", "Rules embed was deleted — reposting", "WARNING")
             except Exception as e:
                 self.bot.logger.log("RULES", f"Could not fetch rules message: {e}", "WARNING")
 
-        if existing_ok:
+        if existing_msg and not force and current_hash == posted_hash:
             return False
 
+        embed = self.build_embed(data)
+
+        if existing_msg:
+            try:
+                await existing_msg.edit(embed=embed)
+                self._save_state(guild.id, existing_msg.id, current_hash)
+                self.bot.logger.log("RULES", "Rules embed updated")
+                return True
+            except Exception as e:
+                self.bot.logger.log("RULES", f"Failed to edit rules embed: {e}", "WARNING")
+
+        # clear stale bot embeds and repost
         try:
             async for msg in channel.history(limit=50):
                 if msg.author == guild.me and msg.embeds:
@@ -109,7 +117,6 @@ class RulesManager:
         except Exception:
             pass
 
-        embed = self.build_embed(data)
         try:
             new_msg = await channel.send(embed=embed)
             self._save_state(guild.id, new_msg.id, current_hash)
@@ -132,6 +139,7 @@ class RulesManager:
 
     async def _watch_loop(self):
         await self.bot.wait_until_ready()
+        check_count = 0
         while not self.bot.is_closed():
             await asyncio.sleep(60)
             try:
@@ -141,9 +149,13 @@ class RulesManager:
                     if data:
                         current_hash = self._hash_rules(data)
                         _, posted_hash = self._get_state(guild.id)
-                        if current_hash != posted_hash:
-                            self.bot.logger.log("RULES", "rules content change detected - syncing embed")
-                            await self.sync(guild, force=True)
+                        hash_changed = current_hash != posted_hash
+                        check_count += 1
+                        # verify message exists every 5 minutes (every 5 iterations)
+                        if hash_changed or check_count % 5 == 0:
+                            if hash_changed:
+                                self.bot.logger.log("RULES", "Rules content change detected — syncing embed")
+                            await self.sync(guild, force=hash_changed)
             except Exception as e:
                 self.bot.logger.log("RULES", f"Watcher error: {e}", "WARNING")
 

@@ -1328,6 +1328,14 @@ def setup(bot):
             rules_manager.start_watcher(guild)
         bot.logger.log(MODULE_NAME, "Rules manager synced on ready")
 
+    if bot.is_ready():
+        async def _rules_late_start():
+            for guild in bot.guilds:
+                await rules_manager.on_ready(guild)
+                rules_manager.start_watcher(guild)
+            bot.logger.log(MODULE_NAME, "Rules manager synced (late start)")
+        asyncio.ensure_future(_rules_late_start())
+
     @bot.tree.command(name="rules", description="List all server rules")
     async def slash_rules(interaction: discord.Interaction):
         data = rules_manager.load_rules()

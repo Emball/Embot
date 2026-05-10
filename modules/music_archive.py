@@ -451,7 +451,7 @@ async def _deliver_song(bot, interaction: discord.Interaction, candidate: dict) 
         return
 
     entry = _cache_lookup(str(p))
-    transcoded_note = "\n-# ⚠️ Transcoded to 16-bit — source file exceeds Discord's upload limit" if entry and entry.get("transcoded") else ""
+    transcoded_note = "\n-# Served transcoded — source exceeds Discord's upload limit" if entry and entry.get("transcoded") else ""
     msg = f"[{p.name}]({url}){transcoded_note}"
 
     if interaction.guild is None:
@@ -542,7 +542,7 @@ def _downsample_flac(source_path: str):
         # first pass: resample if needed, keep bit depth
         path, sz = _run(rate_args)
         if path and sz:
-            return path, sz, False
+            return path, sz, True  # resampled — still flag as transcoded
 
         # second pass: also reduce to 16-bit
         path, sz = _run(rate_args + ['-sample_fmt', 's16'])

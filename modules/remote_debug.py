@@ -895,6 +895,8 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
         # clone
         subprocess.run(["git", "clone", "--depth=1", remote, str(work)],
                        capture_output=True, text=True, check=True)
+        git("config", "user.email", "claude@bridge")
+        git("config", "user.name", "Claude")
 
         cmd_data = read_json("cmd.json")
         seq = cmd_data.get("seq", 0) + 1

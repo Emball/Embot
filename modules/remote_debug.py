@@ -647,13 +647,13 @@ class ClaudeBridgeListener:
         def _commit():
             try:
                 result_sha = self._gh_get_sha("result.json")
-                self._gh_put_file("result.json", {"seq": seq, "command": command, "output": output}, result_sha or "", str(seq))
                 for path, content in artifacts.items():
                     sha = self._gh_get_sha(path)
                     if isinstance(content, bytes):
                         self._gh_put_binary(path, content, sha or "", str(seq))
                     else:
                         self._gh_put_file(path, content, sha or "", str(seq))
+                self._gh_put_file("result.json", {"seq": seq, "command": command, "output": output}, result_sha or "", str(seq))
                 return None
             except Exception as e:
                 import traceback as _tb
@@ -880,7 +880,7 @@ def _cmd_session_init(token):
     print(f"Session initialised — token stored in {RD_CONFIG_PATH}")
 
 
-def _cmd_bridge(bridge_cfg, command, args, timeout=20):
+def _cmd_bridge(bridge_cfg, command, args, timeout=45):
     """Send a command via Claude bridge using plain git. Fresh clone to send, pull to poll."""
     import shutil, subprocess
 
@@ -1004,9 +1004,7 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=20):
                 if error:
                     print(f"Error: {error}", file=sys.stderr)
                 return
-            time.sleep(1)
-
-        print(f"[bridge] timed out waiting for seq={seq}", file=sys.stderr)
+            time.sleep(1 if (deadline - time.time()) > (timeout - 10) else 2)
         sys.exit(1)
 
     finally:

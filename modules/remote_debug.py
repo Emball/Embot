@@ -107,15 +107,7 @@ class RemoteDebugServer:
         from aiohttp import web
         self.bot = bot
         self._config = _load_config()
-        _self = self
-        @web.middleware
-        async def _error_middleware(request, handler):
-            try:
-                return await handler(request)
-            except Exception as e:
-                _self.bot.logger.error(MODULE_NAME, f"API error on {request.path}", e)
-                return web.json_response({"error": str(e), "type": type(e).__name__}, status=500)
-        self._app = web.Application(middlewares=[_error_middleware])
+        self._app = web.Application()
         self._runner = None
         self._start_time: float = 0.0
         self._bridge = None
@@ -136,9 +128,6 @@ class RemoteDebugServer:
         self._app.router.add_post("/update", self._handle_update)
         self._app.router.add_post("/restart", self._handle_restart)
         self._app.router.add_post("/exec", self._handle_exec)
-
-    async def _error_middleware(self, request, handler):
-        pass  # unused — kept for reference only
 
     def _check_auth(self, request) -> bool:
         req_token = request.headers.get("X-Debug-Token", "")

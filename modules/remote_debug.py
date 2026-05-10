@@ -864,7 +864,7 @@ def _cmd_restart(cfg):
 _BRIDGE_DIR = pathlib.Path(tempfile.gettempdir()) / "embotdebug"
 
 def _cmd_bridge(bridge_cfg, command, args, timeout=45):
-    """Send a command via Claude bridge using plain git. Fresh clone every command, no conflicts."""
+    """Send a command via Claude bridge using plain git. Fresh clone to send, pull to poll."""
     import shutil, subprocess
 
     repo = bridge_cfg.get("repo", "Emball/EmbotDebug")
@@ -875,7 +875,7 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
 
     remote = f"https://{token}@github.com/{repo}.git"
 
-    def fresh_clone():
+    def clone():
         work = pathlib.Path(tempfile.mkdtemp(prefix="embotdebug_"))
         subprocess.run(["git", "clone", "--depth=1", remote, str(work)],
                        capture_output=True, text=True, check=True)
@@ -896,7 +896,8 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
 
     work = None
     try:
-        work = fresh_clone()
+        # fresh clone to send — eliminates any conflict with stale local state
+        work = clone()
         cmd_data = read_json(work, "cmd.json")
         seq = cmd_data.get("seq", 0) + 1
         new_cmd = {"seq": seq, "command": command, "args": args}
@@ -910,10 +911,10 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
             if result.returncode == 0:
                 pushed = True
                 break
-            # conflict: ditch the clone, start fresh, increment seq
+            # conflict: ditch, clone fresh, increment seq, retry
             shutil.rmtree(work, ignore_errors=True)
             time.sleep(1 + attempt)
-            work = fresh_clone()
+            work = clone()
             cmd_data = read_json(work, "cmd.json")
             seq = cmd_data.get("seq", 0) + 1
             new_cmd["seq"] = seq
@@ -923,15 +924,14 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
             sys.exit(1)
 
         print(f"[bridge] sent seq={seq} cmd={command} args={args}", file=sys.stderr)
-        shutil.rmtree(work, ignore_errors=True)
-        work = None
 
         time.sleep(15 if command in ("restart", "update") else 1)
 
-        # poll: fresh clone each time, no stale state possible
+        # poll using fast pull on the same clone — no stale state since we just pushed clean
         deadline = time.time() + timeout
         while time.time() < deadline:
-            work = fresh_clone()
+            git(work, "fetch", "origin")
+            git(work, "reset", "--hard", "origin/main")
             result = read_json(work, "result.json")
             if result.get("seq") == seq:
                 output = result.get("output", "")
@@ -954,8 +954,6 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
                 if error:
                     print(f"Error: {error}", file=sys.stderr)
                 return
-            shutil.rmtree(work, ignore_errors=True)
-            work = None
             time.sleep(1)
 
         print(f"[bridge] timed out waiting for seq={seq}", file=sys.stderr)

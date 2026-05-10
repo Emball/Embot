@@ -187,6 +187,8 @@ Log Workflow:
 
 If that fails to identify the issue, you can expand to other avenues.
 
+Never use `sleep` to wait for the bot to update or restart. Poll with `bridge ping` instead — retry every few seconds until it responds.
+
 ## Full Audit Protocol
 
 Triggered by Michael saying **"full audit"** or **"audit: \<scope\>"**.

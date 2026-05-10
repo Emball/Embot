@@ -49,7 +49,7 @@ git clone https://TOKEN@github.com/Emball/EmbotDebug.git /tmp/EmbotDebug
 
 **Sleep times after push:**
 - Normal commands (ping, status, guilds, modules, logs, config, db-query, exec): `sleep 3`
-- restart / update: `sleep 15` (bot needs to go down and come back up)
+- restart / update: `sleep 7` (bot needs to go down and come back up)
 
 **EXEC IS READ-ONLY via bridge too.** Never use exec to edit files. All code changes go through git on the Windows side.
 

@@ -290,14 +290,15 @@ CREATE TABLE IF NOT EXISTS song_index (
 CREATE INDEX IF NOT EXISTS idx_song_format_key ON song_index(format, normalized_key);
 
 CREATE TABLE IF NOT EXISTS song_cache (
-    file_path   TEXT PRIMARY KEY,
-    cdn_url     TEXT NOT NULL,
-    message_id  TEXT NOT NULL,
-    channel_id  TEXT NOT NULL,
-    file_name   TEXT NOT NULL,
-    file_size   INTEGER NOT NULL DEFAULT 0,
-    cached_at   TEXT NOT NULL,
-    accessed_at TEXT NOT NULL
+    file_path       TEXT PRIMARY KEY,
+    cdn_url         TEXT NOT NULL,
+    message_id      TEXT NOT NULL,
+    channel_id      TEXT NOT NULL,
+    file_name       TEXT NOT NULL,
+    file_size       INTEGER NOT NULL DEFAULT 0,
+    file_checksum   TEXT NOT NULL DEFAULT '',
+    cached_at       TEXT NOT NULL,
+    accessed_at     TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS song_cache_fails (
@@ -307,6 +308,17 @@ CREATE TABLE IF NOT EXISTS song_cache_fails (
     PRIMARY KEY (file_path, failed_at)
 );
 """
+
+def _file_checksum(file_path: str) -> str:
+    import hashlib
+    h = hashlib.md5()
+    try:
+        with open(file_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(65536), b''):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return ''
 
 def _db_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
@@ -318,7 +330,11 @@ def _db_conn() -> sqlite3.Connection:
 def _db_init() -> None:
     with _db_conn() as c:
         c.executescript(DB_SCHEMA)
-        c.commit()
+        try:
+            c.execute("ALTER TABLE song_cache ADD COLUMN file_checksum TEXT NOT NULL DEFAULT ''")
+            c.commit()
+        except Exception:
+            pass
 
 def _cache_lookup(file_path: str) -> Optional[dict]:
     key = str(Path(file_path))
@@ -330,15 +346,15 @@ def _cache_lookup(file_path: str) -> Optional[dict]:
     return dict(row) if row else None
 
 def _cache_store(file_path: str, cdn_url: str, message_id: str, channel_id: str,
-                 file_name: str, file_size: int) -> None:
+                 file_name: str, file_size: int, checksum: str = '') -> None:
     key = str(Path(file_path))
     now = _now().isoformat()
     with _db_conn() as c:
         c.execute(
             "INSERT OR REPLACE INTO song_cache "
-            "(file_path, cdn_url, message_id, channel_id, file_name, file_size, cached_at, accessed_at) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (key, cdn_url, str(message_id), str(channel_id), file_name, file_size, now, now)
+            "(file_path, cdn_url, message_id, channel_id, file_name, file_size, file_checksum, cached_at, accessed_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (key, cdn_url, str(message_id), str(channel_id), file_name, file_size, checksum, now, now)
         )
         c.commit()
 
@@ -530,9 +546,30 @@ class ARCHIVEManager:
                 self.song_index = await build_song_index(self.bot)
             self.song_index_ready.set()
             self.bot.logger.log(MODULE_NAME, "Song index ready")
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(METADATA_EXECUTOR, self._migrate_checksums)
             asyncio.create_task(self.backfill_cache())
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Background initialization failed", e)
+
+    def _migrate_checksums(self):
+        with _db_conn() as c:
+            rows = c.execute(
+                "SELECT file_path FROM song_cache WHERE file_checksum = ''"
+            ).fetchall()
+        if not rows:
+            return
+        self.bot.logger.log(MODULE_NAME, f"Migrating checksums for {len(rows)} cached files...")
+        updated = 0
+        for row in rows:
+            fp = row["file_path"]
+            checksum = _file_checksum(fp)
+            if checksum:
+                with _db_conn() as c:
+                    c.execute("UPDATE song_cache SET file_checksum=? WHERE file_path=?", (checksum, fp))
+                    c.commit()
+                updated += 1
+        self.bot.logger.log(MODULE_NAME, f"Checksum migration complete: {updated}/{len(rows)} files")
 
     async def ensure_ready(self):
         if not self.song_index_ready.is_set() and self.initialization_task:
@@ -683,8 +720,16 @@ class ARCHIVEManager:
         cached = 0
         for fp in sorted(seen):
             try:
-                if _cache_lookup(fp):
-                    cached += 1
+                entry = _cache_lookup(fp)
+                if entry:
+                    stored = entry.get('file_checksum', '')
+                    if stored and stored != _file_checksum(fp):
+                        with _db_conn() as c:
+                            c.execute("DELETE FROM song_cache WHERE file_path=?", (str(Path(fp)),))
+                            c.commit()
+                        pending.append(fp)
+                    else:
+                        cached += 1
                     continue
                 pending.append(fp)
             except Exception:
@@ -775,7 +820,9 @@ class ARCHIVEManager:
             return False
         ok = True
         for (fp, name, data, sz), att in zip(file_data, msg.attachments):
-            _cache_store(fp, att.url, att.id, chan.id, name, sz)
+            actual_path = source_path if source_path and len(batch) == 1 else fp
+            checksum = _file_checksum(actual_path)
+            _cache_store(fp, att.url, att.id, chan.id, name, sz, checksum)
         self.bot.logger.log(MODULE_NAME,
             f"Cached batch: {len(batch)} file(s), {total_mb}MB "
             f"(read: {read_elapsed:.1f}s, upload: {up_elapsed:.1f}s)")

@@ -416,16 +416,22 @@ async def _deny_owner(interaction: discord.Interaction):
     await interaction.response.send_message("Server owner only.", ephemeral=True)
 
 async def _send_inline_or_file(interaction, text: str, filename: str, label: str = None):
-    # send inline if it fits, otherwise attach as file
-    content = f"```\n{text}\n```"
-    if len(content) <= 2000:
-        await interaction.followup.send(content, ephemeral=True)
-    else:
-        await interaction.followup.send(
-            label or filename,
-            file=discord.File(fp=__import__("io").StringIO(text), filename=filename),
-            ephemeral=True,
-        )
+    # chunk into <=1900-char pieces, send as sequential ephemeral followups
+    chunk_size = 1900
+    lines = text.splitlines(keepends=True)
+    chunks, current = [], ""
+    for line in lines:
+        if len(current) + len(line) > chunk_size:
+            if current:
+                chunks.append(current)
+            current = line
+        else:
+            current += line
+    if current:
+        chunks.append(current)
+    for i, chunk in enumerate(chunks):
+        header = f"`[{i+1}/{len(chunks)}]` " if len(chunks) > 1 else ""
+        await interaction.followup.send(f"{header}```\n{chunk}\n```", ephemeral=True)
 
 @bot.tree.command(name="status", description="[Server owner only] Bot status and vitals")
 async def slash_status(interaction: discord.Interaction):

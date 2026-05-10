@@ -176,8 +176,9 @@ The raw, live bot log is a great source of truth. Check it first every time if s
 Before drawing any conclusions about why something broke, fetch a large chunk of the log. Searching for specific strings is useful but can miss context.
 
 Log Workflow:
-1. `logs --tail 500` (or `--tail 1000` for harder problems) — read the raw output
-2. Only use `--search` once you know what you're looking for
-3. If the log doesn't show the error, go wider or pull the entire log file if necessary
+1. Run `date` in the bash tool to get current UTC time, then cross-reference against log timestamps to identify the current session and ignore stale entries
+2. `logs --tail 500` (or `--tail 1000` for harder problems) — read the raw output
+3. Only use `--search` once you know what you're looking for
+4. If the log doesn't show the error, go wider or pull the entire log file if necessary
 
 If that fails to identify the issue, you can expand to other avenues.

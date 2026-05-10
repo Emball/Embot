@@ -496,10 +496,11 @@ def run_console():
                 show_version()
             elif command in bot.console_commands:
                 cmd_info = bot.console_commands[command]
+                timeout = 90 if command == "exec" else 30
                 asyncio.run_coroutine_threadsafe(
                     cmd_info['handler'](args_str),
                     bot.loop
-                ).result(timeout=30)
+                ).result(timeout=timeout)
             elif command == "exit" or command == "quit":
                 print("Shutting down bot...")
                 asyncio.run_coroutine_threadsafe(bot.close(), bot.loop).result(timeout=15)
@@ -520,57 +521,26 @@ def run_console():
                 bot.logger.prompt_active = True
 
 def print_help():
-    help_text = """
-┌─────────────────────────────────────────────────────────────────────┐
-│                         BOT CONSOLE                                 │
-├─────────────────────────────────────────────────────────────────────┤
-│ help              - Show this help message                          │
-│ status            - Show bot status                                 │
-│ version           - Show current version                            │"""
-
-    for cmd_name, cmd_info in sorted(bot.console_commands.items()):
-        desc = cmd_info['description'][:35] if len(cmd_info['description']) > 35 else cmd_info['description']
-        help_text += f"\n│ {cmd_name:<17} - {desc:<35} │"
-
-    help_text += """
-│ exit / quit       - Shutdown bot gracefully                         │
-└─────────────────────────────────────────────────────────────────────┘
-"""
-    print(help_text)
+    print("\nCommands:")
+    print("  help                   show this help")
+    print("  status                 bot status")
+    print("  version                current version")
+    for name, info in sorted(bot.console_commands.items()):
+        print(f"  {name:<22} {info['description']}")
+    print("  exit / quit            shutdown gracefully\n")
 
 def show_status():
-    print("\n┌─────────────────────────────────────────────────────────────────────┐")
-    print(f"│ Bot Status - v{bot.version if hasattr(bot, 'version') else '0.0.0.0':<43} │")
-    print("├─────────────────────────────────────────────────────────────────────┤")
-
-    if bot.user:
-        print(f"│ Logged in as: {bot.user.name:<45} │")
-        print(f"│ User ID: {bot.user.id:<49} │")
-
-    if bot.guilds:
-        print(f"│ Servers: {len(bot.guilds):<50} │")
-        for guild in list(bot.guilds)[:3]:
-            guild_name = guild.name[:45] + "..." if len(guild.name) > 45 else guild.name
-            print(f"│   • {guild_name:<47} │")
-        if len(bot.guilds) > 3:
-            print(f"│   ... and {len(bot.guilds) - 3} more{' ' * (40 - len(str(len(bot.guilds) - 3)))}│")
-
+    ver = bot.version if hasattr(bot, 'version') else "0.0.0.0"
     latency = getattr(bot, 'latency', 0) * 1000
-    print(f"│ Latency: {latency:.0f}ms{' ' * (48 - len(f'{latency:.0f}ms'))} │")
-
-    module_count = len(getattr(bot, '_module_commands', {}))
-    print(f"│ Loaded modules: {module_count}{' ' * (45 - len(str(module_count)))} │")
-
-    mode = "PRODUCTION"
-    print(f"│ Mode: {mode:<47} │")
-
-    print(f"│ Console commands: {len(bot.console_commands)}{' ' * (42 - len(str(len(bot.console_commands))))} │")
-
+    print(f"\nEmbot v{ver}  |  {latency:.0f}ms latency")
+    if bot.user:
+        print(f"User:     {bot.user} ({bot.user.id})")
+    for g in bot.guilds:
+        print(f"Guild:    {g.name} ({g.member_count} members)")
+    print(f"Modules:  {len(getattr(bot, '_module_commands', {}))}")
     if hasattr(bot.logger, 'log_file'):
-        log_file_name = bot.logger.log_file.name
-        print(f"│ Log file: {log_file_name:<46} │")
-
-    print("└─────────────────────────────────────────────────────────────────────┘\n")
+        print(f"Log:      {bot.logger.log_file.name}")
+    print()
 
 def show_version():
     version = bot.version if hasattr(bot, 'version') else "0.0.0.0"
@@ -580,101 +550,116 @@ def show_version():
     print()
 
 def setup_console_commands():
-    async def handle_reload(args):
-        if not args.strip():
-            print("Usage: reload <module_name>")
-            return
-
-        module_name = args.strip()
-        file_path = Path(__file__).parent / "modules"/ f"{module_name}.py"
-        if not file_path.exists():
-            print(f"Module '{module_name}.py' not found in modules/")
-            return
-
-        print(f"Reloading {module_name}...")
-        try:
-            existing_commands = {}
-            if hasattr(bot, '_module_commands'):
-                existing_commands = bot._module_commands.get(module_name, {})
-            else:
-                bot._module_commands = {}
-
-            removed_count = 0
-            if existing_commands:
-                for cmd_name in list(existing_commands.keys()):
-                    try:
-                        bot.tree.remove_command(cmd_name)
-                        removed_count += 1
-                    except Exception:
-                        pass
-                print(f" Removed {removed_count} existing command(s)")
-
-            if module_name in sys.modules:
-                module = importlib.reload(sys.modules[module_name])
-            else:
-                module = importlib.import_module(module_name)
-
-            if hasattr(module, 'setup'):
-                commands_before = {cmd.name: cmd for cmd in bot.tree.get_commands()}
-
-                module.setup(bot)
-
-                commands_after = {cmd.name: cmd for cmd in bot.tree.get_commands()}
-                new_commands = {name: cmd for name, cmd in commands_after.items() if name not in commands_before}
-                bot._module_commands[module_name] = new_commands
-
-                if new_commands:
-                    print(f" Registered {len(new_commands)} command(s): {', '.join(new_commands.keys())}")
-
-                print(f"Module '{module_name}' reloaded successfully (commands updated, no sync needed)")
-            else:
-                print(f"Module '{module_name}' reloaded (no setup function)")
-
-        except Exception as e:
-            print(f"Failed to reload {module_name}: {e}")
-            import traceback
-            traceback.print_exc()
-
     async def handle_modules(args):
-        bot_modules = []
-        _modules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "modules")
-        for name, module in list(sys.modules.items()):
-            if (hasattr(module, '__file__') and
-                module.__file__ and
-                'site-packages' not in module.__file__ and
-                _modules_path in module.__file__ and
-                name not in ['main', '__main__', 'Embot']):
-                bot_modules.append(name)
-
-        print(f"\n Loaded Modules ({len(bot_modules)}):")
-        for module in sorted(bot_modules):
-            print(f" • {module}")
+        if not hasattr(bot.logger, 'log_file') or not bot.logger.log_file.exists():
+            print("No log file available.")
+            return
+        loaded, failed = [], []
+        with open(bot.logger.log_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                m = re.search(r'Loaded module: (\S+)', line)
+                if m:
+                    loaded.append(m.group(1))
+                m = re.search(r'Failed to load module: (\S+)', line)
+                if m and m.group(1) not in loaded:
+                    failed.append(m.group(1))
+        print(f"\nLoaded ({len(loaded)}):")
+        for mod in loaded:
+            print(f"  + {mod}")
+        if failed:
+            print(f"Failed ({len(failed)}):")
+            for mod in failed:
+                print(f"  - {mod}")
         print()
 
-    async def handle_logs(args):
-        if hasattr(bot.logger, 'log_file') and bot.logger.log_file.exists():
-            file_size = bot.logger.log_file.stat().st_size
-            session_count = bot.logger._count_sessions(bot.logger.log_file)
-            print(f"\n Day log: {bot.logger.log_file.name}")
-            print(f"  Sessions today: {session_count} (current: #{bot.logger.session_number})")
-            print(f"  Size: {file_size:,} bytes")
-            print(f"  Location: {bot.logger.log_file}")
-
-            log_files = list(data_dir.glob("session_*.log"))
-            if len(log_files) > 1:
-                print(f"\n Other log files in {data_dir}:")
-                for log_file in sorted(log_files, key=lambda x: x.stat().st_mtime, reverse=True)[:5]:
-                    if log_file != bot.logger.log_file:
-                        size = log_file.stat().st_size
-                        mtime = datetime.fromtimestamp(log_file.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-                        print(f"  • {log_file.name} ({size:,} bytes, {mtime})")
+    async def handle_update(args):
+        print("Checking for updates...")
+        if not _ensure_git_for_update(bot, bot.logger):
+            print("Git not available.")
+            return
+        updated = await _check_for_update(bot)
+        if updated:
+            print("Update pulled. Restarting...")
+            await _restart_async(bot)
         else:
-            print("No log file found")
-        print()
+            print("Already up to date.")
 
-    register_console_command("reload", "Reload a specific module", handle_reload)
-    register_console_command("modules", "List loaded modules", handle_modules)
-    register_console_command("logs", "Show log file information", handle_logs)
+    async def handle_restart(args):
+        print("Restarting...")
+        await asyncio.sleep(0.5)
+        await bot.close()
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    async def handle_exec(args):
+        if not args.strip():
+            print("Usage: exec <command>")
+            return
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                cwd=str(script_dir),
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+            out = stdout.decode(errors='replace').strip()
+            err = stderr.decode(errors='replace').strip()
+            if out: print(out)
+            if err: print(err)
+            if not out and not err: print(f"(exit {proc.returncode})")
+        except asyncio.TimeoutError:
+            print("Timed out after 60s.")
+        except Exception as e:
+            print(f"Error: {e}")
+
+    async def handle_config(args):
+        name = args.strip()
+        if not name:
+            print("Usage: config <name>")
+            return
+        if name.lower() in ('auth', 'token'):
+            print("Access denied.")
+            return
+        cfg_path = script_dir / 'config' / f'{name}.json'
+        if not cfg_path.exists():
+            print(f"Config '{name}.json' not found.")
+            return
+        try:
+            with open(cfg_path, 'r', encoding='utf-8') as f:
+                print(json.dumps(json.load(f), indent=2))
+        except Exception as e:
+            print(f"Error: {e}")
+
+    async def handle_log_search(args):
+        if not args.strip():
+            print("Usage: log-search <pattern>")
+            return
+        try:
+            pattern = re.compile(args.strip(), re.IGNORECASE)
+        except re.error as e:
+            print(f"Invalid regex: {e}")
+            return
+        log_files = sorted(data_dir.glob('session_*.log'), key=lambda x: x.stat().st_mtime, reverse=True)
+        matches = 0
+        for fp in log_files:
+            try:
+                with open(fp, 'r', encoding='utf-8') as f:
+                    for i, line in enumerate(f, 1):
+                        if pattern.search(line):
+                            print(f"{fp.name}:{i}: {line.rstrip()}")
+                            matches += 1
+                            if matches >= 200:
+                                print("(limit 200 reached)")
+                                return
+            except Exception:
+                continue
+        if not matches:
+            print("No matches.")
+
+    register_console_command("modules",    "List loaded/failed bot modules", handle_modules)
+    register_console_command("update",     "Git pull + restart if updated",  handle_update)
+    register_console_command("restart",    "Restart the bot",                handle_restart)
+    register_console_command("exec",       "Run a shell command",            handle_exec)
+    register_console_command("config",     "View a config file",             handle_config)
+    register_console_command("log-search", "Regex search across log files",  handle_log_search)
 
 @bot.event
 async def on_error(event, *args, **kwargs):

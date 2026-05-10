@@ -579,22 +579,101 @@ def get_config_data(name):
     except Exception as e:
         return None, str(e)
 
-def search_logs(pattern_str, max_results=200):
-    """Returns (matches, truncated). matches is list of {'file', 'line', 'content'}. Raises re.error on bad pattern."""
-    pattern = re.compile(pattern_str, re.IGNORECASE)
-    log_files = sorted(data_dir.glob('session_*.log'), key=lambda x: x.stat().st_mtime, reverse=True)
-    matches = []
-    for fp in log_files:
+def get_logs_data(*, tail=None, file=None, session=None, list_files=False, search=None, search_max=200):
+    """Unified log access. Returns a dict with one of: 'files', 'matches', 'lines', or 'error'."""
+    if list_files:
+        if not data_dir.exists():
+            return {'files': []}
+        files = []
+        for fp in sorted(data_dir.glob('session_*.log'), key=lambda x: x.stat().st_mtime, reverse=True):
+            sc = 0
+            try:
+                with open(fp, 'r', encoding='utf-8') as f:
+                    sc = sum(1 for l in f if l.startswith('--- Session'))
+            except Exception:
+                pass
+            files.append({'name': fp.name, 'size': fp.stat().st_size, 'sessions': sc})
+        return {'files': files}
+
+    if search is not None:
+        pattern = re.compile(search, re.IGNORECASE)
+        limit = tail if tail else search_max
+        matches = []
+        for fp in sorted(data_dir.glob('session_*.log'), key=lambda x: x.stat().st_mtime, reverse=True):
+            try:
+                with open(fp, 'r', encoding='utf-8') as f:
+                    for i, line in enumerate(f, 1):
+                        if pattern.search(line):
+                            matches.append({'file': fp.name, 'line': i, 'content': line.rstrip()})
+                            if len(matches) >= limit:
+                                return {'matches': matches, 'truncated': True, 'query': search}
+            except Exception:
+                continue
+        return {'matches': matches, 'truncated': False, 'query': search}
+
+    if file:
+        if not re.match(r'^session_\d{8}(?:_\d{6})?\.log$', file):
+            return {'error': 'invalid log name'}
+        log_path = data_dir / file
+    else:
+        if not hasattr(bot.logger, 'log_file') or not bot.logger.log_file.exists():
+            return {'error': 'no log file'}
+        log_path = bot.logger.log_file
+
+    if not log_path.exists():
+        return {'error': 'log file not found'}
+
+    with open(log_path, 'r', encoding='utf-8') as f:
+        all_lines = f.readlines()
+
+    n = tail or 200
+    if session and session != 'all':
         try:
-            with open(fp, 'r', encoding='utf-8') as f:
-                for i, line in enumerate(f, 1):
-                    if pattern.search(line):
-                        matches.append({'file': fp.name, 'line': i, 'content': line.rstrip()})
-                        if len(matches) >= max_results:
-                            return matches, True
-        except Exception:
-            continue
-    return matches, False
+            snum = int(session)
+        except ValueError:
+            return {'error': "session must be a number or 'all'"}
+        start, end = None, None
+        hre = re.compile(r'^--- Session (\d+) ')
+        for i, line in enumerate(all_lines):
+            m = hre.match(line)
+            if m:
+                if int(m.group(1)) == snum:
+                    start = i
+                elif start is not None:
+                    end = i
+                    break
+        if start is None:
+            return {'error': f'session {snum} not found'}
+        out = all_lines[start:end]
+        if tail and tail < len(out):
+            out = out[-tail:]
+    else:
+        out = all_lines if session == 'all' else all_lines[-n:]
+
+    return {'lines': ''.join(out)}
+
+
+def run_db_query(db_name, sql):
+    """Returns (rows, error). rows is list of dicts. Raises nothing."""
+    import sqlite3 as _sqlite3
+    if not re.match(r'^[a-zA-Z0-9_\-]+$', db_name):
+        return None, 'invalid db name'
+    db_path = script_dir / 'db' / f'{db_name}.db'
+    if not db_path.exists():
+        return None, f"db '{db_name}' not found"
+    q = sql.strip().upper()
+    if not (q.startswith('SELECT') or q.startswith('PRAGMA') or q.startswith('EXPLAIN')):
+        return None, 'only SELECT / PRAGMA / EXPLAIN allowed'
+    try:
+        conn = _sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+        conn.row_factory = _sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(sql)
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows, None
+    except Exception as e:
+        return None, str(e)
 
 async def run_exec(cmd, timeout=60):
     """Returns (stdout, stderr, exit_code) or raises TimeoutError."""
@@ -665,28 +744,77 @@ def setup_console_commands():
         else:
             print(json.dumps(data, indent=2))
 
-    async def handle_log_search(args):
-        if not args.strip():
-            print("Usage: log-search <pattern>")
-            return
+    async def handle_logs(args):
+        import shlex
+        kwargs = {'tail': None, 'file': None, 'session': None, 'list_files': False, 'search': None}
         try:
-            matches, truncated = search_logs(args.strip())
+            parts = shlex.split(args)
+        except ValueError:
+            parts = args.split()
+        i = 0
+        while i < len(parts):
+            p = parts[i]
+            if p == '--list':
+                kwargs['list_files'] = True
+            elif p == '--tail' and i + 1 < len(parts):
+                try:
+                    kwargs['tail'] = int(parts[i + 1])
+                except ValueError:
+                    print(f"Invalid --tail value: {parts[i+1]}")
+                    return
+                i += 1
+            elif p == '--file' and i + 1 < len(parts):
+                kwargs['file'] = parts[i + 1]; i += 1
+            elif p == '--session' and i + 1 < len(parts):
+                kwargs['session'] = parts[i + 1]; i += 1
+            elif p == '--search' and i + 1 < len(parts):
+                kwargs['search'] = ' '.join(parts[i + 1:]); break
+            else:
+                print(f"Usage: logs [--tail N] [--file NAME] [--session ID] [--list] [--search PATTERN]")
+                return
+            i += 1
+        try:
+            data = get_logs_data(**kwargs)
         except re.error as e:
-            print(f"Invalid regex: {e}")
-            return
-        for m in matches:
-            print(f"{m['file']}:{m['line']}: {m['content']}")
-        if truncated:
-            print("(limit 200 reached)")
-        if not matches:
-            print("No matches.")
+            print(f"Invalid regex: {e}"); return
+        if data.get('error'):
+            print(data['error']); return
+        if 'files' in data:
+            for f in data['files']:
+                print(f"  {f['name']}  {f['size']:,}b  {f['sessions']} sessions")
+            if not data['files']:
+                print("No log files.")
+        elif 'matches' in data:
+            for m in data['matches']:
+                print(f"{m['file']}:{m['line']}: {m['content']}")
+            if data['truncated']:
+                print(f"(limit {len(data['matches'])} reached)")
+            if not data['matches']:
+                print("No matches.")
+        elif 'lines' in data:
+            print(data['lines'].rstrip())
 
-    register_console_command("modules",    "List loaded/failed bot modules", handle_modules)
-    register_console_command("update",     "Git pull + restart if updated",  handle_update)
-    register_console_command("restart",    "Restart the bot",                handle_restart)
-    register_console_command("exec",       "Run a shell command",            handle_exec)
-    register_console_command("config",     "View a config file",             handle_config)
-    register_console_command("log-search", "Regex search across log files",  handle_log_search)
+    async def handle_db_query(args):
+        parts = args.split(maxsplit=1)
+        if len(parts) < 2:
+            print("Usage: db-query <name> <sql>"); return
+        rows, err = run_db_query(parts[0], parts[1])
+        if err:
+            print(err); return
+        if not rows:
+            print("(empty)")
+        else:
+            for row in rows:
+                print(json.dumps(row, default=str))
+            print(f"({len(rows)} rows)")
+
+    register_console_command("modules",  "List loaded/failed bot modules",                    handle_modules)
+    register_console_command("update",   "Git pull + restart if updated",                     handle_update)
+    register_console_command("restart",  "Restart the bot",                                   handle_restart)
+    register_console_command("exec",     "Run a shell command",                               handle_exec)
+    register_console_command("config",   "View a config file",                                handle_config)
+    register_console_command("logs",     "View/search logs. See: logs --help",               handle_logs)
+    register_console_command("db-query", "db-query <name> <sql>  Read-only DB query",        handle_db_query)
 
 @bot.event
 async def on_error(event, *args, **kwargs):

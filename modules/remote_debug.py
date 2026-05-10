@@ -118,7 +118,7 @@ class RemoteDebugServer:
         self._app.router.add_get("/logs/list", self._handle_logs_list)
         self._app.router.add_get("/logs/search", self._handle_logs_search)
         self._app.router.add_get("/logs/{name}", self._handle_logs_file)
-        self._app.router.add_get("/logs/stream", self._handle_logs_stream)
+
         self._app.router.add_get("/db/{name}", self._handle_db_download)
         self._app.router.add_get("/db/{name}/query", self._handle_db_query)
         self._app.router.add_get("/config/{name}", self._handle_config)
@@ -203,26 +203,9 @@ class RemoteDebugServer:
     async def _handle_logs_list(self, request):
         if not self._check_auth(request) or not self._check_ip(request):
             return self._fail()
-        logs_dir = self._logs_dir()
-        if not logs_dir.exists():
-            return web.json_response([], status=200)
-        files = []
-        for fp in sorted(logs_dir.glob("session_*.log"), key=lambda x: x.stat().st_mtime, reverse=True):
-            session_count = 0
-            try:
-                with open(fp, "r", encoding="utf-8") as f:
-                    for line in f:
-                        if line.startswith("--- Session"):
-                            session_count += 1
-            except Exception:
-                pass
-            files.append({
-                "name": fp.name,
-                "size": fp.stat().st_size,
-                "mtime": datetime.fromtimestamp(fp.stat().st_mtime).isoformat(),
-                "sessions": session_count,
-            })
-        return web.json_response(files)
+        import __main__
+        data = __main__.get_logs_data(list_files=True)
+        return web.json_response(data['files'])
 
     async def _handle_logs_search(self, request):
         if not self._check_auth(request) or not self._check_ip(request):
@@ -231,52 +214,19 @@ class RemoteDebugServer:
         if not query:
             return self._fail("missing query parameter 'q'", 400)
         try:
-            pattern = re.compile(query, re.IGNORECASE)
-        except re.error as e:
-            return self._fail(f"invalid regex: {e}", 400)
-        try:
             max_results = min(int(request.query.get("max", "100")), 500)
         except ValueError:
             max_results = 100
+        import __main__
         try:
-            max_files = int(request.query.get("files", "0") or "0")
-        except ValueError:
-            max_files = 0
-
-        logs_dir = self._logs_dir()
-        if not logs_dir.exists():
-            return web.json_response({"matches": [], "files_searched": 0})
-
-        log_files = sorted(logs_dir.glob("session_*.log"), key=lambda x: x.stat().st_mtime, reverse=True)
-        if max_files > 0:
-            log_files = log_files[:max_files]
-
-        matches = []
-        files_searched = 0
-        for fp in log_files:
-            files_searched += 1
-            try:
-                with open(fp, "r", encoding="utf-8") as f:
-                    for i, line in enumerate(f, 1):
-                        if pattern.search(line):
-                            matches.append({
-                                "file": fp.name,
-                                "line": i,
-                                "content": line.rstrip("\n"),
-                            })
-                            if len(matches) >= max_results:
-                                break
-                if len(matches) >= max_results:
-                    break
-            except Exception:
-                continue
-
+            data = __main__.get_logs_data(search=query, search_max=max_results)
+        except re.error as e:
+            return self._fail(f"invalid regex: {e}", 400)
         return web.json_response({
-            "query": query,
-            "matches": matches,
-            "total_matches": len(matches),
-            "files_searched": files_searched,
-            "truncated": len(matches) >= max_results,
+            "query": data["query"],
+            "matches": data["matches"],
+            "total_matches": len(data["matches"]),
+            "truncated": data["truncated"],
         })
 
     async def _handle_logs_file(self, request):
@@ -353,41 +303,6 @@ class RemoteDebugServer:
             content_type="text/plain",
         )
 
-    async def _handle_logs_stream(self, request):
-        if not self._check_auth(request) or not self._check_ip(request):
-            return self._fail()
-        if not hasattr(self.bot.logger, "log_file") or not self.bot.logger.log_file.exists():
-            return web.json_response({"error": "no log file"}, status=404)
-        log_path = self.bot.logger.log_file
-
-        response = web.StreamResponse()
-        response.content_type = "text/event-stream"
-        response.headers["Cache-Control"] = "no-cache"
-        response.headers["Connection"] = "keep-alive"
-        response.headers["X-Accel-Buffering"] = "no"
-        await response.prepare(request)
-
-        last_size = log_path.stat().st_size if log_path.exists() else 0
-        try:
-            while request.transport is not None and not request.transport.is_closing():
-                if log_path.exists():
-                    current_size = log_path.stat().st_size
-                    if current_size > last_size:
-                        with open(log_path, "r", encoding="utf-8") as f:
-                            f.seek(last_size)
-                            new_data = f.read()
-                        for line in new_data.split("\n"):
-                            if line.strip():
-                                try:
-                                    await response.write(f"data: {line}\n\n".encode("utf-8"))
-                                except ConnectionResetError:
-                                    return response
-                        last_size = current_size
-                await asyncio.sleep(0.5)
-        except (ConnectionResetError, ConnectionAbortedError):
-            pass
-        return response
-
     async def _handle_db_download(self, request):
         if not self._check_auth(request) or not self._check_ip(request):
             return self._fail()
@@ -405,25 +320,15 @@ class RemoteDebugServer:
         name = request.match_info["name"]
         if not self._sanitize_name(name):
             return self._fail("invalid db name", 400)
-        db_path = script_dir() / "db" / f"{name}.db"
-        if not db_path.exists():
-            return web.json_response({"error": "db not found"}, status=404)
         query = request.query.get("q", "")
         if not query:
             return self._fail("missing query parameter 'q'", 400)
-        q_upper = query.strip().upper()
-        if not (q_upper.startswith("SELECT") or q_upper.startswith("PRAGMA") or q_upper.startswith("EXPLAIN")):
-            return self._fail("only SELECT / PRAGMA / EXPLAIN queries allowed", 403)
-        try:
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            cur.execute(query)
-            rows = [dict(row) for row in cur.fetchall()]
-            conn.close()
-            return web.json_response({"rows": rows, "count": len(rows)})
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+        import __main__
+        rows, err = __main__.run_db_query(name, query)
+        if err:
+            status = 404 if "not found" in err else 403 if "only SELECT" in err or "invalid" in err else 500
+            return web.json_response({"error": err}, status=status)
+        return web.json_response({"rows": rows, "count": len(rows)})
 
     async def _handle_config(self, request):
         if not self._check_auth(request) or not self._check_ip(request):
@@ -524,7 +429,7 @@ class ClaudeBridgeListener:
     # commands that return file artifacts committed to the repo
     FILE_COMMANDS = {"logs", "logs-list", "logs-search", "config", "db-query"}
     # commands blocked entirely
-    BLOCKED = {"db-download", "stream"}
+    BLOCKED = {"db-download"}
 
     def __init__(self, bot, server: "RemoteDebugServer", bridge_cfg: dict):
         self.bot = bot
@@ -631,88 +536,56 @@ class ClaudeBridgeListener:
             ], indent=2)
 
         elif command == "modules":
-            mods = []
-            if hasattr(self.bot.logger, "log_file") and self.bot.logger.log_file.exists():
-                with open(self.bot.logger.log_file, "r", encoding="utf-8") as f:
-                    for line in f:
-                        m = re.search(r"Loaded module: (\S+)", line)
-                        if m:
-                            mods.append(m.group(1))
-            output = json.dumps(mods, indent=2)
+            import __main__
+            data = __main__.get_modules_data()
+            output = json.dumps(data or {}, indent=2)
 
         elif command == "logs":
-            if not hasattr(self.bot.logger, "log_file") or not self.bot.logger.log_file.exists():
-                return "no log file", {}
+            import __main__
             lines = int(args[0]) if args else 200
-            with open(self.bot.logger.log_file, "r", encoding="utf-8") as f:
-                all_lines = f.readlines()
-            content = "".join(all_lines[-lines:])
+            data = __main__.get_logs_data(tail=lines)
+            if data.get('error'):
+                return data['error'], {}
+            content = data['lines']
             artifacts["logs/current.log"] = content
-            output = f"log committed ({min(lines, len(all_lines))} lines)"
+            output = f"log committed ({len(content.splitlines())} lines)"
 
         elif command == "logs-list":
-            logs_dir = script_dir() / "logs"
-            files = []
-            if logs_dir.exists():
-                for fp in sorted(logs_dir.glob("session_*.log"), key=lambda x: x.stat().st_mtime, reverse=True):
-                    sc = sum(1 for l in open(fp, encoding="utf-8") if l.startswith("--- Session"))
-                    files.append({"name": fp.name, "size": fp.stat().st_size, "sessions": sc})
-            artifacts["logs/list.json"] = files
-            output = f"{len(files)} log files"
+            import __main__
+            data = __main__.get_logs_data(list_files=True)
+            artifacts["logs/list.json"] = data['files']
+            output = f"{len(data['files'])} log files"
 
         elif command == "logs-search":
             if not args:
                 return "missing search pattern", {}
-            pattern = args[0]
+            import __main__
             max_r = int(args[1]) if len(args) > 1 else 100
             try:
-                rx = re.compile(pattern, re.IGNORECASE)
+                data = __main__.get_logs_data(search=args[0], search_max=max_r)
             except re.error as e:
                 return f"invalid regex: {e}", {}
-            logs_dir = script_dir() / "logs"
-            matches = []
-            for fp in sorted(logs_dir.glob("session_*.log"), key=lambda x: x.stat().st_mtime, reverse=True):
-                with open(fp, encoding="utf-8") as f:
-                    for i, line in enumerate(f, 1):
-                        if rx.search(line):
-                            matches.append({"file": fp.name, "line": i, "content": line.rstrip("\n")})
-                            if len(matches) >= max_r:
-                                break
-                if len(matches) >= max_r:
-                    break
-            artifacts["logs/search.json"] = {"pattern": pattern, "matches": matches}
-            output = f"{len(matches)} match(es)"
+            artifacts["logs/search.json"] = {"pattern": args[0], "matches": data["matches"]}
+            output = f"{len(data['matches'])} match(es)"
 
         elif command == "config":
             name = args[0] if args else ""
-            if not name or name.lower() in ("auth", "token"):
-                return "blocked or missing config name", {}
-            cfg_path = script_dir() / "config" / f"{name}.json"
-            if not cfg_path.exists():
-                return f"config '{name}' not found", {}
-            with open(cfg_path, encoding="utf-8") as f:
-                data = json.load(f)
-            artifacts[f"config/{name}.json"] = data
+            import __main__
+            cfg_data, err = __main__.get_config_data(name)
+            if err:
+                return err, {}
+            artifacts[f"config/{name}.json"] = cfg_data
             output = f"config/{name}.json committed"
 
         elif command == "db-query":
             if len(args) < 2:
                 return "usage: db-query <name> <sql>", {}
-            name, query = args[0], " ".join(args[1:])
-            db_path = script_dir() / "db" / f"{name}.db"
-            if not db_path.exists():
-                return f"db '{name}' not found", {}
-            q_upper = query.strip().upper()
-            if not (q_upper.startswith("SELECT") or q_upper.startswith("PRAGMA") or q_upper.startswith("EXPLAIN")):
-                return "only SELECT/PRAGMA/EXPLAIN allowed", {}
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            cur.execute(query)
-            rows = [dict(r) for r in cur.fetchall()]
-            conn.close()
-            artifacts[f"db/{name}_query.json"] = {"query": query, "rows": rows, "count": len(rows)}
-            output = f"{len(rows)} row(s) — committed to db/{name}_query.json"
+            import __main__
+            rows, err = __main__.run_db_query(args[0], " ".join(args[1:]))
+            if err:
+                return err, {}
+            artifacts[f"db/{args[0]}_query.json"] = {"query": " ".join(args[1:]), "rows": rows, "count": len(rows)}
+            output = f"{len(rows)} row(s) — committed to db/{args[0]}_query.json"
 
         elif command == "exec":
             cmd_str = " ".join(args) if args else ""
@@ -901,24 +774,6 @@ def _cmd_logs_search(cfg, query, max_results=100, max_files=0):
         print(f"  {m['file']}:{m['line']}  {m['content']}")
 
 
-def _cmd_stream(cfg):
-    url = _client_url(cfg).rstrip("/") + "/logs/stream"
-    req = urllib.request.Request(url)
-    if cfg["token"]:
-        req.add_header("X-Debug-Token", cfg["token"])
-    ctx = ssl._create_unverified_context()
-    try:
-        with urllib.request.urlopen(req, timeout=3600, context=ctx) as resp:
-            for line in resp:
-                line = line.decode(errors="replace").strip()
-                if line.startswith("data: "):
-                    sys.stdout.buffer.write((line[6:] + "\n").encode("utf-8", errors="replace"))
-    except KeyboardInterrupt:
-        print("\nDisconnected.")
-    except Exception as e:
-        print(f"Stream error: {e}")
-        sys.exit(1)
-
 
 def _cmd_db_download(cfg, name):
     data = _client_request(cfg, f"/db/{name}", raw=True)
@@ -1025,7 +880,6 @@ def main():
     sub.add_parser("guilds", help="List guilds with details")
     sub.add_parser("modules", help="List loaded module names")
 
-    sub.add_parser("stream", help="Live log stream (Ctrl+C to stop)")
 
     db_dl = sub.add_parser("db-download", help="Download a database file")
     db_dl.add_argument("name", help="DB name (without .db)")
@@ -1061,8 +915,6 @@ def main():
         _cmd_logs_list(cfg)
     elif args.command == "logs-search":
         _cmd_logs_search(cfg, args.query, args.max, args.files)
-    elif args.command == "stream":
-        _cmd_stream(cfg)
     elif args.command == "db-download":
         _cmd_db_download(cfg, args.name)
     elif args.command == "db-query":

@@ -77,7 +77,7 @@ git clone https://TOKEN@github.com/Emball/EmbotDebug.git /tmp/EmbotDebug
 4. Sleep, pull, check `result.json` seq matches — retry if not
 5. Read `result.json` and/or artifact files
 
-**Sleep times:** `sleep 3` for all commands — `sleep 7` for restart/update.
+**Sleep times:** `sleep 5` for all commands — `sleep 10` for restart/update. Result stays available for 15 seconds before the bot zeroes both files.
 
 ## Code Style
 

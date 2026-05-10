@@ -652,6 +652,8 @@ class ClaudeBridgeListener:
         await asyncio.get_event_loop().run_in_executor(None, _commit)
         self.bot.logger.log(MODULE_NAME, f"[bridge] seq={seq} result committed")
 
+        await asyncio.sleep(15)
+
         def _zero():
             cmd_sha = self._gh_get_sha("cmd.json")
             result_sha2 = self._gh_get_sha("result.json")

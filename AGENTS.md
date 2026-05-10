@@ -40,20 +40,20 @@ Modules are listed in **dependency order** — this is also the required read or
 | Module | Description |
 |---|---|
 | `_utils.py` | `atomic_json_write()`, `migrate_config()`, `script_dir()`, `_now()` — imported by nearly everything |
-| `_messages.py` | Shared message + media cache — text cache, encrypted attachment cache (Fernet), eviction, `cache_message()`, `get_context_messages()`, `get_recent_messages()` — no bot dependency, imported directly by mod_core and vms_playback. Prefixed `_` so the loader skips it (no `setup()` needed). |
-| `mod_core.py` | Moderation core: DB, config, auth helpers, ModContext, ModerationSystem. Provides `is_owner()` (lazy-imported by music_archive, community, links, mod_logger). Owns media cache TTL loop and `on_vm_transcribed` automod listener |
-| `mod_suspicion.py` | Suspicion engine: /fedcheck, /fedflag, /fedclear, /fedscan, /fedinvites. Provides `is_flagged()` (lazy-imported by music_archive) |
+| `_messages.py` | Message + media cache — text cache, encrypted attachment cache (Fernet), eviction. No bot dependency; imported directly by mod_core and vms_playback |
+| `mod_core.py` | Moderation core: DB, config, auth helpers, ModContext, ModerationSystem. Provides `is_owner()`. Owns media cache TTL loop and `on_vm_transcribed` automod listener |
+| `mod_suspicion.py` | Suspicion engine: /fedcheck, /fedflag, /fedclear, /fedscan, /fedinvites. Provides `is_flagged()` |
 | `mod_actions.py` | ban, kick, mute, warn, purge, lock, slowmode |
 | `mod_appeals.py` | Ban appeal views, modal, voting, lifecycle |
 | `mod_oversight.py` | Action review, bot-log monitoring, daily integrity reports, embed tracking |
 | `mod_rules.py` | RulesManager — sync/display server rules |
 | `mod_logger.py` | 17 Discord event types → join-logs/bot-logs |
-| `vms_core.py` | VMS core: transcription queue, commands/listeners, dispatches `vm_transcribed` event. mod_core listens — VMS has no moderation knowledge |
+| `vms_core.py` | VMS core: transcription queue, commands/listeners, dispatches `vm_transcribed`. mod_core listens — VMS has no moderation knowledge |
 | `vms_transcribe.py` | OGG transcription via Whisper, waveform gen, bulk processing |
 | `vms_storage.py` | VM scan/conform, archival, backfill, purge |
 | `vms_playback.py` | VM selection, CDN upload, counters, ping cooldown |
-| `remote_debug.py` | HTTP debug API + Claude bridge (GitHub-based command queue). Bridge timeout is 45s. Artifacts are committed before `result.json` to prevent stale reads on the Claude side. Calls shared logic in `Embot.py` via `import __main__` |
-| `music_archive.py` | Eminem music archive — FLAC/MP3 scan, SQLite index, CDN cache, batch backfill, lazy CDN refresh, SMB-compatible. `song_cache` has a `transcoded` column (1 = file was resampled/bit-depth reduced before upload). `_cache_store` uses `INSERT ... ON CONFLICT DO UPDATE` — do NOT revert to `INSERT OR REPLACE` as it wipes `file_checksum`. `_scan_pending` is DB-lookup only, no SMB reads. `_downsample_flac` does two passes (resample if >48kHz, then 16-bit) with the size check inside the function — pass 2 only runs if pass 1 is still too large. |
+| `remote_debug.py` | HTTP debug API + Claude bridge. Bridge timeout 45s. Artifacts committed before `result.json`. Calls shared logic in `Embot.py` via `import __main__` |
+| `music_archive.py` | Eminem music archive — FLAC/MP3 scan, SQLite index, CDN cache, SMB-compatible. `_cache_store` uses `INSERT ... ON CONFLICT DO UPDATE` — do NOT revert to `INSERT OR REPLACE` (wipes `file_checksum`). `_scan_pending` is DB-lookup only. `_downsample_flac` does two passes (resample if >48kHz, then 16-bit) |
 | `music_player.py` | Voice playback — queue, FFmpeg, YouTube/SoundCloud, vote-skip |
 | `community.py` | Submission tracking (#projects/#artwork), voting, Spotlight Friday, SQLite |
 | `starboard.py` | Dyno-style starboard, config-driven |

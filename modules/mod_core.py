@@ -1386,16 +1386,6 @@ def setup(bot):
             await interaction.followup.send(
                 "Rules embed is already up to date.", ephemeral=True)
 
-    @bot.tree.command(name="restart",
-                      description="[Owner only] Restart the bot process")
-    async def slash_restart(interaction: discord.Interaction):
-        if not has_owner_role(interaction.user, mod_system.cfg):
-            await interaction.response.send_message(ERROR_NO_PERMISSION, ephemeral=True)
-            return
-        await interaction.response.send_message("Restarting...", ephemeral=True)
-        await asyncio.sleep(1)
-        os.execv(sys.executable, [sys.executable] + sys.argv)
-
     _setup_suspicion(bot, mod_system, mod_system.cfg)
 
     # media cache TTL cleanup

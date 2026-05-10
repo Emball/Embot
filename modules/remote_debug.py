@@ -1069,7 +1069,10 @@ def main():
     elif args.command == "restart":
         _cmd_restart(cfg)
     elif args.command == "bridge":
-        bridge_cfg = cfg.get("claude_bridge", {})
+        bridge_cfg = cfg.get("claude_bridge", {}).copy()
+        env_token = os.environ.get("EMBOT_BRIDGE_TOKEN", "")
+        if env_token:
+            bridge_cfg["token"] = env_token
         _cmd_bridge(bridge_cfg, args.bridge_command, args.bridge_args, args.timeout)
 
 

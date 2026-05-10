@@ -67,9 +67,15 @@ GitHub-based command queue via private `Emball/EmbotDebug` repo. The bot polls `
 **Startup behaviour:** On bridge start, the bot zeroes out both `cmd.json` and `result.json` (seq → 0). This clears any stale command left over from a previous session or mid-cycle restart, preventing it from being re-executed.
 
 **Claude's workflow per session:**
+
+First, set the bridge token as an env var (user provides this at session start):
 ```bash
-# One-liner — send command, wait, print result automatically
-uv run python modules/remote_debug.py bridge <command> [args...]
+export EMBOT_BRIDGE_TOKEN=ghp_...
+```
+
+Then use the one-liner for every command:
+```bash
+python modules/remote_debug.py bridge <command> [args...]
 
 # Examples
 uv run python modules/remote_debug.py bridge status

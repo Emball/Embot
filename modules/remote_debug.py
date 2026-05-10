@@ -26,6 +26,12 @@ RD_CONFIG_DEFAULTS = {
     "port": 8765,
     "token": "",
     "allowed_ips": [],
+    "claude_bridge": {
+        "enabled": False,
+        "repo": "Emball/EmbotDebug",
+        "token": "",
+        "poll_interval": 2.0,
+    },
 }
 
 
@@ -100,6 +106,7 @@ class RemoteDebugServer:
         self._app = web.Application()
         self._runner = None
         self._start_time: float = 0.0
+        self._bridge = None
         self._setup_routes()
 
     def _setup_routes(self):
@@ -507,26 +514,302 @@ class RemoteDebugServer:
 
     async def start(self):
         self._start_time = time.time()
-        if not self._config.get("server", False):
+        if self._config.get("server", False):
+            host = self._config.get("host", "0.0.0.0")
+            port = self._config.get("port", 8765)
+            self._runner = web.AppRunner(self._app)
+            await self._runner.setup()
+            site = web.TCPSite(self._runner, host, port)
+            await site.start()
+            lan_ip = _detect_lan_ip()
+            self.bot.logger.log(MODULE_NAME, f"Remote debug API online at http://{lan_ip}:{port}")
+            self.bot.logger.log(MODULE_NAME, f"Auth token: {self._config['token']}")
+        else:
             self.bot.logger.log(MODULE_NAME, "Server mode disabled in config")
-            return
-        host = self._config.get("host", "0.0.0.0")
-        port = self._config.get("port", 8765)
-        self._runner = web.AppRunner(self._app)
-        await self._runner.setup()
-        site = web.TCPSite(self._runner, host, port)
-        await site.start()
 
-        lan_ip = _detect_lan_ip()
-        self.bot.logger.log(MODULE_NAME,
-            f"Remote debug API online at http://{lan_ip}:{port}")
-        self.bot.logger.log(MODULE_NAME,
-            f"Auth token: {self._config['token']}")
+        bridge_cfg = self._config.get("claude_bridge", {})
+        if bridge_cfg.get("enabled") and bridge_cfg.get("token"):
+            self._bridge = ClaudeBridgeListener(self.bot, self, bridge_cfg)
+            await self._bridge.start()
+        else:
+            self._bridge = None
 
     async def stop(self):
         if self._runner:
             await self._runner.cleanup()
             self.bot.logger.log(MODULE_NAME, "HTTP debug server stopped")
+        if self._bridge:
+            await self._bridge.stop()
+
+
+class ClaudeBridgeListener:
+    """Polls EmbotDebug repo for commands, executes via RemoteDebugServer, commits results back."""
+
+    # commands that return file artifacts committed to the repo
+    FILE_COMMANDS = {"logs", "logs-list", "logs-search", "config", "db-query"}
+    # commands blocked entirely
+    BLOCKED = {"db-download", "stream"}
+
+    def __init__(self, bot, server: "RemoteDebugServer", bridge_cfg: dict):
+        self.bot = bot
+        self.server = server
+        self._cfg = bridge_cfg
+        self._repo = bridge_cfg.get("repo", "Emball/EmbotDebug")
+        self._token = bridge_cfg.get("token", "")
+        self._interval = float(bridge_cfg.get("poll_interval", 2.0))
+        self._last_seq = None
+        self._task = None
+
+    def _gh_request(self, path, method="GET", body=None):
+        url = f"https://api.github.com/repos/{self._repo}/contents/{path}"
+        req = urllib.request.Request(url, method=method)
+        req.add_header("Authorization", f"token {self._token}")
+        req.add_header("Accept", "application/vnd.github.v3+json")
+        if body:
+            req.add_header("Content-Type", "application/json")
+            req.data = json.dumps(body).encode()
+        import ssl as _ssl
+        ctx = _ssl._create_unverified_context()
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+            return json.loads(r.read())
+
+    def _gh_get_file(self, path):
+        import base64
+        data = self._gh_request(path)
+        content = json.loads(base64.b64decode(data["content"]).decode())
+        return content, data["sha"]
+
+    def _gh_put_file(self, path, content, sha, message):
+        import base64
+        if isinstance(content, (dict, list)):
+            raw = json.dumps(content, indent=2) + "\n"
+        else:
+            raw = str(content)
+        body = {
+            "message": message,
+            "content": base64.b64encode(raw.encode()).decode(),
+            "sha": sha,
+        }
+        self._gh_request(path, method="PUT", body=body)
+
+    def _gh_put_binary(self, path, data: bytes, sha, message):
+        import base64
+        body = {
+            "message": message,
+            "content": base64.b64encode(data).decode(),
+            "sha": sha,
+        }
+        self._gh_request(path, method="PUT", body=body)
+
+    def _gh_get_sha(self, path):
+        try:
+            data = self._gh_request(path)
+            return data["sha"]
+        except Exception:
+            return None
+
+    async def _poll(self):
+        while True:
+            try:
+                cmd, _ = await asyncio.get_event_loop().run_in_executor(
+                    None, self._gh_get_file, "cmd.json"
+                )
+                seq = cmd.get("seq", 0)
+                if seq != 0 and seq != self._last_seq:
+                    command = cmd.get("command", "")
+                    args = cmd.get("args", [])
+                    self.bot.logger.log(MODULE_NAME, f"[bridge] seq={seq} cmd={command} args={args}")
+                    output, artifacts = await self._execute(command, args)
+                    await self._write_results(seq, command, output, artifacts)
+                    self._last_seq = seq
+            except Exception as e:
+                self.bot.logger.error(MODULE_NAME, f"[bridge] poll error", e)
+            await asyncio.sleep(self._interval)
+
+    async def _execute(self, command, args):
+        """Route command to server handler, return (output_str, artifacts_dict)."""
+        if command in self.BLOCKED:
+            return f"command '{command}' not available via claude bridge", {}
+        artifacts = {}
+
+        if command == "ping":
+            output = json.dumps({"ok": True, "time": datetime.now().isoformat()})
+
+        elif command == "status":
+            uptime = int(time.time() - self.server._start_time) if self.server._start_time else 0
+            guilds = list(self.bot.guilds)
+            output = json.dumps({
+                "version": getattr(self.bot, "version", "unknown"),
+                "latency": round(getattr(self.bot, "latency", 0) * 1000, 1),
+                "guilds": len(guilds),
+                "uptime_seconds": uptime,
+                "user": str(self.bot.user) if self.bot.user else None,
+                "log_file": str(self.bot.logger.log_file.name) if getattr(self.bot.logger, "log_file", None) else None,
+            }, indent=2)
+
+        elif command == "guilds":
+            output = json.dumps([
+                {"id": g.id, "name": g.name, "members": g.member_count,
+                 "channels": len(g.channels), "roles": len(g.roles)}
+                for g in self.bot.guilds
+            ], indent=2)
+
+        elif command == "modules":
+            mods = []
+            if hasattr(self.bot.logger, "log_file") and self.bot.logger.log_file.exists():
+                with open(self.bot.logger.log_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        m = re.search(r"Loaded module: (\S+)", line)
+                        if m:
+                            mods.append(m.group(1))
+            output = json.dumps(mods, indent=2)
+
+        elif command == "logs":
+            if not hasattr(self.bot.logger, "log_file") or not self.bot.logger.log_file.exists():
+                return "no log file", {}
+            lines = int(args[0]) if args else 200
+            with open(self.bot.logger.log_file, "r", encoding="utf-8") as f:
+                all_lines = f.readlines()
+            content = "".join(all_lines[-lines:])
+            artifacts["logs/current.log"] = content
+            output = f"log committed ({min(lines, len(all_lines))} lines)"
+
+        elif command == "logs-list":
+            logs_dir = script_dir() / "logs"
+            files = []
+            if logs_dir.exists():
+                for fp in sorted(logs_dir.glob("session_*.log"), key=lambda x: x.stat().st_mtime, reverse=True):
+                    sc = sum(1 for l in open(fp, encoding="utf-8") if l.startswith("--- Session"))
+                    files.append({"name": fp.name, "size": fp.stat().st_size, "sessions": sc})
+            artifacts["logs/list.json"] = files
+            output = f"{len(files)} log files"
+
+        elif command == "logs-search":
+            if not args:
+                return "missing search pattern", {}
+            pattern = args[0]
+            max_r = int(args[1]) if len(args) > 1 else 100
+            try:
+                rx = re.compile(pattern, re.IGNORECASE)
+            except re.error as e:
+                return f"invalid regex: {e}", {}
+            logs_dir = script_dir() / "logs"
+            matches = []
+            for fp in sorted(logs_dir.glob("session_*.log"), key=lambda x: x.stat().st_mtime, reverse=True):
+                with open(fp, encoding="utf-8") as f:
+                    for i, line in enumerate(f, 1):
+                        if rx.search(line):
+                            matches.append({"file": fp.name, "line": i, "content": line.rstrip("\n")})
+                            if len(matches) >= max_r:
+                                break
+                if len(matches) >= max_r:
+                    break
+            artifacts["logs/search.json"] = {"pattern": pattern, "matches": matches}
+            output = f"{len(matches)} match(es)"
+
+        elif command == "config":
+            name = args[0] if args else ""
+            if not name or name.lower() in ("auth", "token"):
+                return "blocked or missing config name", {}
+            cfg_path = script_dir() / "config" / f"{name}.json"
+            if not cfg_path.exists():
+                return f"config '{name}' not found", {}
+            with open(cfg_path, encoding="utf-8") as f:
+                data = json.load(f)
+            artifacts[f"config/{name}.json"] = data
+            output = f"config/{name}.json committed"
+
+        elif command == "db-query":
+            if len(args) < 2:
+                return "usage: db-query <name> <sql>", {}
+            name, query = args[0], " ".join(args[1:])
+            db_path = script_dir() / "db" / f"{name}.db"
+            if not db_path.exists():
+                return f"db '{name}' not found", {}
+            q_upper = query.strip().upper()
+            if not (q_upper.startswith("SELECT") or q_upper.startswith("PRAGMA") or q_upper.startswith("EXPLAIN")):
+                return "only SELECT/PRAGMA/EXPLAIN allowed", {}
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute(query)
+            rows = [dict(r) for r in cur.fetchall()]
+            conn.close()
+            artifacts[f"db/{name}_query.json"] = {"query": query, "rows": rows, "count": len(rows)}
+            output = f"{len(rows)} row(s) — committed to db/{name}_query.json"
+
+        elif command == "exec":
+            cmd_str = " ".join(args) if args else ""
+            if not cmd_str:
+                return "missing command", {}
+            proc = await asyncio.create_subprocess_shell(
+                cmd_str, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+                output = stdout.decode(errors="replace") + stderr.decode(errors="replace")
+            except asyncio.TimeoutError:
+                output = "timed out"
+
+        elif command == "update":
+            proc = await asyncio.create_subprocess_exec(
+                "git", "-c", "credential.helper=", "pull", "--ff-only", "origin", "main",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env={"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"},
+            )
+            stdout, stderr = await proc.communicate()
+            out = stdout.decode().strip() + "\n" + stderr.decode().strip()
+            if proc.returncode == 0 and "Already up to date" not in out:
+                asyncio.create_task(self._delayed_restart_with_log(artifacts))
+                return out + "\n[restarting — log will be committed after startup]", {}
+            output = out
+
+        elif command == "restart":
+            asyncio.create_task(self._delayed_restart_with_log(artifacts))
+            output = "restarting — log will be committed after startup"
+
+        else:
+            output = f"unknown command: {command}"
+
+        return output, artifacts
+
+    async def _delayed_restart_with_log(self, artifacts):
+        await asyncio.sleep(1)
+        await self.bot.close()
+        import os as _os, sys as _sys
+        _os.execv(_sys.executable, [_sys.executable] + _sys.argv)
+
+    async def _write_results(self, seq, command, output, artifacts):
+        def _commit():
+            # write result.json
+            result_sha = self._gh_get_sha("result.json")
+            self._gh_put_file("result.json", {"seq": seq, "command": command, "output": output}, result_sha or "", str(seq))
+            # write artifacts
+            for path, content in artifacts.items():
+                sha = self._gh_get_sha(path)
+                if isinstance(content, bytes):
+                    self._gh_put_binary(path, content, sha or "", str(seq))
+                elif isinstance(content, str):
+                    import base64
+                    body = {
+                        "message": str(seq),
+                        "content": base64.b64encode(content.encode()).decode(),
+                    }
+                    if sha:
+                        body["sha"] = sha
+                    self._gh_request(path, method="PUT", body=body)
+                else:
+                    self._gh_put_file(path, content, sha or "", str(seq))
+        await asyncio.get_event_loop().run_in_executor(None, _commit)
+        self.bot.logger.log(MODULE_NAME, f"[bridge] seq={seq} result committed")
+
+    async def start(self):
+        self._task = asyncio.create_task(self._poll())
+        self.bot.logger.log(MODULE_NAME, f"[bridge] Claude bridge active — polling {self._repo}")
+
+    async def stop(self):
+        if self._task:
+            self._task.cancel()
 
 
 def setup(bot):

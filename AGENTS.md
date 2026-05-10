@@ -127,8 +127,6 @@ GitHub-based command queue via private `Emball/EmbotDebug` repo.
 
 The GitHub token is in Claude's user preferences as `GitHub Access Token: ghp_...`. Same token is used to authenticate Git processes on Claude.
 
-`remote_debug.py` imports `aiohttp` lazily so no deps need installing for the bridge to work. Use plain `python`, not `uv run python`.
-
 ```bash
 # Once per session
 python modules/remote_debug.py session-init ghp_...

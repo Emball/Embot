@@ -578,6 +578,7 @@ class ARCHIVEManager:
 
     async def _initialize_background(self):
         try:
+            await self.bot.wait_until_ready()
             self.song_index = load_song_index(self.bot)
             if not self.song_index:
                 self.bot.logger.log(MODULE_NAME, "Building new song index in background...")

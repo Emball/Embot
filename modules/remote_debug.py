@@ -607,7 +607,8 @@ class ClaudeBridgeListener:
             if not cmd_str:
                 return "missing command", {}
             proc = await asyncio.create_subprocess_shell(
-                cmd_str, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                cmd_str, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                cwd=str(script_dir())
             )
             try:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)

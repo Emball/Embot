@@ -157,7 +157,7 @@ async def appeal_submit(ms, user_id: int, guild_id: int, appeal_text: str) -> st
     appeal_id = _generate_appeal_id()
     deadline  = (_now() + timedelta(hours=24)).isoformat()
     _db_exec(ms._db,
-        "INSERT OR REPLACE INTO mod_appeals "
+        "INSERT OR IGNORE INTO mod_appeals "
         "(appeal_id, user_id, guild_id, appeal_text, submitted_at, deadline, "
         "status, votes_for, votes_against, channel_message_id) "
         "VALUES (?,?,?,?,?,?,'pending','[]','[]',NULL)",

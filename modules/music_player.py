@@ -194,7 +194,7 @@ class MusicPlayer:
             self.disconnect_timer.cancel()
             self.disconnect_timer = None
 
-        if not self.voice_client.is_playing() and not self.paused:
+        if self.voice_client and not self.voice_client.is_playing() and not self.paused:
             await self.play_next()
 
     def skip(self, user_id=None):

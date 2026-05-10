@@ -211,11 +211,44 @@ def load_modules():
     if not hasattr(bot, '_module_commands'):
         bot._module_commands = {}
 
-    for file in os.listdir(modules_dir):
-        if not file.endswith('.py') or file.startswith('_'):
-            continue
+    # Load order is explicit — mod_core must precede mod_logger so that
+    # bot._pending_rehosted_media is populated before mod_logger's on_message_delete fires.
+    _MODULE_ORDER = [
+        "messages",
+        "mod_core",
+        "mod_suspicion",
+        "mod_actions",
+        "mod_appeals",
+        "mod_oversight",
+        "mod_rules",
+        "mod_logger",
+        "vms_core",
+        "vms_transcribe",
+        "vms_storage",
+        "vms_playback",
+        "remote_debug",
+        "music_archive",
+        "music_player",
+        "community",
+        "starboard",
+        "youtube",
+        "links",
+        "icons",
+        "artwork",
+        "magic_emball",
+    ]
+    # Any modules present on disk but not in _MODULE_ORDER are appended at the end.
+    _known = set(_MODULE_ORDER)
+    _extras = sorted(
+        f[:-3] for f in os.listdir(modules_dir)
+        if f.endswith('.py') and not f.startswith('_') and f[:-3] not in _known
+    )
+    _load_sequence = _MODULE_ORDER + _extras
 
-        name = file[:-3]
+    for name in _load_sequence:
+        file = name + ".py"
+        if not os.path.exists(os.path.join(modules_dir, file)):
+            continue
 
         try:
             commands_before = {cmd.name: cmd for cmd in bot.tree.get_commands()}

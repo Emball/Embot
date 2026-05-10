@@ -786,7 +786,10 @@ def setup(bot):
             while True:
                 await asyncio.sleep(5)
                 if _ext_worker_task is None or _ext_worker_task.done():
-                    exc = _ext_worker_task.exception() if _ext_worker_task and not _ext_worker_task.cancelled() else None
+                    try:
+                        exc = _ext_worker_task.exception() if _ext_worker_task and not _ext_worker_task.cancelled() else None
+                    except Exception:
+                        exc = None
                     bot.logger.log(MODULE_NAME,
                         f"Ext worker died ({exc}) - restarting", "WARNING")
                     _ext_worker_task = asyncio.create_task(_ext_worker())

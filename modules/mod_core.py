@@ -1459,13 +1459,17 @@ def setup(bot):
 
     @bot.listen()
     async def on_vm_transcribed(vm_id, transcript, vm_message, reply_message, guild):
-        # gracefully no-op if VMS isn't providing expected data
         try:
             if not transcript or not guild:
+                bot.logger.log(MODULE_NAME,
+                    f"VM #{vm_id} automod skip: transcript={bool(transcript)} guild={bool(guild)}", "WARNING")
                 return
+            bot.logger.log(MODULE_NAME, f"VM #{vm_id} automod scan: {transcript!r}")
             keywords = await _get_automod_keywords(guild)
+            bot.logger.log(MODULE_NAME, f"VM #{vm_id} automod keywords ({len(keywords)}): {keywords}")
             matched = _transcript_violates(transcript, keywords)
             if not matched:
+                bot.logger.log(MODULE_NAME, f"VM #{vm_id} automod: no match")
                 return
             bot.logger.log(MODULE_NAME,
                 f"VM #{vm_id} flagged by automod (matched: {matched!r}) - purging", "WARNING")

@@ -451,7 +451,7 @@ async def _deliver_song(bot, interaction: discord.Interaction, candidate: dict) 
         return
 
     entry = _cache_lookup(str(p))
-    transcoded_note = "\n-# ⚠️ Transcoded to 16-bit/48kHz — source file exceeds Discord's upload limit" if entry and entry.get("transcoded") else ""
+    transcoded_note = "\n-# ⚠️ Transcoded to 16-bit — source file exceeds Discord's upload limit" if entry and entry.get("transcoded") else ""
     msg = f"[{p.name}]({url}){transcoded_note}"
 
     if interaction.guild is None:
@@ -514,27 +514,41 @@ def _downsample_flac(source_path: str):
     p = Path(source_path)
     tmp_path = script_dir() / 'temp' / p.name
 
-    def _run(extra_args):
+    def _probe_sample_rate():
+        try:
+            r = subprocess.run(
+                ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', source_path],
+                capture_output=True, timeout=30)
+            import json as _json
+            return int(_json.loads(r.stdout)['streams'][0]['sample_rate'])
+        except Exception:
+            return 48000
+
+    def _run(args):
         result = subprocess.run(
             ['ffmpeg', '-y', '-i', source_path,
-             '-af', 'aresample=resampler=soxr:precision=28',
-             '-ar', '48000', '-c:a', 'flac', '-compression_level', '8',
-             '-map_metadata', '0'] + extra_args + [str(tmp_path)],
-            capture_output=True, timeout=180,
-        )
+             '-c:a', 'flac', '-compression_level', '8', '-map_metadata', '0']
+            + args + [str(tmp_path)],
+            capture_output=True, timeout=180)
         if result.returncode != 0:
             tmp_path.unlink(missing_ok=True)
             return None, None
-        sz = tmp_path.stat().st_size
-        return str(tmp_path), sz
+        return str(tmp_path), tmp_path.stat().st_size
 
     try:
-        path, sz = _run([])
+        src_rate = _probe_sample_rate()
+        rate_args = ['-af', 'aresample=resampler=soxr:precision=28', '-ar', '48000'] if src_rate > 48000 else []
+
+        # first pass: resample if needed, keep bit depth
+        path, sz = _run(rate_args)
         if path and sz:
-            return path, sz, False  # 48kHz was enough, source bit depth preserved
-        path, sz = _run(['-sample_fmt', 's16'])
+            return path, sz, False
+
+        # second pass: also reduce to 16-bit
+        path, sz = _run(rate_args + ['-sample_fmt', 's16'])
         if path and sz:
-            return path, sz, True   # needed 16-bit reduction
+            return path, sz, True
+
         return None, None, False
     except Exception:
         tmp_path.unlink(missing_ok=True)

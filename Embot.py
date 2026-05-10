@@ -378,7 +378,7 @@ async def _auto_update_loop(bot):
 
 @bot.tree.command(name="update", description="[Owner only] Pull latest changes from git and restart")
 async def update_cmd(interaction: discord.Interaction):
-    if interaction.user.id != interaction.guild.owner_id:
+    if not interaction.guild or interaction.user.id != interaction.guild.owner_id:
         await interaction.response.send_message("Owner only.", ephemeral=True)
         return
     await interaction.response.send_message("Checking for updates...", ephemeral=True)

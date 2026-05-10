@@ -454,7 +454,7 @@ def get_event_logger(bot):
 
 def _is_default_avatar(member: discord.Member) -> bool:
     url = str(member.display_avatar.url)
-    return "/embed/avatars/" in url or "/assets/" in url and "a_" not in url
+    return ("/embed/avatars/" in url) or ("/assets/" in url and "a_" not in url)
 
 _cfg: Optional[ModConfig] = None
 
@@ -706,27 +706,6 @@ class ModerationSystem:
 
     @cleanup_invites.before_loop
     async def before_cleanup_invites(self):
-        await self.bot.wait_until_ready()
-
-    @tasks.loop(minutes=15)
-    async def cleanup_media_cache(self):
-        try:
-            cutoff = _now().timestamp() - self._media_cache_ttl
-            expired = [
-                mid for mid, entry in list(self.media_cache.items())
-                if entry.get('cached_at', 0) < cutoff
-            ]
-            for mid in expired:
-                self._delete_media(mid)
-            if expired:
-                self.bot.logger.log(
-                    MODULE_NAME,
-                    f"media_cache TTL eviction: removed {len(expired)} stale entry/entries")
-        except Exception as e:
-            self.bot.logger.error(MODULE_NAME, "media_cache cleanup error", e)
-
-    @cleanup_media_cache.before_loop
-    async def before_cleanup_media_cache(self):
         await self.bot.wait_until_ready()
 
     @tasks.loop(hours=24)

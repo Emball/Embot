@@ -159,7 +159,7 @@ def setup(bot):
         poll_interval: int = None,
         cookies_txt: str = None,
     ):
-        if interaction.user.id != interaction.guild.owner_id:
+        if not interaction.guild or interaction.user.id != interaction.guild.owner_id:
             await interaction.response.send_message("Owner only.", ephemeral=True)
             return
 

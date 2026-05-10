@@ -18,7 +18,7 @@ from _utils import script_dir, _now, migrate_config, atomic_json_write
 
 MODULE_NAME = "VMS"
 GENERAL_CHANNEL_NAME = "general"
-EMBALL_GUILD_ID: Optional[int] = int(os.getenv("EMBALL_GUILD_ID", "0")) or None
+EMBALL_GUILD_ID: Optional[int] = None
 
 
 _CONFIG_PATH = script_dir() / "config" / "vms.json"
@@ -208,7 +208,6 @@ class VMSManager:
         self.db_path = _db_path()
         self.vms_dir = _vms_dir
         self.archive_dir = _archive_dir
-        self._token: str = os.getenv("DISCORD_BOT_TOKEN", "")
         self._session: Optional[aiohttp.ClientSession] = None
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vms_live")
         self._scan_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vms_scan")
@@ -681,7 +680,8 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
 def setup(bot):
     bot.logger.log(MODULE_NAME, "Setting up VMS module")
 
-    global _ext_queue, _ext_pending_lock, _ext_worker_task
+    global _ext_queue, _ext_pending_lock, _ext_worker_task, EMBALL_GUILD_ID
+    EMBALL_GUILD_ID = getattr(bot, "home_guild_id", None)
 
     from vms_transcribe import (
         _whisper_mgr, WHISPER_MODEL_SIZE,

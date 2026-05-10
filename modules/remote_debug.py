@@ -446,6 +446,7 @@ class ClaudeBridgeListener:
         req = urllib.request.Request(url, method=method)
         req.add_header("Authorization", f"token {self._token}")
         req.add_header("Accept", "application/vnd.github.v3+json")
+        req.add_header("Cache-Control", "no-cache")
         if body:
             req.add_header("Content-Type", "application/json")
             req.data = json.dumps(body).encode()
@@ -502,9 +503,9 @@ class ClaudeBridgeListener:
                     command = cmd.get("command", "")
                     args = cmd.get("args", [])
                     self.bot.logger.log(MODULE_NAME, f"[bridge] seq={seq} cmd={command} args={args}")
+                    self._last_seq = seq
                     output, artifacts = await self._execute(command, args)
                     await self._write_results(seq, command, output, artifacts)
-                    self._last_seq = seq
             except Exception as e:
                 self.bot.logger.error(MODULE_NAME, f"[bridge] poll error", e)
             await asyncio.sleep(self._interval)
@@ -891,7 +892,7 @@ def main():
     sub.add_parser("status", help="Bot status")
 
     logs_parser = sub.add_parser("logs", help="Fetch recent logs")
-    logs_parser.add_argument("--lines", type=int, default=200)
+    logs_parser.add_argument("--tail", type=int, default=200)
     logs_parser.add_argument("--file", default=None, help="Day log file (default: today)")
     logs_parser.add_argument("--session", default=None, help="Session number within day file (or 'all')")
     logs_parser.add_argument("--search", default=None, help="Regex search across all log files")
@@ -932,7 +933,7 @@ def main():
     elif args.command == "modules":
         _cmd_modules(cfg)
     elif args.command == "logs":
-        _cmd_logs(cfg, args.lines, args.file, args.session, args.search, args.max)
+        _cmd_logs(cfg, args.tail, args.file, args.session, args.search, args.max)
     elif args.command == "logs-list":
         _cmd_logs_list(cfg)
     elif args.command == "db-download":

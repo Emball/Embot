@@ -519,28 +519,6 @@ async def console_dbquery(interaction: discord.Interaction, name: str, query: st
     )
     bot.logger.log("MAIN", f"/console dbquery {name} used by {interaction.user}")
 
-@_console.command(name="exec", description="Run a shell command on the bot server")
-@app_commands.describe(cmd="Shell command to run")
-async def console_exec(interaction: discord.Interaction, cmd: str):
-    if not _owner_only(interaction):
-        return await _deny(interaction)
-    await interaction.response.defer(ephemeral=True)
-    try:
-        out, err, code = await run_exec(cmd, timeout=30)
-    except asyncio.TimeoutError:
-        return await interaction.followup.send("Timed out after 30s.", ephemeral=True)
-    except Exception as e:
-        return await interaction.followup.send(f"Error: {e}", ephemeral=True)
-    text = (out + err).strip() or f"(exit {code})"
-    if len(text) <= 1900:
-        await interaction.followup.send(f"```\n{text}\n```", ephemeral=True)
-    else:
-        await interaction.followup.send(
-            f"exit {code}",
-            file=discord.File(fp=__import__("io").StringIO(text), filename="output.txt"),
-            ephemeral=True,
-        )
-    bot.logger.log("MAIN", f"/console exec {repr(cmd)} used by {interaction.user}")
 
 @_console.command(name="restart", description="Restart the bot")
 async def console_restart(interaction: discord.Interaction):

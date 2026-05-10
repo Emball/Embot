@@ -602,6 +602,22 @@ class ClaudeBridgeListener:
             artifacts[f"db/{args[0]}_query.json"] = {"query": " ".join(args[1:]), "rows": rows, "count": len(rows)}
             output = f"{len(rows)} row(s) — committed to db/{args[0]}_query.json"
 
+        elif command == "config-write":
+            if len(args) < 2:
+                return "usage: config-write <name> <json>", {}
+            name = args[0]
+            json_str = " ".join(args[1:])
+            try:
+                data = json.loads(json_str)
+            except json.JSONDecodeError as e:
+                return f"invalid JSON: {e}", {}
+            cfg_path = script_dir() / "config" / f"{name}.json"
+            try:
+                atomic_json_write(cfg_path, data)
+                output = f"config/{name}.json written ok"
+            except Exception as e:
+                return f"write failed: {e}", {}
+
         elif command == "exec":
             cmd_str = " ".join(args) if args else ""
             if not cmd_str:
@@ -1047,6 +1063,10 @@ def main():
 
     config_p = sub.add_parser("config", help="View a config file")
     config_p.add_argument("name", help="Config name (without .json)")
+
+    config_w = sub.add_parser("config-write", help="Write a config file (bridge only)")
+    config_w.add_argument("name", help="Config name (without .json)")
+    config_w.add_argument("json_data", help="JSON string to write")
 
     exec_p = sub.add_parser("exec", help="Run a shell command on the server")
     exec_p.add_argument("cmd", nargs="?", default=None, help="Command to run (omit to read from stdin)")

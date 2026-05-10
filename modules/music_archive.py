@@ -297,6 +297,7 @@ CREATE TABLE IF NOT EXISTS song_cache (
     file_name       TEXT NOT NULL,
     file_size       INTEGER NOT NULL DEFAULT 0,
     file_checksum   TEXT NOT NULL DEFAULT '',
+    transcoded      INTEGER NOT NULL DEFAULT 0,
     cached_at       TEXT NOT NULL,
     accessed_at     TEXT NOT NULL
 );
@@ -335,6 +336,11 @@ def _db_init() -> None:
             c.commit()
         except Exception:
             pass
+        try:
+            c.execute("ALTER TABLE song_cache ADD COLUMN transcoded INTEGER NOT NULL DEFAULT 0")
+            c.commit()
+        except Exception:
+            pass
 
 def _cache_lookup(file_path: str) -> Optional[dict]:
     key = str(Path(file_path))
@@ -346,15 +352,15 @@ def _cache_lookup(file_path: str) -> Optional[dict]:
     return dict(row) if row else None
 
 def _cache_store(file_path: str, cdn_url: str, message_id: str, channel_id: str,
-                 file_name: str, file_size: int, checksum: str = '') -> None:
+                 file_name: str, file_size: int, checksum: str = '', transcoded: int = 0) -> None:
     key = str(Path(file_path))
     now = _now().isoformat()
     with _db_conn() as c:
         c.execute(
             "INSERT OR REPLACE INTO song_cache "
-            "(file_path, cdn_url, message_id, channel_id, file_name, file_size, file_checksum, cached_at, accessed_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
-            (key, cdn_url, str(message_id), str(channel_id), file_name, file_size, checksum, now, now)
+            "(file_path, cdn_url, message_id, channel_id, file_name, file_size, file_checksum, transcoded, cached_at, accessed_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (key, cdn_url, str(message_id), str(channel_id), file_name, file_size, checksum, transcoded, now, now)
         )
         c.commit()
 
@@ -444,10 +450,14 @@ async def _deliver_song(bot, interaction: discord.Interaction, candidate: dict) 
         await interaction.followup.send("Failed to retrieve song.", ephemeral=True)
         return
 
+    entry = _cache_lookup(str(p))
+    transcoded_note = "\n-# ⚠️ Transcoded to 16-bit/48kHz — source file exceeds Discord's upload limit" if entry and entry.get("transcoded") else ""
+    msg = f"[{p.name}]({url}){transcoded_note}"
+
     if interaction.guild is None:
-        await interaction.followup.send(f"[{p.name}]({url})")
+        await interaction.followup.send(msg)
     else:
-        await interaction.followup.send(f"[{p.name}]({url})", ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)
     bot.logger.log(MODULE_NAME, f"Delivered '{p.name}'")
 
 def _is_fed(interaction: discord.Interaction) -> bool:
@@ -503,17 +513,13 @@ def _downsample_flac(source_path: str):
     import subprocess
     p = Path(source_path)
     tmp_path = script_dir() / 'temp' / p.name
-    try:
+
+    def _run(extra_args):
         result = subprocess.run(
-            [
-                'ffmpeg', '-y', '-i', source_path,
-                '-af', 'aresample=resampler=soxr:precision=28',
-                '-ar', '48000',
-                '-c:a', 'flac',
-                '-compression_level', '8',
-                '-map_metadata', '0',
-                str(tmp_path),
-            ],
+            ['ffmpeg', '-y', '-i', source_path,
+             '-af', 'aresample=resampler=soxr:precision=28',
+             '-ar', '48000', '-c:a', 'flac', '-compression_level', '8',
+             '-map_metadata', '0'] + extra_args + [str(tmp_path)],
             capture_output=True, timeout=180,
         )
         if result.returncode != 0:
@@ -521,9 +527,18 @@ def _downsample_flac(source_path: str):
             return None, None
         sz = tmp_path.stat().st_size
         return str(tmp_path), sz
+
+    try:
+        path, sz = _run([])
+        if path and sz:
+            return path, sz, False  # 48kHz was enough, source bit depth preserved
+        path, sz = _run(['-sample_fmt', 's16'])
+        if path and sz:
+            return path, sz, True   # needed 16-bit reduction
+        return None, None, False
     except Exception:
         tmp_path.unlink(missing_ok=True)
-        return None, None
+        return None, None, False
 
 class ARCHIVEManager:
     def __init__(self, bot):
@@ -650,10 +665,10 @@ class ARCHIVEManager:
                 await self._update_backfill_embed(
                     chan, start, total, cached, uploaded, errors,
                     uploaded_bytes, total_bytes, f"Downsampling {p.name}...")
-                ds_path, ds_sz = await loop.run_in_executor(
+                ds_path, ds_sz, transcoded = await loop.run_in_executor(
                     METADATA_EXECUTOR, _downsample_flac, fp)
                 if ds_path and ds_sz and ds_sz <= max_bytes:
-                    ok = await self._send_batch(chan, [(fp, Path(ds_path), ds_sz)], source_path=fp)
+                    ok = await self._send_batch(chan, [(fp, Path(ds_path), ds_sz)], source_path=fp, transcoded=transcoded)
                     try:
                         Path(ds_path).unlink(missing_ok=True)
                     except Exception:
@@ -790,7 +805,7 @@ class ARCHIVEManager:
         msg = await chan.send(embed=embed)
         self._status_msg_id = msg.id
 
-    async def _send_batch(self, chan, batch, source_path=None) -> bool:
+    async def _send_batch(self, chan, batch, source_path=None, transcoded=False) -> bool:
         read_start = time.time()
         loop = asyncio.get_running_loop()
         file_data = []
@@ -822,7 +837,7 @@ class ARCHIVEManager:
         for (fp, name, data, sz), att in zip(file_data, msg.attachments):
             actual_path = source_path if source_path and len(batch) == 1 else fp
             checksum = _file_checksum(actual_path)
-            _cache_store(fp, att.url, att.id, chan.id, name, sz, checksum)
+            _cache_store(fp, att.url, att.id, chan.id, name, sz, checksum, int(transcoded))
         self.bot.logger.log(MODULE_NAME,
             f"Cached batch: {len(batch)} file(s), {total_mb}MB "
             f"(read: {read_elapsed:.1f}s, upload: {up_elapsed:.1f}s)")

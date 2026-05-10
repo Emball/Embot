@@ -35,12 +35,12 @@ Discord bot for Eminem fan server (discord.py, single guild, uv environment).
 
 Private `_*.py` files are skipped by the loader.
 
-Modules are listed in **dependency order** — this is also the required read order for audits (see Full Audit Protocol).
+Modules are listed in **dependency order** — this is also the required read order for audits (see Full Audit Protocol). This order is enforced at runtime via `_MODULE_ORDER` in `Embot.py`; if you add a new module, add it to that list in the correct position. Any module not in the list is appended alphabetically at the end.
 
 | Module | Description |
 |---|---|
 | `_utils.py` | `atomic_json_write()`, `migrate_config()`, `script_dir()`, `_now()` — imported by nearly everything |
-| `messages.py` | Shared message + media cache — text cache, encrypted attachment cache (Fernet), eviction, `cache_message()`, `get_context_messages()`, `get_recent_messages()` — no bot dependency, imported directly by mod_core and vms_playback |
+| `_messages.py` | Shared message + media cache — text cache, encrypted attachment cache (Fernet), eviction, `cache_message()`, `get_context_messages()`, `get_recent_messages()` — no bot dependency, imported directly by mod_core and vms_playback. Prefixed `_` so the loader skips it (no `setup()` needed). |
 | `mod_core.py` | Moderation core: DB, config, auth helpers, ModContext, ModerationSystem. Provides `is_owner()` (lazy-imported by music_archive, community, links, mod_logger). Owns media cache TTL loop and `on_vm_transcribed` automod listener |
 | `mod_suspicion.py` | Suspicion engine: /fedcheck, /fedflag, /fedclear, /fedscan, /fedinvites. Provides `is_flagged()` (lazy-imported by music_archive) |
 | `mod_actions.py` | ban, kick, mute, warn, purge, lock, slowmode |
@@ -90,7 +90,7 @@ Modules are listed in **dependency order** — this is also the required read or
 
 ### Cross-Module Dependencies
 
-- `messages.py` — shared state, no bot dependency, imported directly by mod_core and vms_playback
+- `_messages.py` — shared state, no bot dependency, imported directly by mod_core and vms_playback
 - `mod_core.py` — provides `is_owner()` (lazy-imported by music_archive, community, links, mod_logger)
 - `mod_suspicion.py` — provides `is_flagged()` (lazy-imported by music_archive)
 - `mod_core.setup()` — central hub, creates ModerationSystem, wires all mod modules

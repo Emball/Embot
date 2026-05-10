@@ -113,6 +113,20 @@ Ensure there's no avenues in a module where an error could be silently swallowed
 - Keep `requirements.txt` synced. Keep `.gitignore` clean. Keep AGENTS.md current.
 - Temp/test code goes in `/temp` (gitignored).
 
+## Discord Console Commands
+
+Owner-only slash commands registered in `Embot.py` (`bot.tree.add_command(_console)`). All responses are ephemeral. Auth uses `interaction.user.id == interaction.guild.owner_id`.
+
+| Command | Description |
+|---|---|
+| `/console status` | Version, latency, uptime, guilds, log file |
+| `/console modules` | Loaded and failed module list |
+| `/console logs [tail] [search]` | Recent log lines or regex search — sent as file attachment |
+| `/console config <name>` | View a config file (redacted) — sent as file attachment |
+| `/console dbquery <name> <query>` | Read-only SQL query — sent as file attachment if large |
+| `/console exec <cmd>` | Shell command — inline if short, file if long |
+| `/console restart` | Restart the bot |
+
 ## Claude Bridge
 
 GitHub-based command queue via private `Emball/EmbotDebug` repo.

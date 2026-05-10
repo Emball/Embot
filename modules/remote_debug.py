@@ -658,19 +658,12 @@ class ClaudeBridgeListener:
                     sha = self._gh_get_sha(path)
                     if isinstance(content, bytes):
                         self._gh_put_binary(path, content, sha or "", str(seq))
-                    elif isinstance(content, str):
-                        import base64
-                        body = {
-                            "message": str(seq),
-                            "content": base64.b64encode(content.encode()).decode(),
-                        }
-                        if sha:
-                            body["sha"] = sha
-                        self._gh_request(path, method="PUT", body=body)
                     else:
                         self._gh_put_file(path, content, sha or "", str(seq))
                 return None
             except Exception as e:
+                import traceback as _tb
+                return f"{e}\n{_tb.format_exc()}"
                 return e
         err = await asyncio.get_event_loop().run_in_executor(None, _commit)
         if err:

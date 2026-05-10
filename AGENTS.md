@@ -127,24 +127,26 @@ GitHub-based command queue via private `Emball/EmbotDebug` repo.
 
 The GitHub token is in Claude's user preferences as `GitHub Access Token: ghp_...`. Same token is used to authenticate Git processes on Claude.
 
-```bash
-# Once per session
-python modules/remote_debug.py session-init ghp_...
+Once per session: `python modules/remote_debug.py session-init ghp_...`
 
-# Then
-python modules/remote_debug.py bridge <command> [args...]
+| Command | Bridge (Claude) | LAN (Michael) | Purpose |
+|---|---|---|---|
+| `ping` | ✓ | ✓ | Test connectivity |
+| `status` | ✓ | ✓ | Bot vitals |
+| `modules` | ✓ | ✓ | Loaded modules |
+| `guilds` | — | ✓ | Guild list |
+| `logs [--tail N] [--file F] [--session N] [--search P] [--max N]` | ✓ | ✓ | Fetch logs |
+| `logs-list` | — | ✓ | All log files |
+| `config <name>` | ✓ | ✓ | View config file |
+| `db-query <name> "<SQL>"` | ✓ | ✓ | Read-only SQL query |
+| `db-download <name>` | ✓ | ✓ | Download .db to temp/ |
+| `exec <cmd>` | ✓ | ✓ | Shell command (read-only) |
+| `update` | ✓ | ✓ | Git pull + restart |
+| `restart` | ✓ | ✓ | Restart bot |
+| `session-init <token>` | ✓ | — | Store GitHub token (once per session) |
 
-# Examples
-python modules/remote_debug.py bridge status
-python modules/remote_debug.py bridge logs --tail 500
-python modules/remote_debug.py bridge logs --search "ERROR"
-python modules/remote_debug.py bridge config starboard
-python modules/remote_debug.py bridge db-query mod "SELECT name FROM sqlite_master WHERE type='table'"
-python modules/remote_debug.py bridge db-download mod
-python modules/remote_debug.py bridge exec "echo hello"
-python modules/remote_debug.py bridge update
-python modules/remote_debug.py bridge restart
-```
+Bridge: `python modules/remote_debug.py bridge <command> [args...]`
+LAN: `uv run python modules/remote_debug.py <command> [args...]`
 
 `restart`/`update` wait smartly for the bot to come back online.
 
@@ -166,26 +168,3 @@ Log Workflow:
 3. If the log doesn't show the error, go wider or pull the entire log file if necessary
 
 If that fails to identify the issue, you can expand to other avenues.
-
-## LAN Client (Michael's use on-machine only — not applicable to Claude)
-
-| Command | Purpose |
-|---|---|
-| `uv run python modules/remote_debug.py ping` | Test connectivity |
-| `uv run python modules/remote_debug.py status` | Bot vitals |
-| `uv run python modules/remote_debug.py guilds` | Guild list |
-| `uv run python modules/remote_debug.py modules` | Loaded modules |
-| `uv run python modules/remote_debug.py logs` | Last 200 lines of today's log |
-| `uv run python modules/remote_debug.py logs --file session_20250101.log` | Specific day file |
-| `uv run python modules/remote_debug.py logs --session 2` | Specific session |
-| `uv run python modules/remote_debug.py logs --tail 1000` | Last N lines |
-| `uv run python modules/remote_debug.py logs --search <pattern>` | Regex search logs |
-| `uv run python modules/remote_debug.py logs --search <pattern> --max 50` | Search with result limit |
-| `uv run python modules/remote_debug.py logs-list` | All log files |
-| `uv run python modules/remote_debug.py db-download <name>` | Download .db to temp/ |
-| `uv run python modules/remote_debug.py db-query <name> "<SQL>"` | SELECT/PRAGMA query |
-| `uv run python modules/remote_debug.py config <name>` | View config file |
-| `uv run python modules/remote_debug.py exec <cmd>` | Shell command (read-only) |
-| `echo '<cmd>' \| uv run python modules/remote_debug.py exec` | Same via stdin |
-| `uv run python modules/remote_debug.py update` | Git pull + restart |
-| `uv run python modules/remote_debug.py restart` | Restart bot |

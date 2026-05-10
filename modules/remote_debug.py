@@ -870,6 +870,14 @@ def _cmd_restart(cfg):
 
 _BRIDGE_DIR = pathlib.Path(tempfile.gettempdir()) / "embotdebug"
 
+def _cmd_session_init(token):
+    """Write the GitHub token into the local claude_bridge config. Run once per session."""
+    cfg = _load_client_config()
+    cfg.setdefault("claude_bridge", {})["token"] = token
+    atomic_json_write(RD_CONFIG_PATH, cfg)
+    print(f"Session initialised — token stored in {RD_CONFIG_PATH}")
+
+
 def _cmd_bridge(bridge_cfg, command, args, timeout=45):
     """Send a command via Claude bridge using plain git. Fresh clone to send, pull to poll."""
     import shutil, subprocess
@@ -1036,6 +1044,8 @@ def main():
     sub.add_parser("update", help="Git pull and restart if updated")
     sub.add_parser("restart", help="Restart the bot")
 
+    init_p = sub.add_parser("session-init", help="Store GitHub token for Claude bridge (run once per session)")
+    init_p.add_argument("github_token", help="GitHub personal access token with EmbotDebug repo access")
     bridge_p = sub.add_parser("bridge", help="Send a command via Claude bridge and wait for result")
     bridge_p.add_argument("bridge_command", help="Command to send (e.g. status, logs, exec)")
     bridge_p.add_argument("bridge_args", nargs=argparse.REMAINDER, help="Arguments for the command")
@@ -1068,11 +1078,10 @@ def main():
         _cmd_update(cfg)
     elif args.command == "restart":
         _cmd_restart(cfg)
+    elif args.command == "session-init":
+        _cmd_session_init(args.github_token)
     elif args.command == "bridge":
-        bridge_cfg = cfg.get("claude_bridge", {}).copy()
-        env_token = os.environ.get("EMBOT_BRIDGE_TOKEN", "")
-        if env_token:
-            bridge_cfg["token"] = env_token
+        bridge_cfg = cfg.get("claude_bridge", {})
         _cmd_bridge(bridge_cfg, args.bridge_command, args.bridge_args, args.timeout)
 
 

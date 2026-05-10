@@ -70,12 +70,12 @@ GitHub-based command queue via private `Emball/EmbotDebug` repo. The bot polls `
 
 **Claude's workflow per session:**
 
-First, set the bridge token as an env var (user provides this at session start):
+First, store the token the user provides (once per session):
 ```bash
-export EMBOT_BRIDGE_TOKEN=ghp_...
+python modules/remote_debug.py session-init ghp_...
 ```
 
-Then use the one-liner for every command:
+Then use the one-liner for every command — no token needed:
 ```bash
 python modules/remote_debug.py bridge <command> [args...]
 

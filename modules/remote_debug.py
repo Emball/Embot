@@ -432,9 +432,9 @@ class ClaudeBridgeListener:
     """Polls EmbotDebug repo for commands, executes via RemoteDebugServer, commits results back."""
 
     # commands that return file artifacts committed to the repo
-    FILE_COMMANDS = {"logs", "config", "db-query"}
+    FILE_COMMANDS = {"logs", "config", "db-query", "db-download"}
     # commands blocked entirely
-    BLOCKED = {"db-download"}
+    BLOCKED = set()
 
     def __init__(self, bot, server: "RemoteDebugServer", bridge_cfg: dict):
         self.bot = bot
@@ -592,6 +592,16 @@ class ClaudeBridgeListener:
                 return err, {}
             artifacts[f"config/{name}.json"] = cfg_data
             output = f"config/{name}.json committed"
+
+        elif command == "db-download":
+            name = args[0] if args else ""
+            if not name:
+                return "usage: db-download <name>", {}
+            db_path = script_dir() / "db" / f"{name}.db"
+            if not db_path.exists():
+                return f"db '{name}' not found", {}
+            artifacts[f"db/{name}.db"] = db_path.read_bytes()
+            output = f"db/{name}.db committed ({db_path.stat().st_size} bytes)"
 
         elif command == "db-query":
             if len(args) < 2:
@@ -987,6 +997,16 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=20):
                     artifact_text = read_text(work, f"config/{args[0]}.json")
                 elif command == "db-query" and args:
                     artifact_text = read_text(work, f"db/{args[0]}_query.json")
+                elif command == "db-download" and args:
+                    db_file = work / f"db/{args[0]}.db"
+                    if db_file.exists():
+                        out_path = script_dir() / "temp" / f"{args[0]}.db"
+                        out_path.parent.mkdir(exist_ok=True)
+                        import shutil as _shutil
+                        _shutil.copy2(db_file, out_path)
+                        print(f"Saved {out_path.stat().st_size:,} bytes to {out_path}")
+                    else:
+                        print(output)
                 if artifact_text:
                     print(artifact_text)
                 elif output:

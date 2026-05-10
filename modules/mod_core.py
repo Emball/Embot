@@ -199,6 +199,7 @@ def _load_config() -> dict:
         "rules": "",
         "strike_thresholds": {"warn": 3, "mute": 5, "kick": 7, "ban": 10},
         "invite_labels": {},
+        "releases_role_name": "Emball Releases",
     }
     from _utils import migrate_config
     return migrate_config(path, defaults)

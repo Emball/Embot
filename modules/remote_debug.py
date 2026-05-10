@@ -21,7 +21,7 @@ MODULE_NAME = "REMOTE_DEBUG"
 
 RD_CONFIG_PATH = script_dir() / "config" / "remote_debug.json"
 RD_CONFIG_DEFAULTS = {
-    "enabled": False,
+    "server": False,
     "host": "0.0.0.0",
     "port": 8765,
     "token": "",
@@ -47,9 +47,10 @@ def _migrate_client_config():
 
 def _load_config() -> dict:
     cfg = migrate_config(RD_CONFIG_PATH, RD_CONFIG_DEFAULTS)
-    if "url" in cfg:
-        del cfg["url"]
-        atomic_json_write(RD_CONFIG_PATH, cfg)
+    for stale in ("url", "enabled"):
+        if stale in cfg:
+            del cfg[stale]
+            atomic_json_write(RD_CONFIG_PATH, cfg)
     if not cfg.get("token", "").strip():
         cfg["token"] = secrets.token_hex(32)
         atomic_json_write(RD_CONFIG_PATH, cfg)
@@ -490,8 +491,8 @@ class RemoteDebugServer:
 
     async def start(self):
         self._start_time = time.time()
-        if not self._config.get("enabled", False):
-            self.bot.logger.log(MODULE_NAME, "Disabled by config")
+        if not self._config.get("server", False):
+            self.bot.logger.log(MODULE_NAME, "Server mode disabled in config")
             return
         host = self._config.get("host", "0.0.0.0")
         port = self._config.get("port", 8765)
@@ -516,8 +517,8 @@ def setup(bot):
     _migrate_client_config()
     bot.logger.log(MODULE_NAME, "Setting up remote debug HTTP server")
     config = _load_config()
-    if not config.get("enabled", True):
-        bot.logger.log(MODULE_NAME, "Remote debug disabled in config")
+    if not config.get("server", False):
+        bot.logger.log(MODULE_NAME, "Remote debug server disabled in config")
         return
     server = RemoteDebugServer(bot)
     bot.remote_debug_server = server
@@ -710,6 +711,9 @@ def _cmd_restart(cfg):
 
 def main():
     cfg = _load_client_config()
+    if cfg.get("server", False):
+        print("This config is set to server mode. Set \"server\": false to use the debug client, or point to a different config.")
+        sys.exit(1)
 
     parser = argparse.ArgumentParser(description="Embot remote debug client")
     parser.add_argument("--token", default=cfg["token"], help="Auth token")

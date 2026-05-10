@@ -38,7 +38,7 @@ Private `_*.py` files are skipped by the loader.
 | Module | Description |
 |---|---|
 | `messages.py` | Shared message + media cache — text cache, encrypted attachment cache (Fernet), eviction, `cache_message()`, `get_context_messages()`, `get_recent_messages()` |
-| `music_archive.py` | Eminem music archive — FLAC/MP3 scan, SQLite index, CDN cache, batch backfill, lazy CDN refresh, SMB-compatible |
+| `music_archive.py` | Eminem music archive — FLAC/MP3 scan, SQLite index, CDN cache, batch backfill, lazy CDN refresh, SMB-compatible. `song_cache` has a `transcoded` column (1 = file was resampled/bit-depth reduced before upload). `_cache_store` uses `INSERT ... ON CONFLICT DO UPDATE` — do NOT revert to `INSERT OR REPLACE` as it wipes `file_checksum`. `_scan_pending` is DB-lookup only, no SMB reads. `_downsample_flac` does two passes (resample if >48kHz, then 16-bit) with the size check inside the function — pass 2 only runs if pass 1 is still too large. |
 | `community.py` | Submission tracking (#projects/#artwork), voting, Spotlight Friday, SQLite |
 | `mod_core.py` | Moderation core: DB, config, auth helpers, ModContext, ModerationSystem. Owns media cache TTL loop and `on_vm_transcribed` automod listener |
 | `mod_actions.py` | ban, kick, mute, warn, purge, lock, slowmode |
@@ -52,7 +52,7 @@ Private `_*.py` files are skipped by the loader.
 | `vms_transcribe.py` | OGG transcription via Whisper, waveform gen, bulk processing |
 | `vms_storage.py` | VM scan/conform, archival, backfill, purge |
 | `vms_playback.py` | VM selection, CDN upload, counters, ping cooldown |
-| `remote_debug.py` | HTTP debug API + Claude bridge (GitHub-based command queue) |
+| `remote_debug.py` | HTTP debug API + Claude bridge (GitHub-based command queue). Bridge timeout is 45s. Artifacts are committed before `result.json` to prevent stale reads on the Claude side. |
 | `starboard.py` | Dyno-style starboard, config-driven |
 | `icons.py` | Holiday icon rotation — server icon + bot avatar |
 | `links.py` | `?name` quick-link triggers, JSON-backed |

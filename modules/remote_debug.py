@@ -46,7 +46,23 @@ def _migrate_client_config():
 
 
 def _load_config() -> dict:
+    # preserve old enabled key before migrate_config drops it
+    old = {}
+    if RD_CONFIG_PATH.exists():
+        try:
+            with open(RD_CONFIG_PATH) as f:
+                old = json.load(f)
+        except Exception:
+            pass
+    old_enabled = old.get("enabled")
+
     cfg = migrate_config(RD_CONFIG_PATH, RD_CONFIG_DEFAULTS)
+
+    # migrate old enabled → server
+    if old_enabled is not None:
+        cfg["server"] = bool(old_enabled)
+        atomic_json_write(RD_CONFIG_PATH, cfg)
+
     for stale in ("url", "enabled"):
         if stale in cfg:
             del cfg[stale]

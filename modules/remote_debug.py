@@ -864,7 +864,7 @@ def _cmd_restart(cfg):
 _BRIDGE_DIR = pathlib.Path(tempfile.gettempdir()) / "embotdebug"
 
 def _cmd_bridge(bridge_cfg, command, args, timeout=45):
-    """Send a command via Claude bridge using plain git. Claude side never touches GitHub API."""
+    """Send a command via Claude bridge using plain git. Fresh clone every command, no conflicts."""
     import shutil, subprocess
 
     repo = bridge_cfg.get("repo", "Emball/EmbotDebug")
@@ -874,102 +874,96 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
         sys.exit(1)
 
     remote = f"https://{token}@github.com/{repo}.git"
-    work = _BRIDGE_DIR
 
-    def git(*cmd_args, check=True):
+    def fresh_clone():
+        work = pathlib.Path(tempfile.mkdtemp(prefix="embotdebug_"))
+        subprocess.run(["git", "clone", "--depth=1", remote, str(work)],
+                       capture_output=True, text=True, check=True)
+        subprocess.run(["git", "-C", str(work), "config", "user.email", "claude@bridge"], capture_output=True, check=True)
+        subprocess.run(["git", "-C", str(work), "config", "user.name", "Claude"], capture_output=True, check=True)
+        return work
+
+    def git(work, *cmd_args, check=True):
         return subprocess.run(["git", "-C", str(work)] + list(cmd_args),
                               capture_output=True, text=True, check=check)
 
-    def fresh():
-        """Nuke and re-clone for a clean slate."""
-        if work.exists():
-            shutil.rmtree(work)
-        subprocess.run(["git", "clone", "--depth=1", remote, str(work)],
-                       capture_output=True, text=True, check=True)
-        git("config", "user.email", "claude@bridge")
-        git("config", "user.name", "Claude")
-
-    def pull():
-        git("fetch", "origin")
-        git("reset", "--hard", "origin/main")
-
-    def read_json(name):
+    def read_json(work, name):
         return json.loads((work / name).read_text())
 
-    def write_json(name, data):
-        (work / name).write_text(json.dumps(data, indent=2) + "\n")
-
-    def read_text(name):
+    def read_text(work, name):
         p = work / name
         return p.read_text() if p.exists() else None
 
-    # always start fresh — nuke stale state from any previous command
-    fresh()
-
-    cmd_data = read_json("cmd.json")
-    seq = cmd_data.get("seq", 0) + 1
-    new_cmd = {"seq": seq, "command": command, "args": args}
-
-    # push with retry on conflict — re-clone on conflict for guaranteed clean state
-    pushed = False
-    for attempt in range(6):
-        write_json("cmd.json", new_cmd)
-        git("add", "cmd.json")
-        git("commit", "-m", str(seq))
-        result = git("push", "origin", "main", check=False)
-        if result.returncode == 0:
-            pushed = True
-            break
-        fresh()
-        cmd_data = read_json("cmd.json")
+    work = None
+    try:
+        work = fresh_clone()
+        cmd_data = read_json(work, "cmd.json")
         seq = cmd_data.get("seq", 0) + 1
-        new_cmd["seq"] = seq
-        time.sleep(1 + attempt)
+        new_cmd = {"seq": seq, "command": command, "args": args}
 
-    if not pushed:
-        print("Failed to push command after retries", file=sys.stderr)
+        pushed = False
+        for attempt in range(6):
+            (work / "cmd.json").write_text(json.dumps(new_cmd, indent=2) + "\n")
+            git(work, "add", "cmd.json")
+            git(work, "commit", "-m", str(seq))
+            result = git(work, "push", "origin", "main", check=False)
+            if result.returncode == 0:
+                pushed = True
+                break
+            # conflict: ditch the clone, start fresh, increment seq
+            shutil.rmtree(work, ignore_errors=True)
+            time.sleep(1 + attempt)
+            work = fresh_clone()
+            cmd_data = read_json(work, "cmd.json")
+            seq = cmd_data.get("seq", 0) + 1
+            new_cmd["seq"] = seq
+
+        if not pushed:
+            print("Failed to push command after retries", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"[bridge] sent seq={seq} cmd={command} args={args}", file=sys.stderr)
+        shutil.rmtree(work, ignore_errors=True)
+        work = None
+
+        time.sleep(15 if command in ("restart", "update") else 1)
+
+        # poll: fresh clone each time, no stale state possible
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            work = fresh_clone()
+            result = read_json(work, "result.json")
+            if result.get("seq") == seq:
+                output = result.get("output", "")
+                error = result.get("error", "")
+                artifact_text = None
+                if command == "logs" and "--list" not in args and "--search" not in args:
+                    artifact_text = read_text(work, "logs/current.log")
+                elif command == "logs" and "--search" in args:
+                    artifact_text = read_text(work, "logs/search.json")
+                elif command == "logs" and "--list" in args:
+                    artifact_text = read_text(work, "logs/list.json")
+                elif command == "config" and args:
+                    artifact_text = read_text(work, f"config/{args[0]}.json")
+                elif command == "db-query" and args:
+                    artifact_text = read_text(work, f"db/{args[0]}_query.json")
+                if artifact_text:
+                    print(artifact_text)
+                elif output:
+                    print(output)
+                if error:
+                    print(f"Error: {error}", file=sys.stderr)
+                return
+            shutil.rmtree(work, ignore_errors=True)
+            work = None
+            time.sleep(1)
+
+        print(f"[bridge] timed out waiting for seq={seq}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"[bridge] sent seq={seq} cmd={command} args={args}", file=sys.stderr)
-
-    # adaptive initial wait
-    initial_sleep = 15 if command in ("restart", "update") else 1
-    time.sleep(initial_sleep)
-
-    # poll by pulling and reading result.json
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        pull()
-        result = read_json("result.json")
-        if result.get("seq") == seq:
-            output = result.get("output", "")
-            error = result.get("error", "")
-
-            artifact_text = None
-            if command == "logs" and "--list" not in args and "--search" not in args:
-                artifact_text = read_text("logs/current.log")
-            elif command == "logs" and "--search" in args:
-                artifact_text = read_text("logs/search.json")
-            elif command == "logs" and "--list" in args:
-                artifact_text = read_text("logs/list.json")
-            elif command == "config" and args:
-                artifact_text = read_text(f"config/{args[0]}.json")
-            elif command == "db-query" and args:
-                artifact_text = read_text(f"db/{args[0]}_query.json")
-
-            if artifact_text:
-                print(artifact_text)
-            elif output:
-                print(output)
-            if error:
-                print(f"Error: {error}", file=sys.stderr)
-            return
-        time.sleep(1)
-
-    print(f"[bridge] timed out waiting for seq={seq}", file=sys.stderr)
-    sys.exit(1)
-
-
+    finally:
+        if work:
+            shutil.rmtree(work, ignore_errors=True)
 def main():
     cfg = _load_client_config()
     if cfg.get("server", False):

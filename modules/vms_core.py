@@ -880,12 +880,13 @@ def setup(bot):
                             guild_id is not None and
                             manager.is_transcription_disabled(str(message.author.id), guild_id)
                         )
-                        if not opted_out:
-                            await manager.enqueue(vm_id, str(resolved), reply_to=message)
-                        else:
+                        await manager.enqueue(
+                            vm_id, str(resolved),
+                            reply_to=None if opted_out else message
+                        )
+                        if opted_out:
                             bot.logger.log(MODULE_NAME,
-                                f"Auto-transcription skipped for VM #{vm_id} "
-                                f"(user {message.author} has opted out)")
+                                f"VM #{vm_id} transcribed silently (user {message.author} opted out)")
             return
 
         is_mention = bot.user in message.mentions

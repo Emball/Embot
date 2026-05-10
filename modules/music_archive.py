@@ -754,18 +754,10 @@ class ARCHIVEManager:
         cached = 0
         for fp in sorted(seen):
             try:
-                entry = _cache_lookup(fp)
-                if entry:
-                    stored = entry.get('file_checksum', '')
-                    if stored and stored != _file_checksum(fp):
-                        with _db_conn() as c:
-                            c.execute("DELETE FROM song_cache WHERE file_path=?", (str(Path(fp)),))
-                            c.commit()
-                        pending.append(fp)
-                    else:
-                        cached += 1
-                    continue
-                pending.append(fp)
+                if _cache_lookup(fp):
+                    cached += 1
+                else:
+                    pending.append(fp)
             except Exception:
                 pass
         return pending, cached, len(seen) - len(pending) - cached

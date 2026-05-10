@@ -507,7 +507,7 @@ class ClaudeBridgeListener:
                     self.bot.logger.log(MODULE_NAME, f"[bridge] seq={seq} cmd={command} args={args}")
                     self._last_seq = seq
                     output, artifacts = await self._execute(command, args)
-                    await self._write_results(seq, command, output, artifacts)
+                    asyncio.create_task(self._write_results(seq, command, output, artifacts))
             except Exception as e:
                 self.bot.logger.error(MODULE_NAME, f"[bridge] poll error", e)
             await asyncio.sleep(self._interval)

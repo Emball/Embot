@@ -165,6 +165,26 @@ LAN: `uv run python modules/remote_debug.py <command> [args...]`
 
 `restart`/`update` wait smartly for the bot to come back online.
 
+## Debugging
+
+The bot auto-updates. After every push it polls git every ~1 minute, detects the version bump, pulls, and restarts. Use `bridge update` or `bridge restart` to trigger this immediately rather than waiting out the interval. Auto-update is a good fallback if the server is unreachable.
+
+Testing individual files is recommended, but do not try to run a Embot.py session locally. How the live bot responds to the latest code is the ideal source of truth on whether or not it's truly clean.
+
+Exec is useful for debugging when you need to do something in the live bot root that remote_debug doesn't satisfy. Try to avoid modifying the live bot files though, as it can create uncommitted changes that block `git pull --ff-only`. Code edits go through git: edit locally → commit → push → server pulls.
+
+The raw, live bot log is a great source of truth. Check it first every time if something fails. The outputs are generally very verbose.
+
+Before drawing any conclusions about why something broke, fetch a large chunk of the log. Searching for specific strings is useful but can miss context.
+
+Log Workflow:
+1. Run `date` in the bash tool to get current UTC time, then cross-reference against log timestamps to identify the current session and ignore stale entries
+2. `logs --tail 500` (or `--tail 1000` for harder problems) — read the raw output
+3. Only use `--search` once you know what you're looking for
+4. If the log doesn't show the error, go wider or pull the entire log file if necessary
+
+If that fails to identify the issue, you can expand to other avenues.
+
 ## Full Audit Protocol
 
 Triggered by Michael saying **"full audit"** or **"audit: \<scope\>"**.
@@ -199,26 +219,6 @@ Group findings by severity:
 **Suggestions** — not broken, but worth improving
 
 For each finding: file + line range, one-line description, and whether it's safe to fix immediately or needs discussion first.
-
-## Debugging
-
-The bot auto-updates. After every push it polls git every ~1 minute, detects the version bump, pulls, and restarts. Use `bridge update` or `bridge restart` to trigger this immediately rather than waiting out the interval. Auto-update is a good fallback if the server is unreachable.
-
-Testing individual files is recommended, but do not try to run a Embot.py session locally. How the live bot responds to the latest code is the ideal source of truth on whether or not it's truly clean.
-
-Exec is useful for debugging when you need to do something in the live bot root that remote_debug doesn't satisfy. Try to avoid modifying the live bot files though, as it can create uncommitted changes that block `git pull --ff-only`. Code edits go through git: edit locally → commit → push → server pulls.
-
-The raw, live bot log is a great source of truth. Check it first every time if something fails. The outputs are generally very verbose.
-
-Before drawing any conclusions about why something broke, fetch a large chunk of the log. Searching for specific strings is useful but can miss context.
-
-Log Workflow:
-1. Run `date` in the bash tool to get current UTC time, then cross-reference against log timestamps to identify the current session and ignore stale entries
-2. `logs --tail 500` (or `--tail 1000` for harder problems) — read the raw output
-3. Only use `--search` once you know what you're looking for
-4. If the log doesn't show the error, go wider or pull the entire log file if necessary
-
-If that fails to identify the issue, you can expand to other avenues.
 
 ## Session Start Acknowledgement
 

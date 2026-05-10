@@ -185,4 +185,4 @@ If that fails to identify the issue, you can expand to other avenues.
 
 ## Session Start Acknowledgement
 
-After reading this file, respond with exactly: "Ready. Embot vX.Y.Z.W — [one line summary of current bot state or last known activity]."
+After reading this file, respond with: "I've read AGENTs.md! [quick summary of your understanding of the workflows and codebase]. What are we working on today, Michael?"

@@ -1474,8 +1474,11 @@ def setup(bot):
                     await reply_message.delete()
                 except Exception:
                     pass
-            # delete original VM message
+            # delete original VM message (suppress logger boilerplate)
             if vm_message:
+                suppressed = set(getattr(bot, '_automod_purged_ids', ()))
+                suppressed.add(vm_message.id)
+                bot._automod_purged_ids = suppressed
                 try:
                     await vm_message.delete()
                 except Exception:

@@ -54,6 +54,10 @@ class EventLogger:
             return
         if message.author.bot:
             return
+        suppressed = getattr(self.bot, '_automod_purged_ids', set())
+        if message.id in suppressed:
+            suppressed.discard(message.id)
+            return
 
         channel = self.get_bot_logs_channel(message.guild)
         if not channel:

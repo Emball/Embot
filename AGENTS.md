@@ -90,9 +90,11 @@ uv run python modules/remote_debug.py bridge update
 uv run python modules/remote_debug.py bridge restart
 ```
 
-The `bridge` command handles everything: conflict-retrying push, adaptive sleep (longer for restart/update), polling, and fetching artifact content. No manual git or sleep needed.
+The `bridge` command handles everything via plain git (no GitHub API calls): conflict-retrying push, polling, and fetching artifact content. No manual git or sleep needed.
 
-Use `--timeout N` to extend the wait window (default 45s). For restart/update it sleeps 8s before polling; all others sleep 3s first.
+On boot the bot writes `status.json` to EmbotDebug with `online`, `version`, and `started_at`. The bridge client uses this to wait smartly — for `restart`/`update` it reads the pre-restart `started_at` and polls until a newer timestamp appears, rather than blindly sleeping. Normal commands wait ~1s then poll every 1s.
+
+Use `--timeout N` to extend the wait window (default 45s).
 
 ## Debugging
 

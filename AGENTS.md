@@ -109,7 +109,7 @@ Ensure there's no avenues in a module where an error could be silently swallowed
 - Bump thresholds (lines changed):
   - `300+` → MAJOR, `100+` → MINOR, `20+` → PATCH, `1+` → MICRO
 - Commit message = version number only.
-- Increment version, commit, and push after every edit. No permission needed.
+- Increment version, commit, and push after every edit. No permission needed. Always stage `_version.py` in the same commit as the code change — never commit code without it.
 - Keep `requirements.txt` synced. Keep `.gitignore` clean. Keep AGENTS.md current.
 - Temp/test code goes in `/temp` (gitignored).
 

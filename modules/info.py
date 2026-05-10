@@ -182,4 +182,14 @@ def setup(bot):
         asyncio.create_task(_periodic_verify(bot))
         bot.logger.log(MODULE_NAME, "Info module ready")
 
+    # If the bot is already ready (e.g. module loaded after on_ready fired), kick off directly
+    if bot.is_ready():
+        async def _late_start():
+            for guild in bot.guilds:
+                await _sync(bot, guild)
+            asyncio.create_task(_watch_loop(bot))
+            asyncio.create_task(_periodic_verify(bot))
+            bot.logger.log(MODULE_NAME, "Info module ready (late start)")
+        asyncio.ensure_future(_late_start())
+
     bot.logger.log(MODULE_NAME, "Info module loaded")

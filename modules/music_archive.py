@@ -357,9 +357,14 @@ def _cache_store(file_path: str, cdn_url: str, message_id: str, channel_id: str,
     now = _now().isoformat()
     with _db_conn() as c:
         c.execute(
-            "INSERT OR REPLACE INTO song_cache "
+            "INSERT INTO song_cache "
             "(file_path, cdn_url, message_id, channel_id, file_name, file_size, file_checksum, transcoded, cached_at, accessed_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "VALUES (?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(file_path) DO UPDATE SET "
+            "cdn_url=excluded.cdn_url, message_id=excluded.message_id, channel_id=excluded.channel_id, "
+            "file_name=excluded.file_name, file_size=excluded.file_size, "
+            "file_checksum=CASE WHEN excluded.file_checksum != '' THEN excluded.file_checksum ELSE file_checksum END, "
+            "transcoded=excluded.transcoded, accessed_at=excluded.accessed_at",
             (key, cdn_url, str(message_id), str(channel_id), file_name, file_size, checksum, transcoded, now, now)
         )
         c.commit()

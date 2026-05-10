@@ -68,15 +68,23 @@ GitHub-based command queue via private `Emball/EmbotDebug` repo. The bot polls `
 
 **Claude's workflow per session:**
 ```bash
-git clone https://TOKEN@github.com/Emball/EmbotDebug.git /tmp/EmbotDebug
-```
-1. Read `seq` from `cmd.json`, increment by 1
-2. Write `cmd.json` with new `seq`, `command`, `args`
-3. Commit and push
-4. Sleep, pull, check `result.json` seq matches — retry if not
-5. Read `result.json` and/or artifact files
+# One-liner — send command, wait, print result automatically
+uv run python modules/remote_debug.py bridge <command> [args...]
 
-**Sleep times:** `sleep 5` for all commands — `sleep 10` for restart/update. Result stays available for 15 seconds before the bot zeroes both files.
+# Examples
+uv run python modules/remote_debug.py bridge status
+uv run python modules/remote_debug.py bridge logs --tail 500
+uv run python modules/remote_debug.py bridge logs --search "ERROR"
+uv run python modules/remote_debug.py bridge config starboard
+uv run python modules/remote_debug.py bridge db-query mod "SELECT name FROM sqlite_master WHERE type='table'"
+uv run python modules/remote_debug.py bridge exec "echo hello"
+uv run python modules/remote_debug.py bridge update
+uv run python modules/remote_debug.py bridge restart
+```
+
+The `bridge` command handles everything: conflict-retrying push, adaptive sleep (longer for restart/update), polling, and fetching artifact content. No manual git or sleep needed.
+
+Use `--timeout N` to extend the wait window (default 45s). For restart/update it sleeps 8s before polling; all others sleep 3s first.
 
 ## Debugging
 

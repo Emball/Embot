@@ -858,6 +858,139 @@ def _cmd_restart(cfg):
     _auto_tail(cfg)
 
 
+def _cmd_bridge(bridge_cfg, command, args, timeout=45):
+    """Send a command via Claude bridge, wait for result, print everything. No external tools needed."""
+    import base64 as _b64
+    import tempfile, shutil
+
+    repo = bridge_cfg.get("repo", "Emball/EmbotDebug")
+    token = bridge_cfg.get("token", "")
+    if not token:
+        print("Error: claude_bridge.token not set in config", file=sys.stderr)
+        sys.exit(1)
+
+    def gh(path, method="GET", body=None):
+        bust = f"?t={int(time.time()*1000)}" if method == "GET" else ""
+        url = f"https://api.github.com/repos/{repo}/contents/{path}{bust}"
+        req = urllib.request.Request(url, method=method)
+        req.add_header("Authorization", f"token {token}")
+        req.add_header("Accept", "application/vnd.github.v3+json")
+        req.add_header("Cache-Control", "no-cache")
+        if body:
+            req.add_header("Content-Type", "application/json")
+            req.data = json.dumps(body).encode()
+        ctx = ssl._create_unverified_context()
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+            return json.loads(r.read())
+
+    def gh_get(path):
+        data = gh(path)
+        content = _b64.b64decode(data["content"]).decode()
+        return json.loads(content), data["sha"]
+
+    def gh_put(path, content, sha, message):
+        if isinstance(content, (dict, list)):
+            raw = json.dumps(content, indent=2) + "\n"
+        else:
+            raw = str(content)
+        body = {"message": message, "content": _b64.b64encode(raw.encode()).decode()}
+        if sha:
+            body["sha"] = sha
+        return gh(path, method="PUT", body=body)
+
+    def gh_get_sha(path):
+        try:
+            return gh(path)["sha"]
+        except Exception:
+            return None
+
+    def gh_get_text(path):
+        """Get a file's raw text content."""
+        try:
+            data = gh(path)
+            return _b64.b64decode(data["content"]).decode()
+        except Exception:
+            return None
+
+    # get current seq
+    try:
+        cmd_data, _ = gh_get("cmd.json")
+        seq = cmd_data.get("seq", 0) + 1
+    except Exception as e:
+        print(f"Error reading cmd.json: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    new_cmd = {"seq": seq, "command": command, "args": args}
+
+    # push with retry on conflict
+    pushed = False
+    for attempt in range(6):
+        try:
+            sha = gh_get_sha("cmd.json")
+            gh_put("cmd.json", new_cmd, sha or "", str(seq))
+            pushed = True
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 409 and attempt < 5:
+                time.sleep(1 + attempt)
+                # re-read seq in case it changed
+                try:
+                    cmd_data, _ = gh_get("cmd.json")
+                    seq = cmd_data.get("seq", 0) + 1
+                    new_cmd["seq"] = seq
+                except Exception:
+                    pass
+                continue
+            print(f"Push failed: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    if not pushed:
+        print("Failed to push command after retries", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"[bridge] sent seq={seq} cmd={command} args={args}", file=sys.stderr)
+
+    # adaptive wait: restart/update take longer to come back
+    initial_sleep = 8 if command in ("restart", "update") else 3
+    time.sleep(initial_sleep)
+
+    # poll for result
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            result, _ = gh_get("result.json")
+            if result.get("seq") == seq:
+                output = result.get("output", "")
+                error = result.get("error", "")
+
+                # for file artifact commands, fetch the artifact too
+                artifact_text = None
+                if command == "logs" and "--list" not in args and "--search" not in args:
+                    artifact_text = gh_get_text("logs/current.log")
+                elif command == "logs" and "--search" in args:
+                    artifact_text = gh_get_text("logs/search.json")
+                elif command == "logs" and "--list" in args:
+                    artifact_text = gh_get_text("logs/list.json")
+                elif command == "config" and args:
+                    artifact_text = gh_get_text(f"config/{args[0]}.json")
+                elif command == "db-query" and args:
+                    artifact_text = gh_get_text(f"db/{args[0]}_query.json")
+
+                if artifact_text:
+                    print(artifact_text)
+                elif output:
+                    print(output)
+                if error:
+                    print(f"Error: {error}", file=sys.stderr)
+                return
+        except Exception:
+            pass
+        time.sleep(2)
+
+    print(f"[bridge] timed out waiting for seq={seq}", file=sys.stderr)
+    sys.exit(1)
+
+
 def main():
     cfg = _load_client_config()
     if cfg.get("server", False):
@@ -902,6 +1035,11 @@ def main():
     sub.add_parser("update", help="Git pull and restart if updated")
     sub.add_parser("restart", help="Restart the bot")
 
+    bridge_p = sub.add_parser("bridge", help="Send a command via Claude bridge and wait for result")
+    bridge_p.add_argument("bridge_command", help="Command to send (e.g. status, logs, exec)")
+    bridge_p.add_argument("bridge_args", nargs="*", help="Arguments for the command")
+    bridge_p.add_argument("--timeout", type=int, default=45, help="Seconds to wait for result (default: 45)")
+
     args = parser.parse_args()
     cfg["token"] = args.token
 
@@ -929,6 +1067,9 @@ def main():
         _cmd_update(cfg)
     elif args.command == "restart":
         _cmd_restart(cfg)
+    elif args.command == "bridge":
+        bridge_cfg = cfg.get("claude_bridge", {})
+        _cmd_bridge(bridge_cfg, args.bridge_command, args.bridge_args, args.timeout)
 
 
 if __name__ == "__main__":

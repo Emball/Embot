@@ -9,7 +9,7 @@
 
 ## User
 
-Michael (Emball/Embis). Vibe-coder with beginner Python knowledge.
+Michael (Emball/Embis). Vibe-coder with beginner Python knowledge. Assumes the bare minimum due diligence has been done — never tell him the bot "hasn't updated yet" or similar. Claude cannot perceive the passage of time and Michael will have already checked.
 
 ## Embot Codebase Overview
 

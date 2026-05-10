@@ -14,6 +14,7 @@ import ssl
 from datetime import datetime
 import time
 import pathlib
+import tempfile
 from aiohttp import web
 
 from _utils import script_dir, migrate_config, atomic_json_write
@@ -860,9 +861,11 @@ def _cmd_restart(cfg):
     _auto_tail(cfg)
 
 
+_BRIDGE_DIR = pathlib.Path(tempfile.gettempdir()) / "embotdebug"
+
 def _cmd_bridge(bridge_cfg, command, args, timeout=45):
     """Send a command via Claude bridge using plain git. Claude side never touches GitHub API."""
-    import tempfile, shutil, subprocess
+    import shutil, subprocess
 
     repo = bridge_cfg.get("repo", "Emball/EmbotDebug")
     token = bridge_cfg.get("token", "")
@@ -871,11 +874,20 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
         sys.exit(1)
 
     remote = f"https://{token}@github.com/{repo}.git"
-    work = pathlib.Path(tempfile.mkdtemp(prefix="embotdebug_"))
+    work = _BRIDGE_DIR
 
     def git(*cmd_args, check=True):
         return subprocess.run(["git", "-C", str(work)] + list(cmd_args),
                               capture_output=True, text=True, check=check)
+
+    def fresh():
+        """Nuke and re-clone for a clean slate."""
+        if work.exists():
+            shutil.rmtree(work)
+        subprocess.run(["git", "clone", "--depth=1", remote, str(work)],
+                       capture_output=True, text=True, check=True)
+        git("config", "user.email", "claude@bridge")
+        git("config", "user.name", "Claude")
 
     def pull():
         git("fetch", "origin")
@@ -891,80 +903,71 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
         p = work / name
         return p.read_text() if p.exists() else None
 
-    try:
-        # clone
-        subprocess.run(["git", "clone", "--depth=1", remote, str(work)],
-                       capture_output=True, text=True, check=True)
-        git("config", "user.email", "claude@bridge")
-        git("config", "user.name", "Claude")
+    # always start fresh — nuke stale state from any previous command
+    fresh()
 
+    cmd_data = read_json("cmd.json")
+    seq = cmd_data.get("seq", 0) + 1
+    new_cmd = {"seq": seq, "command": command, "args": args}
+
+    # push with retry on conflict — re-clone on conflict for guaranteed clean state
+    pushed = False
+    for attempt in range(6):
+        write_json("cmd.json", new_cmd)
+        git("add", "cmd.json")
+        git("commit", "-m", str(seq))
+        result = git("push", "origin", "main", check=False)
+        if result.returncode == 0:
+            pushed = True
+            break
+        fresh()
         cmd_data = read_json("cmd.json")
         seq = cmd_data.get("seq", 0) + 1
-        new_cmd = {"seq": seq, "command": command, "args": args}
+        new_cmd["seq"] = seq
+        time.sleep(1 + attempt)
 
-        # push with retry on conflict
-        pushed = False
-        for attempt in range(6):
-            write_json("cmd.json", new_cmd)
-            git("add", "cmd.json")
-            git("commit", "-m", str(seq))
-            result = git("push", "origin", "main", check=False)
-            if result.returncode == 0:
-                pushed = True
-                break
-            # conflict — pull and retry with incremented seq
-            pull()
-            cmd_data = read_json("cmd.json")
-            seq = cmd_data.get("seq", 0) + 1
-            new_cmd["seq"] = seq
-            git("reset", "--soft", "HEAD~1")
-            time.sleep(1 + attempt)
-
-        if not pushed:
-            print("Failed to push command after retries", file=sys.stderr)
-            sys.exit(1)
-
-        print(f"[bridge] sent seq={seq} cmd={command} args={args}", file=sys.stderr)
-
-        # adaptive initial wait — bot polls every 2s so worst case is ~2s before execution
-        initial_sleep = 15 if command in ("restart", "update") else 1
-        time.sleep(initial_sleep)
-
-        # poll by pulling and reading result.json
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            pull()
-            result = read_json("result.json")
-            if result.get("seq") == seq:
-                output = result.get("output", "")
-                error = result.get("error", "")
-
-                artifact_text = None
-                if command == "logs" and "--list" not in args and "--search" not in args:
-                    artifact_text = read_text("logs/current.log")
-                elif command == "logs" and "--search" in args:
-                    artifact_text = read_text("logs/search.json")
-                elif command == "logs" and "--list" in args:
-                    artifact_text = read_text("logs/list.json")
-                elif command == "config" and args:
-                    artifact_text = read_text(f"config/{args[0]}.json")
-                elif command == "db-query" and args:
-                    artifact_text = read_text(f"db/{args[0]}_query.json")
-
-                if artifact_text:
-                    print(artifact_text)
-                elif output:
-                    print(output)
-                if error:
-                    print(f"Error: {error}", file=sys.stderr)
-                return
-            time.sleep(1)
-
-        print(f"[bridge] timed out waiting for seq={seq}", file=sys.stderr)
+    if not pushed:
+        print("Failed to push command after retries", file=sys.stderr)
         sys.exit(1)
 
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
+    print(f"[bridge] sent seq={seq} cmd={command} args={args}", file=sys.stderr)
+
+    # adaptive initial wait
+    initial_sleep = 15 if command in ("restart", "update") else 1
+    time.sleep(initial_sleep)
+
+    # poll by pulling and reading result.json
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        pull()
+        result = read_json("result.json")
+        if result.get("seq") == seq:
+            output = result.get("output", "")
+            error = result.get("error", "")
+
+            artifact_text = None
+            if command == "logs" and "--list" not in args and "--search" not in args:
+                artifact_text = read_text("logs/current.log")
+            elif command == "logs" and "--search" in args:
+                artifact_text = read_text("logs/search.json")
+            elif command == "logs" and "--list" in args:
+                artifact_text = read_text("logs/list.json")
+            elif command == "config" and args:
+                artifact_text = read_text(f"config/{args[0]}.json")
+            elif command == "db-query" and args:
+                artifact_text = read_text(f"db/{args[0]}_query.json")
+
+            if artifact_text:
+                print(artifact_text)
+            elif output:
+                print(output)
+            if error:
+                print(f"Error: {error}", file=sys.stderr)
+            return
+        time.sleep(1)
+
+    print(f"[bridge] timed out waiting for seq={seq}", file=sys.stderr)
+    sys.exit(1)
 
 
 def main():

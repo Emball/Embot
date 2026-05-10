@@ -632,27 +632,32 @@ class ClaudeBridgeListener:
 
     async def _write_results(self, seq, command, output, artifacts):
         def _commit():
-            # write result.json
-            result_sha = self._gh_get_sha("result.json")
-            self._gh_put_file("result.json", {"seq": seq, "command": command, "output": output}, result_sha or "", str(seq))
-            # write artifacts
-            for path, content in artifacts.items():
-                sha = self._gh_get_sha(path)
-                if isinstance(content, bytes):
-                    self._gh_put_binary(path, content, sha or "", str(seq))
-                elif isinstance(content, str):
-                    import base64
-                    body = {
-                        "message": str(seq),
-                        "content": base64.b64encode(content.encode()).decode(),
-                    }
-                    if sha:
-                        body["sha"] = sha
-                    self._gh_request(path, method="PUT", body=body)
-                else:
-                    self._gh_put_file(path, content, sha or "", str(seq))
-        await asyncio.get_event_loop().run_in_executor(None, _commit)
-        self.bot.logger.log(MODULE_NAME, f"[bridge] seq={seq} result committed")
+            try:
+                result_sha = self._gh_get_sha("result.json")
+                self._gh_put_file("result.json", {"seq": seq, "command": command, "output": output}, result_sha or "", str(seq))
+                for path, content in artifacts.items():
+                    sha = self._gh_get_sha(path)
+                    if isinstance(content, bytes):
+                        self._gh_put_binary(path, content, sha or "", str(seq))
+                    elif isinstance(content, str):
+                        import base64
+                        body = {
+                            "message": str(seq),
+                            "content": base64.b64encode(content.encode()).decode(),
+                        }
+                        if sha:
+                            body["sha"] = sha
+                        self._gh_request(path, method="PUT", body=body)
+                    else:
+                        self._gh_put_file(path, content, sha or "", str(seq))
+                return None
+            except Exception as e:
+                return e
+        err = await asyncio.get_event_loop().run_in_executor(None, _commit)
+        if err:
+            self.bot.logger.log(MODULE_NAME, f"[bridge] seq={seq} commit failed: {err}", "ERROR")
+        else:
+            self.bot.logger.log(MODULE_NAME, f"[bridge] seq={seq} result committed")
 
         await asyncio.sleep(15)
 

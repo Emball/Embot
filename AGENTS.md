@@ -70,7 +70,11 @@ GitHub-based command queue via private `Emball/EmbotDebug` repo. The bot polls `
 
 **Claude's workflow per session:**
 
-First, store the token the user provides (once per session):
+The GitHub token is in Claude's user preferences as `GitHub Access Token: ghp_...`. This is the same token used for cloning the repo and for `session-init` — there is no separate debug token.
+
+`remote_debug.py` imports `aiohttp` lazily (inside `RemoteDebugServer.__init__`), so no deps need to be installed for the bridge to work.
+
+First, init with that token (once per session):
 ```bash
 python modules/remote_debug.py session-init ghp_...
 ```

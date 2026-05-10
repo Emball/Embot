@@ -33,11 +33,10 @@ Run from project root:
 | `uv run python modules/remote_debug.py logs` | Last 200 lines of today's log |
 | `uv run python modules/remote_debug.py logs --file session_20250101.log` | Specific day file |
 | `uv run python modules/remote_debug.py logs --session 2` | Specific session |
-| `uv run python modules/remote_debug.py logs --lines 1000` | Last N lines |
+| `uv run python modules/remote_debug.py logs --tail 1000` | Last N lines |
 | `uv run python modules/remote_debug.py logs --search <pattern>` | Regex search logs |
 | `uv run python modules/remote_debug.py logs --search <pattern> --max 50` | Search with result limit |
 | `uv run python modules/remote_debug.py logs-list` | All log files |
-| `uv run python modules/remote_debug.py stream` | Live log tail |
 | `uv run python modules/remote_debug.py db-download <name>` | Download .db to temp/ |
 | `uv run python modules/remote_debug.py db-query <name> "<SQL>"` | SELECT/PRAGMA query |
 | `uv run python modules/remote_debug.py config <name>` | View config file |
@@ -78,6 +77,17 @@ git clone https://TOKEN@github.com/Emball/EmbotDebug.git /tmp/EmbotDebug
 5. Read `result.json` and/or artifact files
 
 **Sleep times:** `sleep 5` for all commands — `sleep 10` for restart/update. Result stays available for 15 seconds before the bot zeroes both files.
+
+## Debugging
+
+**The raw log is the #1 source of truth — check it first, every time.**
+
+Before drawing any conclusions about why something broke, fetch a large chunk of the log. Searching for specific strings is useful but can miss context; a broad `--tail 500` or `--tail 1000` will almost always show the error directly. Don't rely on bridge result output, git history, or assumptions — the log contains the actual traceback, the actual sequence of events, and the actual error message.
+
+Workflow:
+1. `logs --tail 500` (or `--tail 1000` for harder problems) — read the raw output
+2. Only use `--search` once you know what you're looking for
+3. If the log doesn't show the error, go wider (`--tail 2000`, different session) before trying anything else
 
 ## Code Style
 

@@ -409,6 +409,149 @@ async def prefix_update(ctx):
         await msg.edit(content="Already up to date.")
         await msg.delete(delay=8)
 
+_console = app_commands.Group(name="console", description="[Owner only] Bot console commands")
+
+def _owner_only(interaction: discord.Interaction) -> bool:
+    return interaction.user.id == interaction.guild.owner_id
+
+async def _deny(interaction: discord.Interaction):
+    await interaction.response.send_message("Owner only.", ephemeral=True)
+
+@_console.command(name="status", description="Bot status and vitals")
+async def console_status(interaction: discord.Interaction):
+    if not _owner_only(interaction):
+        return await _deny(interaction)
+    uptime = 0
+    server = getattr(bot, "remote_debug_server", None)
+    if server and server._start_time:
+        import time as _time
+        uptime = int(_time.time() - server._start_time)
+    hours, rem = divmod(uptime, 3600)
+    mins, secs = divmod(rem, 60)
+    lines = [
+        f"**Embot v{getattr(bot, 'version', 'unknown')}**",
+        f"User: `{bot.user}`",
+        f"Latency: `{round(bot.latency * 1000, 1)}ms`",
+        f"Uptime: `{hours}h {mins}m {secs}s`",
+        f"Guilds: `{len(bot.guilds)}`",
+    ]
+    if hasattr(bot.logger, "log_file"):
+        lines.append(f"Log: `{bot.logger.log_file.name}`")
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+    bot.logger.log("MAIN", f"/console status used by {interaction.user}")
+
+@_console.command(name="modules", description="List loaded and failed modules")
+async def console_modules(interaction: discord.Interaction):
+    if not _owner_only(interaction):
+        return await _deny(interaction)
+    data = get_modules_data()
+    if data is None:
+        return await interaction.response.send_message("No log file available.", ephemeral=True)
+    loaded, failed = data.get("loaded", []), data.get("failed", [])
+    lines = [f"**Loaded ({len(loaded)}):**"] + [f"`{m}`" for m in loaded]
+    if failed:
+        lines += [f"**Failed ({len(failed)}):**"] + [f"`{m}`" for m in failed]
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+    bot.logger.log("MAIN", f"/console modules used by {interaction.user}")
+
+@_console.command(name="logs", description="Fetch recent log lines (sent as file)")
+@app_commands.describe(tail="Number of lines (default 200)", search="Regex search pattern")
+async def console_logs(interaction: discord.Interaction, tail: int = 200, search: str = None):
+    if not _owner_only(interaction):
+        return await _deny(interaction)
+    await interaction.response.defer(ephemeral=True)
+    try:
+        data = get_logs_data(tail=tail, search=search)
+    except re.error as e:
+        return await interaction.followup.send(f"Invalid regex: {e}", ephemeral=True)
+    if data.get("error"):
+        return await interaction.followup.send(data["error"], ephemeral=True)
+    if "matches" in data:
+        matches = data["matches"]
+        text = "\n".join(f"{m['file']}:{m['line']}: {m['content']}" for m in matches)
+        label = f"{len(matches)} match(es)"
+        if data["truncated"]:
+            label += " (truncated)"
+        if not matches:
+            return await interaction.followup.send("No matches.", ephemeral=True)
+    else:
+        text = data.get("lines", "")
+        label = f"{len(text.splitlines())} lines"
+    await interaction.followup.send(
+        label,
+        file=discord.File(fp=__import__("io").StringIO(text), filename="logs.txt"),
+        ephemeral=True,
+    )
+    bot.logger.log("MAIN", f"/console logs (tail={tail} search={search}) used by {interaction.user}")
+
+@_console.command(name="config", description="View a config file")
+@app_commands.describe(name="Config name without .json (e.g. embot, mod, vms)")
+async def console_config(interaction: discord.Interaction, name: str):
+    if not _owner_only(interaction):
+        return await _deny(interaction)
+    data, err = get_config_data(name)
+    if err:
+        return await interaction.response.send_message(err, ephemeral=True)
+    text = json.dumps(data, indent=2)
+    await interaction.response.send_message(
+        f"`config/{name}.json`",
+        file=discord.File(fp=__import__("io").StringIO(text), filename=f"{name}.json"),
+        ephemeral=True,
+    )
+    bot.logger.log("MAIN", f"/console config {name} used by {interaction.user}")
+
+@_console.command(name="dbquery", description="Run a read-only SQL query on a database")
+@app_commands.describe(name="DB name without .db (e.g. mod, vms)", query="SELECT query")
+async def console_dbquery(interaction: discord.Interaction, name: str, query: str):
+    if not _owner_only(interaction):
+        return await _deny(interaction)
+    await interaction.response.defer(ephemeral=True)
+    rows, err = run_db_query(name, query)
+    if err:
+        return await interaction.followup.send(err, ephemeral=True)
+    if not rows:
+        return await interaction.followup.send("(empty result)", ephemeral=True)
+    text = "\n".join(json.dumps(r, default=str) for r in rows) + f"\n({len(rows)} rows)"
+    await interaction.followup.send(
+        f"{len(rows)} row(s)",
+        file=discord.File(fp=__import__("io").StringIO(text), filename="query.txt"),
+        ephemeral=True,
+    )
+    bot.logger.log("MAIN", f"/console dbquery {name} used by {interaction.user}")
+
+@_console.command(name="exec", description="Run a shell command on the bot server")
+@app_commands.describe(cmd="Shell command to run")
+async def console_exec(interaction: discord.Interaction, cmd: str):
+    if not _owner_only(interaction):
+        return await _deny(interaction)
+    await interaction.response.defer(ephemeral=True)
+    try:
+        out, err, code = await run_exec(cmd, timeout=30)
+    except asyncio.TimeoutError:
+        return await interaction.followup.send("Timed out after 30s.", ephemeral=True)
+    except Exception as e:
+        return await interaction.followup.send(f"Error: {e}", ephemeral=True)
+    text = (out + err).strip() or f"(exit {code})"
+    if len(text) <= 1900:
+        await interaction.followup.send(f"```\n{text}\n```", ephemeral=True)
+    else:
+        await interaction.followup.send(
+            f"exit {code}",
+            file=discord.File(fp=__import__("io").StringIO(text), filename="output.txt"),
+            ephemeral=True,
+        )
+    bot.logger.log("MAIN", f"/console exec {repr(cmd)} used by {interaction.user}")
+
+@_console.command(name="restart", description="Restart the bot")
+async def console_restart(interaction: discord.Interaction):
+    if not _owner_only(interaction):
+        return await _deny(interaction)
+    await interaction.response.send_message("Restarting...", ephemeral=True)
+    bot.logger.log("MAIN", f"/console restart used by {interaction.user}")
+    await _restart_async(bot)
+
+bot.tree.add_command(_console)
+
 @bot.event
 async def on_ready():
     if not hasattr(bot, 'initialized'):

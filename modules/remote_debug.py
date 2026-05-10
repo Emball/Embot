@@ -926,8 +926,8 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
 
         print(f"[bridge] sent seq={seq} cmd={command} args={args}", file=sys.stderr)
 
-        # adaptive initial wait
-        initial_sleep = 8 if command in ("restart", "update") else 3
+        # adaptive initial wait — bot polls every 2s so worst case is ~2s before execution
+        initial_sleep = 15 if command in ("restart", "update") else 1
         time.sleep(initial_sleep)
 
         # poll by pulling and reading result.json
@@ -958,7 +958,7 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
                 if error:
                     print(f"Error: {error}", file=sys.stderr)
                 return
-            time.sleep(2)
+            time.sleep(1)
 
         print(f"[bridge] timed out waiting for seq={seq}", file=sys.stderr)
         sys.exit(1)

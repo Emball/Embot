@@ -530,36 +530,7 @@ class ModerationSystem:
         _migrate_logger_config()
         self.cfg     = ModConfig()
 
-        import base64 as _b64, hashlib as _hl
-        _fernet_secret = os.environ.get("FERNET_KEY")
-        if _fernet_secret:
-            _derived = _b64.urlsafe_b64encode(
-                _hl.sha256(_fernet_secret.encode()).digest()
-            )
-            self._fernet = Fernet(_derived)
-        else:
-            self._fernet = Fernet(Fernet.generate_key())
-            bot.logger.log(
-                MODULE_NAME,
-                " FERNET_KEY env var not set - a new random encryption key was generated. "
-                "Previously encrypted .enc files from prior sessions are now unreadable. "
-                "Set FERNET_KEY to a fixed secret to persist media encryption across restarts.",
-                "WARNING",
-            )
-
-        self.media_dir = script_dir() / "cache" / "moderation"
-        self.media_dir.mkdir(exist_ok=True)
-
-        _purged = 0
-        for _enc in self.media_dir.glob("*.enc"):
-            try:
-                _enc.unlink()
-                _purged += 1
-            except Exception:
-                pass
-        if _purged:
-            bot.logger.log(MODULE_NAME,
-                f"Purged {_purged} orphaned .enc file(s) from previous session")
+        self._fernet = Fernet(Fernet.generate_key())
 
         self._bot_log_cache: Dict[int, Dict] = {}
         self._bot_log_order: deque           = deque()
@@ -677,24 +648,14 @@ class ModerationSystem:
             (now,))
         return [{"guild_id": int(r["guild_id"]), "user_id": int(r["user_id"])} for r in rows]
 
-    def _encrypt_to_disk(self, message_id: int, index: int, data: bytes) -> Path:
-        encrypted = self._fernet.encrypt(data)
-        path      = self.media_dir / f"{message_id}_{index}.enc"
-        path.write_bytes(encrypted)
-        return path
+    def _encrypt(self, data: bytes) -> bytes:
+        return self._fernet.encrypt(data)
 
-    def _decrypt_from_disk(self, path: Path) -> bytes:
-        return self._fernet.decrypt(path.read_bytes())
+    def _decrypt(self, data: bytes) -> bytes:
+        return self._fernet.decrypt(data)
 
-    def _delete_media_files(self, message_id: int):
-        entry = self.media_cache.pop(message_id, None)
-        if not entry:
-            return
-        for f in entry['files']:
-            try:
-                f['path'].unlink(missing_ok=True)
-            except Exception:
-                pass
+    def _delete_media(self, message_id: int):
+        self.media_cache.pop(message_id, None)
 
     async def cache_message(self, message: discord.Message):
         if message.guild is None or message.author.bot:
@@ -708,18 +669,17 @@ class ModerationSystem:
             evicted_msgs = guild_cache.pop(evict_ch, [])
             for m in evicted_msgs:
                 if m.get('id'):
-                    self._delete_media_files(m['id'])
+                    self._delete_media(m['id'])
 
         guild_cache.setdefault(channel_id, [])
 
         downloaded = []
-        for idx, att in enumerate(message.attachments):
+        for att in message.attachments:
             try:
                 data = await att.read()
-                path = self._encrypt_to_disk(message.id, idx, data)
                 downloaded.append({
                     'filename':     att.filename,
-                    'path':         path,
+                    'data':         self._encrypt(data),
                     'content_type': att.content_type or 'application/octet-stream',
                     'url':          att.url,
                 })
@@ -750,7 +710,7 @@ class ModerationSystem:
         if len(cache_list) > 100:
             evicted = cache_list.pop(0)
             if evicted.get('id'):
-                self._delete_media_files(evicted['id'])
+                self._delete_media(evicted['id'])
 
     def get_context_messages(
         self, guild_id: int, channel_id: int,
@@ -838,7 +798,7 @@ class ModerationSystem:
                 if entry.get('cached_at', 0) < cutoff
             ]
             for mid in expired:
-                self._delete_media_files(mid)
+                self._delete_media(mid)
             if expired:
                 self.bot.logger.log(
                     MODULE_NAME,
@@ -1335,13 +1295,8 @@ def setup(bot):
             if cached:
                 for f in cached['files']:
                     try:
-                        data = mod_system._decrypt_from_disk(f['path'])
+                        data = mod_system._decrypt(f['data'])
                         rehosted.append({'filename': f['filename'], 'data': data})
-                    except FileNotFoundError:
-                        mod_system.bot.logger.log(
-                            MODULE_NAME,
-                            f"Skipping stale cache entry - encrypted file already gone: "
-                            f"{f['path'].name}", "WARNING")
                     except Exception as e:
                         mod_system.bot.logger.log(
                             MODULE_NAME,
@@ -1350,7 +1305,7 @@ def setup(bot):
             if not hasattr(bot, '_pending_rehosted_media'):
                 bot._pending_rehosted_media = {}
             bot._pending_rehosted_media[message.id] = rehosted
-            mod_system._delete_media_files(message.id)
+            mod_system._delete_media(message.id)
             channel_msgs = mod_system.message_cache.get(guild_id, {}).get(channel_id, [])
             mod_system.message_cache[guild_id][channel_id] = [
                 m for m in channel_msgs if m['id'] != message.id
@@ -1385,15 +1340,13 @@ def setup(bot):
             for f in cached['files']:
                 if f['filename'] in removed_filenames:
                     try:
-                        data = mod_system._decrypt_from_disk(f['path'])
+                        data = mod_system._decrypt(f['data'])
                         removed_files.append({'filename': f['filename'], 'data': data})
                     except Exception as e:
                         mod_system.bot.logger.log(
                             MODULE_NAME,
                             f"Failed to decrypt removed attachment {f['filename']}: {e}",
                             "WARNING")
-                    finally:
-                        f['path'].unlink(missing_ok=True)
                 else:
                     kept.append(f)
             if kept:

@@ -14,24 +14,60 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import threading
 from typing import Optional, List
-from _utils import script_dir, _now
+from _utils import script_dir, _now, migrate_config, atomic_json_write
 
 MODULE_NAME = "VMS"
 GENERAL_CHANNEL_NAME = "general"
 EMBALL_GUILD_ID: Optional[int] = int(os.getenv("EMBALL_GUILD_ID", "0")) or None
 
 
+_CONFIG_PATH = script_dir() / "config" / "vms.json"
+_CONFIG_DEFAULTS = {"cache_dir": ""}
+
+def _load_config() -> dict:
+    return migrate_config(_CONFIG_PATH, _CONFIG_DEFAULTS)
+
 def _cache_subdir(*parts: str) -> Path:
     p = script_dir() / "cache" / Path(*parts)
     p.mkdir(parents=True, exist_ok=True)
     return p
 
+def _resolve_cache_root() -> Path:
+    cfg = _load_config()
+    custom = cfg.get("cache_dir", "").strip()
+    default_root = script_dir() / "cache" / "vms"
 
-_vms_dir = _cache_subdir("vms")
-_archive_dir = _cache_subdir("vms", "archive")
-_broken_dir = _cache_subdir("vms", "broken")
+    if not custom:
+        default_root.mkdir(parents=True, exist_ok=True)
+        return default_root
+
+    target = Path(custom)
+    target.mkdir(parents=True, exist_ok=True)
+
+    # migrate existing default dirs into new location
+    if default_root.exists() and any(default_root.iterdir()):
+        import shutil
+        for item in default_root.iterdir():
+            dest = target / item.name
+            if dest.exists():
+                continue  # never overwrite
+            shutil.move(str(item), str(dest))
+        try:
+            default_root.rmdir()  # only removes if now empty
+        except OSError:
+            pass
+
+    return target
+
+_vms_root       = _resolve_cache_root()
+_vms_dir        = _vms_root
+_archive_dir    = _vms_root / "archive"
+_broken_dir     = _vms_root / "broken"
+_temp_vms_dir   = _vms_root / "temp"
 _whisper_model_dir = _cache_subdir("whisper_models")
-_temp_vms_dir = _cache_subdir("vms", "temp")
+
+for _d in (_archive_dir, _broken_dir, _temp_vms_dir, _whisper_model_dir):
+    _d.mkdir(parents=True, exist_ok=True)
 
 
 def _db_path() -> str:
@@ -192,7 +228,7 @@ class VMSManager:
         self.bot.logger.log(MODULE_NAME, "VMSManager initialised")
         self.bot.logger.log(MODULE_NAME,
             f"Paths - vms: {self.vms_dir} | archive: {self.archive_dir} "
-            f"| broken: {_broken_dir} | db: {self.db_path}")
+            f"| broken: {_broken_dir} | db: {self.db_path} | cache_root: {_vms_root}")
 
     def _migrate_filepath_column(self):
         conn = self._conn()

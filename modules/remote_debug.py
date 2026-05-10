@@ -442,7 +442,9 @@ class ClaudeBridgeListener:
         self._task = None
 
     def _gh_request(self, path, method="GET", body=None):
-        url = f"https://api.github.com/repos/{self._repo}/contents/{path}"
+        import time as _time
+        bust = f"?t={int(_time.time()*1000)}" if method == "GET" else ""
+        url = f"https://api.github.com/repos/{self._repo}/contents/{path}{bust}"
         req = urllib.request.Request(url, method=method)
         req.add_header("Authorization", f"token {self._token}")
         req.add_header("Accept", "application/vnd.github.v3+json")
@@ -665,7 +667,6 @@ class ClaudeBridgeListener:
             except Exception as e:
                 import traceback as _tb
                 return f"{e}\n{_tb.format_exc()}"
-                return e
         err = await asyncio.get_event_loop().run_in_executor(None, _commit)
         if err:
             self.bot.logger.log(MODULE_NAME, f"[bridge] seq={seq} commit failed: {err}", "ERROR")

@@ -706,6 +706,11 @@ def _auto_tail(cfg, lines=30):
 
 
 def _cmd_exec(cfg, cmd, timeout=15):
+    if not cmd:
+        cmd = sys.stdin.read().strip()
+        if not cmd:
+            print("No command provided. Pass as argument or pipe to stdin.")
+            sys.exit(1)
     result = _client_request(cfg, "/exec", method="POST",
                              data=json.dumps({"cmd": cmd, "timeout": timeout}).encode())
     print(json.dumps(result, indent=2))
@@ -767,7 +772,7 @@ def main():
     config_p.add_argument("name", help="Config name (without .json)")
 
     exec_p = sub.add_parser("exec", help="Run a shell command on the server")
-    exec_p.add_argument("cmd", help="Command to run")
+    exec_p.add_argument("cmd", nargs="?", default=None, help="Command to run (omit to read from stdin)")
     exec_p.add_argument("--timeout", type=int, default=15, help="Timeout in seconds")
 
     sub.add_parser("update", help="Git pull and restart if updated")

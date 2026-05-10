@@ -1013,7 +1013,7 @@ def main():
 
     bridge_p = sub.add_parser("bridge", help="Send a command via Claude bridge and wait for result")
     bridge_p.add_argument("bridge_command", help="Command to send (e.g. status, logs, exec)")
-    bridge_p.add_argument("bridge_args", nargs="*", help="Arguments for the command")
+    bridge_p.add_argument("bridge_args", nargs=argparse.REMAINDER, help="Arguments for the command")
     bridge_p.add_argument("--timeout", type=int, default=45, help="Seconds to wait for result (default: 45)")
 
     args = parser.parse_args()

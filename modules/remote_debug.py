@@ -544,31 +544,50 @@ class ClaudeBridgeListener:
 
         elif command == "logs":
             import __main__
-            lines = int(args[0]) if args else 200
-            data = __main__.get_logs_data(tail=lines)
-            if data.get('error'):
-                return data['error'], {}
-            content = data['lines']
-            artifacts["logs/current.log"] = content
-            output = f"log committed ({len(content.splitlines())} lines)"
+            # Parse flags: --tail N, --file NAME, --session ID, --list, --search PATTERN, --max N
+            tail = 200; file = None; session = None; list_files = False; search = None; max_r = 100
+            i = 0
+            while i < len(args):
+                if args[i] == "--tail" and i + 1 < len(args):
+                    tail = int(args[i + 1]); i += 2
+                elif args[i] == "--file" and i + 1 < len(args):
+                    file = args[i + 1]; i += 2
+                elif args[i] == "--session" and i + 1 < len(args):
+                    session = args[i + 1]; i += 2
+                elif args[i] == "--list":
+                    list_files = True; i += 1
+                elif args[i] == "--search" and i + 1 < len(args):
+                    search = args[i + 1]; i += 2
+                elif args[i] == "--max" and i + 1 < len(args):
+                    max_r = int(args[i + 1]); i += 2
+                elif args[i].lstrip('-').isdigit():
+                    tail = int(args[i]); i += 1  # bare number = --tail N (legacy)
+                else:
+                    i += 1
+            if list_files:
+                data = __main__.get_logs_data(list_files=True)
+                artifacts["logs/list.json"] = data['files']
+                output = f"{len(data['files'])} log files"
+            elif search:
+                try:
+                    data = __main__.get_logs_data(search=search, search_max=max_r)
+                except re.error as e:
+                    return f"invalid regex: {e}", {}
+                artifacts["logs/search.json"] = {"pattern": search, "matches": data["matches"]}
+                output = f"{len(data['matches'])} match(es)"
+            else:
+                data = __main__.get_logs_data(tail=tail, file=file, session=session)
+                if data.get('error'):
+                    return data['error'], {}
+                content = data['lines']
+                artifacts["logs/current.log"] = content
+                output = f"log committed ({len(content.splitlines())} lines)"
 
         elif command == "logs-list":
             import __main__
             data = __main__.get_logs_data(list_files=True)
             artifacts["logs/list.json"] = data['files']
             output = f"{len(data['files'])} log files"
-
-        elif command == "logs-search":
-            if not args:
-                return "missing search pattern", {}
-            import __main__
-            max_r = int(args[1]) if len(args) > 1 else 100
-            try:
-                data = __main__.get_logs_data(search=args[0], search_max=max_r)
-            except re.error as e:
-                return f"invalid regex: {e}", {}
-            artifacts["logs/search.json"] = {"pattern": args[0], "matches": data["matches"]}
-            output = f"{len(data['matches'])} match(es)"
 
         elif command == "config":
             name = args[0] if args else ""

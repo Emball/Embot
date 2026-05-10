@@ -1,10 +1,15 @@
 # AGENTS.md
 
-**Read this entire file before doing anything else.** If the architecture or module layout changes significantly, update this file to match.
+**Read this entire file before doing anything else.** If the architecture or module layout changes significantly, update this file to match before committing anything.
+
+## Code Style
+
+- Brief comments only. Good code explains itself.
+- No section headers, block comments, or reasoning inside code.
 
 ## User
 
-Michael (Emball/Embis). Vibe-coder with beginner Python knowledge. Dual-boots Linux and Windows.
+Michael (Emball/Embis). Vibe-coder with beginner Python knowledge.
 
 ## Embot Codebase Overview
 
@@ -18,8 +23,8 @@ Discord bot for Eminem fan server (discord.py, single guild, uv environment).
 |---|---|
 | `Embot.py` | Entry point — boots bot, loads modules, syncs commands |
 | `_version.py` | `__version__ = "X.Y.Z.W"` |
-| `pyproject.toml` | uv project config + deps (source of truth) |
-| `requirements.txt` | Dep list (kept synced) |
+| `pyproject.toml` | uv project config + deps |
+| `requirements.txt` | Dep list |
 | `config/` | JSON configs, gitignored |
 | `modules/` | Feature modules, auto-loaded via `setup(bot)` |
 | `icons/` | Holiday icon PNGs |
@@ -92,13 +97,21 @@ Private `_*.py` files are skipped by the loader.
 - `bot.logger` (ConsoleLogger) available to all modules
 - `_utils.py` used broadly across modules
 
- debug.
+## Embot Coding Rules
 
-**EXEC IS READ-ONLY.** Never use `exec` to edit files on the server. Editing files directly creates uncommitted changes that block `git pull --ff-only`. All code edits go through git: edit locally → commit → push → server pulls. Exec is for reading files, checking logs, and running diagnostics only. Exceptions require explicit approval.
+Ensure new modules added to the bot properly log their processes in the bot console.
 
-## Agentic Behavior
+Ensure there's no avenues in a module where an error could be silently swallowed or not passed to the console.
 
-- NEVER spawn agents or delegate to separate chat processes without explicit confirmation.
+## Versioning & Git
+
+- Version format: `MAJOR.MINOR.PATCH.MICRO`
+- Bump thresholds (lines changed):
+  - `300+` → MAJOR, `100+` → MINOR, `20+` → PATCH, `1+` → MICRO
+- Commit message = version number only.
+- Increment version, commit, and push after every edit. No permission needed.
+- Keep `requirements.txt` synced. Keep `.gitignore` clean. Keep AGENTS.md current.
+- Temp/test code goes in `/temp` (gitignored).
 
 ## Claude Bridge
 
@@ -108,12 +121,11 @@ GitHub-based command queue via private `Emball/EmbotDebug` repo.
 
 **Result routing:**
 - Direct output (ping, status, guilds, modules, exec, update, restart) → `result.json`
-- File artifacts (logs, logs-list, logs-search, config, db-query) → committed under `logs/`, `config/`, `db/`
-- Blocked: db-download, stream
+- File artifacts (logs, logs-list, logs-search, config, db-query, db-download) → committed under `logs/`, `config/`, `db/`
 
 **Session checklist:** `session-init` → `bridge status` → work.
 
-The GitHub token is in Claude's user preferences as `GitHub Access Token: ghp_...`. This is the same token used for cloning the repo, for `session-init`, and stored under `claude_bridge.token` in `config/remote_debug.json` on the Linux machine.
+The GitHub token is in Claude's user preferences as `GitHub Access Token: ghp_...`. Same token is used to authenticate Git processes on Claude.
 
 `remote_debug.py` imports `aiohttp` lazily so no deps need installing for the bridge to work. Use plain `python`, not `uv run python`.
 
@@ -130,6 +142,7 @@ python modules/remote_debug.py bridge logs --tail 500
 python modules/remote_debug.py bridge logs --search "ERROR"
 python modules/remote_debug.py bridge config starboard
 python modules/remote_debug.py bridge db-query mod "SELECT name FROM sqlite_master WHERE type='table'"
+python modules/remote_debug.py bridge db-download mod
 python modules/remote_debug.py bridge exec "echo hello"
 python modules/remote_debug.py bridge update
 python modules/remote_debug.py bridge restart
@@ -139,29 +152,22 @@ python modules/remote_debug.py bridge restart
 
 ## Debugging
 
-**The raw log is the #1 source of truth — check it first, every time.**
+The bot auto-updates. After every push it polls git every ~1 minute, detects the version bump, pulls, and restarts. Use `bridge update` or `bridge restart` to trigger this immediately rather than waiting out the interval. Auto-update is a good fallback if the server is unreachable.
 
-Before drawing any conclusions about why something broke, fetch a large chunk of the log. Searching for specific strings is useful but can miss context; a broad `--tail 500` or `--tail 1000` will almost always show the error directly. Don't rely on bridge result output, git history, or assumptions — the log contains the actual traceback, the actual sequence of events, and the actual error message.
+Testing individual files is recommended, but do not try to run a Embot.py session locally. How the live bot responds to the latest code is the ideal source of truth on whether or not it's truly clean.
 
-Workflow:
+Exec is useful for debugging when you need to do something in the live bot root that remote_debug doesn't satisfy. Try to avoid modifying the live bot files though, as it can create uncommitted changes that block `git pull --ff-only`. Code edits go through git: edit locally → commit → push → server pulls.
+
+The raw, live bot log is a great source of truth. Check it first every time if something fails. The outputs are generally very verbose.
+
+Before drawing any conclusions about why something broke, fetch a large chunk of the log. Searching for specific strings is useful but can miss context.
+
+Log Workflow:
 1. `logs --tail 500` (or `--tail 1000` for harder problems) — read the raw output
 2. Only use `--search` once you know what you're looking for
-3. If the log doesn't show the error, go wider (`--tail 2000`, different session) before trying anything else
+3. If the log doesn't show the error, go wider or pull the entire log file if necessary
 
-## Code Style
-
-- Brief comments only. Good code explains itself.
-- No section headers, block comments, or reasoning inside code.
-
-## Versioning & Git
-
-- Version format: `MAJOR.MINOR.PATCH.MICRO`
-- Bump thresholds (lines changed):
-  - `300+` → MAJOR, `100+` → minor, `20+` → patch, `1+` → micro
-- Commit message = version number only.
-- Increment version, commit, and push after every edit. No permission needed.
-- Keep `requirements.txt` synced. Keep `.gitignore` clean. Keep AGENTS.md current.
-- Temp/test code goes in `/temp` (gitignored).
+If that fails to identify the issue, you can expand to other avenues.
 
 ## LAN Client (Michael's use on-machine only — not applicable to Claude)
 

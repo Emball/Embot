@@ -191,18 +191,11 @@ class RemoteDebugServer:
     async def _handle_modules(self, request):
         if not self._check_auth(request) or not self._check_ip(request):
             return self._fail()
-        if not hasattr(self.bot.logger, "log_file") or not self.bot.logger.log_file.exists():
+        import __main__
+        data = __main__.get_modules_data()
+        if data is None:
             return web.json_response({"error": "no log file"}, status=404)
-        try:
-            modules = []
-            with open(self.bot.logger.log_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    m = re.search(r"Loaded module: (\S+)", line)
-                    if m:
-                        modules.append(m.group(1))
-            return web.json_response(modules)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+        return web.json_response(data)
 
     def _logs_dir(self):
         return script_dir() / "logs"
@@ -436,39 +429,28 @@ class RemoteDebugServer:
         if not self._check_auth(request) or not self._check_ip(request):
             return self._fail()
         name = request.match_info["name"]
-        if name.lower() in ("auth", "token"):
-            return self._fail("access denied", 403)
         if not self._sanitize_name(name):
             return self._fail("invalid config name", 400)
-        config_path = script_dir() / "config" / f"{name}.json"
-        if not config_path.exists():
-            return web.json_response({"error": "config not found"}, status=404)
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return web.json_response(data)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+        import __main__
+        data, err = __main__.get_config_data(name)
+        if err:
+            status = 403 if err == "access denied" else 404 if "not found" in err else 500
+            return web.json_response({"error": err}, status=status)
+        return web.json_response(data)
 
     async def _handle_update(self, request):
         if not self._check_auth(request) or not self._check_ip(request):
             return self._fail()
+        import __main__
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "git", "-c", "credential.helper=", "pull", "--ff-only", "origin", "main",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                env={"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"},
-            )
-            stdout, stderr = await proc.communicate()
-            out = stdout.decode().strip()
-            err = stderr.decode().strip()
-            if proc.returncode == 0:
-                if "Already up to date" in out or "already up to date" in out:
-                    return web.json_response({"updated": False, "output": out})
+            if not __main__._ensure_git_for_update(self.bot, self.bot.logger):
+                return web.json_response({"error": "git not available"}, status=500)
+            updated = await __main__._check_for_update(self.bot)
+            if updated:
                 self.bot.logger.log(MODULE_NAME, "Update pulled — restarting")
                 asyncio.create_task(self._delayed_restart())
-                return web.json_response({"updated": True, "output": out, "restarting": True})
-            return web.json_response({"error": err or "git pull failed"}, status=500)
+                return web.json_response({"updated": True, "restarting": True})
+            return web.json_response({"updated": False})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
@@ -490,16 +472,10 @@ class RemoteDebugServer:
         if not cmd:
             return self._fail("missing 'cmd'", 400)
         timeout = min(int(body.get("timeout", 15)), 60)
+        import __main__
         try:
-            proc = await asyncio.create_subprocess_shell(
-                cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            return web.json_response({
-                "exit_code": proc.returncode,
-                "stdout": stdout.decode(errors="replace"),
-                "stderr": stderr.decode(errors="replace"),
-            })
+            out, err, code = await __main__.run_exec(cmd, timeout=timeout)
+            return web.json_response({"exit_code": code, "stdout": out, "stderr": err})
         except asyncio.TimeoutError:
             return web.json_response({"error": "timed out"}, status=504)
         except Exception as e:

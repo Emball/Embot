@@ -549,26 +549,76 @@ def show_version():
     print(f"Discord.py: {discord.__version__}")
     print()
 
+# --- Shared logic called by both console and remote_debug HTTP handlers ---
+
+def get_modules_data():
+    """Returns {'loaded': [...], 'failed': [...]} from the current log file."""
+    if not hasattr(bot.logger, 'log_file') or not bot.logger.log_file.exists():
+        return None
+    loaded, failed = [], []
+    with open(bot.logger.log_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            m = re.search(r'Loaded module: (\S+)', line)
+            if m:
+                loaded.append(m.group(1))
+            m = re.search(r'Failed to load module: (\S+)', line)
+            if m and m.group(1) not in loaded:
+                failed.append(m.group(1))
+    return {'loaded': loaded, 'failed': failed}
+
+def get_config_data(name):
+    """Returns (data, error) for a config file. Blocks auth/token."""
+    if name.lower() in ('auth', 'token'):
+        return None, 'access denied'
+    cfg_path = script_dir / 'config' / f'{name}.json'
+    if not cfg_path.exists():
+        return None, f"config '{name}.json' not found"
+    try:
+        with open(cfg_path, 'r', encoding='utf-8') as f:
+            return json.load(f), None
+    except Exception as e:
+        return None, str(e)
+
+def search_logs(pattern_str, max_results=200):
+    """Returns (matches, truncated). matches is list of {'file', 'line', 'content'}. Raises re.error on bad pattern."""
+    pattern = re.compile(pattern_str, re.IGNORECASE)
+    log_files = sorted(data_dir.glob('session_*.log'), key=lambda x: x.stat().st_mtime, reverse=True)
+    matches = []
+    for fp in log_files:
+        try:
+            with open(fp, 'r', encoding='utf-8') as f:
+                for i, line in enumerate(f, 1):
+                    if pattern.search(line):
+                        matches.append({'file': fp.name, 'line': i, 'content': line.rstrip()})
+                        if len(matches) >= max_results:
+                            return matches, True
+        except Exception:
+            continue
+    return matches, False
+
+async def run_exec(cmd, timeout=60):
+    """Returns (stdout, stderr, exit_code) or raises TimeoutError."""
+    proc = await asyncio.create_subprocess_shell(
+        cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        cwd=str(script_dir),
+    )
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    return stdout.decode(errors='replace'), stderr.decode(errors='replace'), proc.returncode
+
+# --- Console command setup ---
+
 def setup_console_commands():
     async def handle_modules(args):
-        if not hasattr(bot.logger, 'log_file') or not bot.logger.log_file.exists():
+        data = get_modules_data()
+        if data is None:
             print("No log file available.")
             return
-        loaded, failed = [], []
-        with open(bot.logger.log_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                m = re.search(r'Loaded module: (\S+)', line)
-                if m:
-                    loaded.append(m.group(1))
-                m = re.search(r'Failed to load module: (\S+)', line)
-                if m and m.group(1) not in loaded:
-                    failed.append(m.group(1))
-        print(f"\nLoaded ({len(loaded)}):")
-        for mod in loaded:
+        print(f"\nLoaded ({len(data['loaded'])}):")
+        for mod in data['loaded']:
             print(f"  + {mod}")
-        if failed:
-            print(f"Failed ({len(failed)}):")
-            for mod in failed:
+        if data['failed']:
+            print(f"Failed ({len(data['failed'])}):")
+            for mod in data['failed']:
                 print(f"  - {mod}")
         print()
 
@@ -595,16 +645,10 @@ def setup_console_commands():
             print("Usage: exec <command>")
             return
         try:
-            proc = await asyncio.create_subprocess_shell(
-                args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                cwd=str(script_dir),
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
-            out = stdout.decode(errors='replace').strip()
-            err = stderr.decode(errors='replace').strip()
-            if out: print(out)
-            if err: print(err)
-            if not out and not err: print(f"(exit {proc.returncode})")
+            out, err, code = await run_exec(args)
+            if out.strip(): print(out.strip())
+            if err.strip(): print(err.strip())
+            if not out.strip() and not err.strip(): print(f"(exit {code})")
         except asyncio.TimeoutError:
             print("Timed out after 60s.")
         except Exception as e:
@@ -615,42 +659,25 @@ def setup_console_commands():
         if not name:
             print("Usage: config <name>")
             return
-        if name.lower() in ('auth', 'token'):
-            print("Access denied.")
-            return
-        cfg_path = script_dir / 'config' / f'{name}.json'
-        if not cfg_path.exists():
-            print(f"Config '{name}.json' not found.")
-            return
-        try:
-            with open(cfg_path, 'r', encoding='utf-8') as f:
-                print(json.dumps(json.load(f), indent=2))
-        except Exception as e:
-            print(f"Error: {e}")
+        data, err = get_config_data(name)
+        if err:
+            print(err)
+        else:
+            print(json.dumps(data, indent=2))
 
     async def handle_log_search(args):
         if not args.strip():
             print("Usage: log-search <pattern>")
             return
         try:
-            pattern = re.compile(args.strip(), re.IGNORECASE)
+            matches, truncated = search_logs(args.strip())
         except re.error as e:
             print(f"Invalid regex: {e}")
             return
-        log_files = sorted(data_dir.glob('session_*.log'), key=lambda x: x.stat().st_mtime, reverse=True)
-        matches = 0
-        for fp in log_files:
-            try:
-                with open(fp, 'r', encoding='utf-8') as f:
-                    for i, line in enumerate(f, 1):
-                        if pattern.search(line):
-                            print(f"{fp.name}:{i}: {line.rstrip()}")
-                            matches += 1
-                            if matches >= 200:
-                                print("(limit 200 reached)")
-                                return
-            except Exception:
-                continue
+        for m in matches:
+            print(f"{m['file']}:{m['line']}: {m['content']}")
+        if truncated:
+            print("(limit 200 reached)")
         if not matches:
             print("No matches.")
 

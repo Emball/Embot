@@ -469,8 +469,9 @@ class ClaudeBridgeListener:
         body = {
             "message": message,
             "content": base64.b64encode(raw.encode()).decode(),
-            "sha": sha,
         }
+        if sha:
+            body["sha"] = sha
         self._gh_request(path, method="PUT", body=body)
 
     def _gh_put_binary(self, path, data: bytes, sha, message):
@@ -478,8 +479,9 @@ class ClaudeBridgeListener:
         body = {
             "message": message,
             "content": base64.b64encode(data).decode(),
-            "sha": sha,
         }
+        if sha:
+            body["sha"] = sha
         self._gh_request(path, method="PUT", body=body)
 
     def _gh_get_sha(self, path):

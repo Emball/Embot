@@ -559,10 +559,10 @@ def get_modules_data():
     with open(bot.logger.log_file, 'r', encoding='utf-8') as f:
         for line in f:
             m = re.search(r'Loaded module: (\S+)', line)
-            if m:
+            if m and m.group(1) not in loaded:
                 loaded.append(m.group(1))
             m = re.search(r'Failed to load module: (\S+)', line)
-            if m and m.group(1) not in loaded:
+            if m and m.group(1) not in loaded and m.group(1) not in failed:
                 failed.append(m.group(1))
     return {'loaded': loaded, 'failed': failed}
 

@@ -280,46 +280,35 @@ def _conn(db_path: str) -> sqlite3.Connection:
     c.row_factory = sqlite3.Row
     return c
 
-_conn_cache: dict = {}
-_CONN_CACHE_TTL = 3600
-
-def _get_cached_conn(db_path: str) -> sqlite3.Connection:
-    now = time.time()
-    if db_path in _conn_cache:
-        entry = _conn_cache[db_path]
-        if now - entry['created'] < _CONN_CACHE_TTL:
-            return entry['conn']
-        entry['conn'].close()
-    conn = _conn(db_path)
-    _conn_cache[db_path] = {'conn': conn, 'created': now}
-    if len(_conn_cache) > 20:
-        cutoff = now - _CONN_CACHE_TTL
-        stale = [k for k, v in _conn_cache.items() if v['created'] < cutoff]
-        for k in stale:
-            _conn_cache[k]['conn'].close()
-            del _conn_cache[k]
-    return conn
-
 def _db_exec(db, query: str, params: tuple = ()):
     if isinstance(db, sqlite3.Connection):
         db.execute(query, params)
         db.commit()
         return
-    c = _get_cached_conn(db)
-    c.execute(query, params)
-    c.commit()
+    c = _conn(db)
+    try:
+        c.execute(query, params)
+        c.commit()
+    finally:
+        c.close()
 
 def _db_one(db, query: str, params: tuple = ()):
     if isinstance(db, sqlite3.Connection):
         return db.execute(query, params).fetchone()
-    c = _get_cached_conn(db)
-    return c.execute(query, params).fetchone()
+    c = _conn(db)
+    try:
+        return c.execute(query, params).fetchone()
+    finally:
+        c.close()
 
 def _db_all(db, query: str, params: tuple = ()):
     if isinstance(db, sqlite3.Connection):
         return db.execute(query, params).fetchall()
-    c = _get_cached_conn(db)
-    return c.execute(query, params).fetchall()
+    c = _conn(db)
+    try:
+        return c.execute(query, params).fetchall()
+    finally:
+        c.close()
 
 SUSPICION_THRESHOLD = 6
 

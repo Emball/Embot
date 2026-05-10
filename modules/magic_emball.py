@@ -136,7 +136,7 @@ def setup(bot):
                     "The magic is broken... try again later.",
                     ephemeral=True
                 )
-            except:
-                pass
+            except Exception as e:
+                bot.logger.error(MODULE_NAME, "Magic emball fallback response failed", e)
 
     bot.logger.log(MODULE_NAME, "Magic emball command registered successfully")

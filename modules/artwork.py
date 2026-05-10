@@ -72,30 +72,45 @@ async def _artist_albums(session: aiohttp.ClientSession, name: str, artist_id: i
         results = json.loads(await resp.text()).get("results", [])
     return [a for a in results if a.get("artistId") == artist_id and a.get("wrapperType") == "collection"]
 
-async def search_itunes(artist: str, album: str) -> dict | None:
+async def search_itunes(artist: str, album: str) -> tuple[dict | None, bytes | None]:
     headers = {"User-Agent": "Mozilla/5.0"}
     async with aiohttp.ClientSession(headers=headers) as session:
         artist_info = await _resolve_artist(session, artist)
         if not artist_info:
-            return None
+            return None, None
 
         artist_name = artist_info["artistName"]
         artist_id = artist_info["artistId"]
         albums = await _artist_albums(session, artist_name, artist_id)
         if not albums:
-            return None
+            return None, None
 
         if not album:
-            return albums[0]
+            result = albums[0]
+        else:
+            best = None
+            best_score = -1.0
+            for a in albums:
+                s = _album_score(album, a.get("collectionName", ""))
+                if s > best_score:
+                    best_score = s
+                    best = a
+            result = best
 
-        best = None
-        best_score = -1.0
-        for a in albums:
-            s = _album_score(album, a.get("collectionName", ""))
-            if s > best_score:
-                best_score = s
-                best = a
-        return best
+        if not result:
+            return None, None
+
+        raw_art = result.get("artworkUrl100", "")
+        if not raw_art:
+            return result, None
+
+        url = art_url(raw_art)
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                return result, None
+            data = await resp.read()
+
+        return result, data
 
 def setup(bot):
 
@@ -108,7 +123,7 @@ def setup(bot):
         await interaction.response.defer(thinking=True)
 
         try:
-            result = await search_itunes(artist, album)
+            result, data = await search_itunes(artist, album)
         except Exception as e:
             bot.logger.error(MODULE_NAME, "iTunes search failed", e)
             await interaction.followup.send("Failed to reach Apple Music. Try again later.")
@@ -129,12 +144,9 @@ def setup(bot):
         r_album  = result.get("collectionName", "Unknown Album")
         year     = result.get("releaseDate", "")[:4]
 
-        async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    await interaction.followup.send(f"Found **{r_album}** by **{r_artist}** but couldn't download the artwork.")
-                    return
-                data = await resp.read()
+        if data is None:
+            await interaction.followup.send(f"Found **{r_album}** by **{r_artist}** but couldn't download the artwork.")
+            return
 
         import io
         ext = url.split(".")[-1].split("?")[0] or "jpg"

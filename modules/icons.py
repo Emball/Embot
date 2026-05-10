@@ -61,35 +61,16 @@ class IconManager:
 
         current_month = now_est.month
         current_day = now_est.day
-
-        start = config['start']
-        end = config['end']
-
-        self.bot.logger.log(MODULE_NAME,
-            f"Checking {icon_name}: Start: {start}, End: {end}, Current: ({current_month}, {current_day})")
-
-        start_month, start_day = start
-        end_month, end_day = end
+        start_month, start_day = config['start']
+        end_month, end_day = config['end']
 
         if start_month == end_month:
-            if current_month == start_month and start_day <= current_day <= end_day:
-                self.bot.logger.log(MODULE_NAME,
-                    f"{icon_name} MATCHES! Using this icon.")
-                return True
-        else:
-            if (current_month == start_month and current_day >= start_day) or \
-               (current_month == end_month and current_day <= end_day):
-                self.bot.logger.log(MODULE_NAME,
-                    f"{icon_name} MATCHES! Using this icon.")
-                return True
-
-        return False
+            return current_month == start_month and start_day <= current_day <= end_day
+        return (current_month == start_month and current_day >= start_day) or \
+               (current_month == end_month and current_day <= end_day)
 
     def get_appropriate_icon(self):
         now_est = datetime.now(self.est)
-
-        self.bot.logger.log(MODULE_NAME,
-            f"Current date (EST): {now_est.strftime('%Y-%m-%d %H:%M:%S')} (Month: {now_est.month}, Day: {now_est.day})")
 
         for icon_name in self.icon_schedule.keys():
             if self.should_use_icon(icon_name, now_est):
@@ -105,7 +86,6 @@ class IconManager:
 
         default_path = os.path.join(self.icons_dir, self.default_icon)
         if os.path.exists(default_path):
-            self.bot.logger.log(MODULE_NAME, "Using default icon")
             return default_path, self.default_icon
 
         return None, None
@@ -120,8 +100,6 @@ class IconManager:
                 return
 
             if icon_name == self.current_icon:
-                self.bot.logger.log(MODULE_NAME,
-                    f"Icon already set to {icon_name}, no change needed")
                 return
 
             server_updated = False
@@ -193,24 +171,18 @@ class IconManager:
 
     @tasks.loop(hours=1)
     async def icon_check_loop(self):
-        self.bot.logger.log(MODULE_NAME, "Running periodic icon check")
         await self.update_server_icon()
 
     @icon_check_loop.before_loop
     async def before_icon_check(self):
         await self.bot.wait_until_ready()
-        self.bot.logger.log(MODULE_NAME, "Icon manager initialized")
 
         if not os.path.exists(self.icons_dir):
             self.bot.logger.log(MODULE_NAME,
-                f"Creating {self.icons_dir} directory", "WARNING")
+                f"Creating icons directory: {self.icons_dir}", "WARNING")
             os.makedirs(self.icons_dir)
 
-        self.bot.logger.log(MODULE_NAME, f"Icons directory path: {os.path.abspath(self.icons_dir)}")
-        if os.path.exists(self.icons_dir):
-            files = os.listdir(self.icons_dir)
-            self.bot.logger.log(MODULE_NAME, f"Files found in icons directory: {files}")
-
+        self.bot.logger.log(MODULE_NAME, f"Icon manager initialized — icons dir: {os.path.abspath(self.icons_dir)}")
         await self.update_server_icon()
 
 def setup(bot):

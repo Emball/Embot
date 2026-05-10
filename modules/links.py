@@ -224,10 +224,22 @@ def setup(bot):
         if enabled_links:
             enabled_text = "\n\n".join(enabled_links)
             if len(enabled_text) > 1024:
-                chunk_size = 1024
-                chunks = [enabled_text[i:i+chunk_size] for i in range(0, len(enabled_text), chunk_size)]
+                chunks = []
+                current = []
+                current_len = 0
+                for entry in enabled_links:
+                    entry_len = len(entry) + 2  # +2 for "\n\n" separator
+                    if current and current_len + entry_len > 1024:
+                        chunks.append("\n\n".join(current))
+                        current = [entry]
+                        current_len = len(entry)
+                    else:
+                        current.append(entry)
+                        current_len += entry_len
+                if current:
+                    chunks.append("\n\n".join(current))
                 for i, chunk in enumerate(chunks):
-                    field_name = "Enabled Links"if i == 0 else f"Enabled Links (cont. {i+1})"
+                    field_name = "Enabled Links" if i == 0 else f"Enabled Links (cont. {i+1})"
                     embed.add_field(name=field_name, value=chunk, inline=False)
             else:
                 embed.add_field(name="Enabled Links", value=enabled_text, inline=False)

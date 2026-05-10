@@ -42,8 +42,9 @@ async def cache_message(message: discord.Message):
     if channel_id not in guild_cache and len(guild_cache) >= _msg_cache_max_channels:
         evict_ch = next(iter(guild_cache))
         for m in guild_cache.pop(evict_ch, []):
-            if m.get('id'):
-                delete_media(m['id'])
+            mid = m.get('id')
+            if mid is not None:
+                delete_media(mid)
 
     guild_cache.setdefault(channel_id, [])
 

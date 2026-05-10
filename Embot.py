@@ -1,7 +1,7 @@
 import asyncio
 import discord
 from discord.ext import commands
-from discord import HTTPException
+from discord import HTTPException, app_commands
 import os
 import sys
 import traceback

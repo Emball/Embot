@@ -35,6 +35,7 @@ All run from the project root:
 | `uv run python modules/remote_debug.py db-query <name> "<SQL>"` | Run a SELECT/PRAGMA query |
 | `uv run python modules/remote_debug.py config <name>` | View a config file (auth blocked) |
 | `uv run python modules/remote_debug.py exec <cmd>` | Run a shell command on the server (auth + IP locked) |
+| `echo '<cmd>' | uv run python modules/remote_debug.py exec` | Same, but read command from stdin (avoids quote escaping issues) |
 | `uv run python modules/remote_debug.py update` | Git pull + restart (auto-tails startup logs) |
 | `uv run python modules/remote_debug.py restart` | Restart the bot remotely (auto-tails startup logs) |
 

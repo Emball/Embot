@@ -1428,8 +1428,8 @@ def setup(bot):
             for rule in rules:
                 if not rule.enabled:
                     continue
-                meta = rule.trigger_metadata
-                if meta and hasattr(meta, 'keyword_filter') and meta.keyword_filter:
+                meta = rule.trigger
+                if meta and meta.keyword_filter:
                     keywords.extend(meta.keyword_filter)
             _automod_keywords = keywords
             _automod_cache_time = time.time()
@@ -1461,15 +1461,10 @@ def setup(bot):
     async def on_vm_transcribed(vm_id, transcript, vm_message, reply_message, guild):
         try:
             if not transcript or not guild:
-                bot.logger.log(MODULE_NAME,
-                    f"VM #{vm_id} automod skip: transcript={bool(transcript)} guild={bool(guild)}", "WARNING")
                 return
-            bot.logger.log(MODULE_NAME, f"VM #{vm_id} automod scan: {transcript!r}")
             keywords = await _get_automod_keywords(guild)
-            bot.logger.log(MODULE_NAME, f"VM #{vm_id} automod keywords ({len(keywords)}): {keywords}")
             matched = _transcript_violates(transcript, keywords)
             if not matched:
-                bot.logger.log(MODULE_NAME, f"VM #{vm_id} automod: no match")
                 return
             bot.logger.log(MODULE_NAME,
                 f"VM #{vm_id} flagged by automod (matched: {matched!r}) - purging", "WARNING")
@@ -1498,6 +1493,24 @@ def setup(bot):
                     vms._db_exec("DELETE FROM vms WHERE id=?", (vm_id,))
                 except Exception as e:
                     bot.logger.log(MODULE_NAME, f"VM #{vm_id} DB/file purge error: {e}", "WARNING")
+            # send automod embed to bot-logs
+            if vm_message and vm_message.author:
+                from mod_oversight import bot_logs_channel
+                ch = bot_logs_channel(bot._mod_system, guild)
+                if ch:
+                    embed = discord.Embed(title="Auto-mod blocked a voice message", color=0xED4245)
+                    embed.add_field(name="rule_name", value="Block Banned Words", inline=False)
+                    embed.add_field(name="channel_id", value=str(vm_message.channel.id), inline=True)
+                    embed.add_field(name="keyword", value=matched, inline=True)
+                    embed.add_field(name="keyword_matched_content", value=transcript[:256], inline=False)
+                    embed.add_field(name="flagged_message_id", value=str(vm_message.id), inline=True)
+                    embed.add_field(name="author", value=f"{vm_message.author.name} ({vm_message.author.id})", inline=True)
+                    embed.add_field(name="decision_outcome", value="blocked", inline=True)
+                    embed.set_footer(text=f"VM #{vm_id}")
+                    try:
+                        await ch.send(embed=embed)
+                    except Exception:
+                        pass
         except Exception as e:
             bot.logger.error(MODULE_NAME, "on_vm_transcribed handler error", e)
 

@@ -15,7 +15,7 @@ from datetime import datetime
 import time
 import pathlib
 import tempfile
-from aiohttp import web
+
 
 from _utils import script_dir, migrate_config, atomic_json_write
 
@@ -103,8 +103,11 @@ def _detect_lan_ip() -> str:
 
 class RemoteDebugServer:
     def __init__(self, bot):
+        global web
+        from aiohttp import web
         self.bot = bot
         self._config = _load_config()
+        self._error_middleware = web.middleware(self._error_middleware)
         self._app = web.Application()
         self._runner = None
         self._start_time: float = 0.0
@@ -129,7 +132,6 @@ class RemoteDebugServer:
         self._app.router.add_post("/exec", self._handle_exec)
         self._app.middlewares.append(self._error_middleware)
 
-    @web.middleware
     async def _error_middleware(self, request, handler):
         try:
             return await handler(request)
@@ -151,7 +153,7 @@ class RemoteDebugServer:
         peer = request.remote
         return peer in allowed
 
-    def _fail(self, msg="unauthorized", status=403) -> web.Response:
+    def _fail(self, msg="unauthorized", status=403):
         return web.json_response({"error": msg}, status=status)
 
     def _sanitize_name(self, name: str) -> bool:

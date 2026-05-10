@@ -514,7 +514,7 @@ async def send_bot_log(bot, log_data):
         bot.logger.error(MODULE_NAME, "Failed to send log", e)
 
 
-def _downsample_flac(source_path: str):
+def _downsample_flac(source_path: str, max_bytes: int = 95 * 1024 * 1024):
     import subprocess
     p = Path(source_path)
     tmp_path = script_dir() / 'temp' / p.name
@@ -538,7 +538,11 @@ def _downsample_flac(source_path: str):
         if result.returncode != 0:
             tmp_path.unlink(missing_ok=True)
             return None, None
-        return str(tmp_path), tmp_path.stat().st_size
+        sz = tmp_path.stat().st_size
+        if sz > max_bytes:
+            tmp_path.unlink(missing_ok=True)
+            return None, None
+        return str(tmp_path), sz
 
     try:
         src_rate = _probe_sample_rate()
@@ -547,7 +551,7 @@ def _downsample_flac(source_path: str):
         # first pass: resample if needed, keep bit depth
         path, sz = _run(rate_args)
         if path and sz:
-            return path, sz, True  # resampled — still flag as transcoded
+            return path, sz, True
 
         # second pass: also reduce to 16-bit
         path, sz = _run(rate_args + ['-sample_fmt', 's16'])
@@ -685,7 +689,7 @@ class ARCHIVEManager:
                     chan, start, total, cached, uploaded, errors,
                     uploaded_bytes, total_bytes, f"Downsampling {p.name}...")
                 ds_path, ds_sz, transcoded = await loop.run_in_executor(
-                    METADATA_EXECUTOR, _downsample_flac, fp)
+                    METADATA_EXECUTOR, _downsample_flac, fp, max_bytes)
                 if ds_path and ds_sz and ds_sz <= max_bytes:
                     ok = await self._send_batch(chan, [(fp, Path(ds_path), ds_sz)], source_path=fp, transcoded=transcoded)
                     try:

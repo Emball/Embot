@@ -64,6 +64,7 @@ DB_PATH = str(_migrate_path(
     script_dir() / "db" / "archive.db",
 ))
 script_dir().joinpath("db").mkdir(parents=True, exist_ok=True)
+script_dir().joinpath("temp").mkdir(parents=True, exist_ok=True)
 VERSION_KEYWORDS = ['live', 'remix', 'demo', 'acoustic', 'version', 'edit', 'radio']
 SPECIAL_FOLDERS = {
     "8 - Features": "Feature",
@@ -481,6 +482,26 @@ async def send_bot_log(bot, log_data):
     except Exception as e:
         bot.logger.error(MODULE_NAME, "Failed to send log", e)
 
+
+def _downsample_flac(source_path: str):
+    import subprocess, tempfile
+    p = Path(source_path)
+    tmp = tempfile.NamedTemporaryFile(suffix='.flac', delete=False, dir=script_dir() / 'temp')
+    tmp.close()
+    try:
+        result = subprocess.run(
+            ['ffmpeg', '-y', '-i', source_path, '-ar', '48000', '-c:a', 'flac', tmp.name],
+            capture_output=True, timeout=120,
+        )
+        if result.returncode != 0:
+            Path(tmp.name).unlink(missing_ok=True)
+            return None, None
+        sz = Path(tmp.name).stat().st_size
+        return tmp.name, sz
+    except Exception:
+        Path(tmp.name).unlink(missing_ok=True)
+        return None, None
+
 class ARCHIVEManager:
     def __init__(self, bot):
         self.bot = bot
@@ -582,6 +603,32 @@ class ARCHIVEManager:
                 self.bot.logger.log(MODULE_NAME, f"Skipping {p.name} — stat timed out", "WARNING")
                 continue
             if sz > max_bytes:
+                await self._update_backfill_embed(
+                    chan, start, total, cached, uploaded, errors,
+                    uploaded_bytes, total_bytes, f"Downsampling {p.name}...")
+                ds_path, ds_sz = await loop.run_in_executor(
+                    METADATA_EXECUTOR, _downsample_flac, fp)
+                if ds_path and ds_sz and ds_sz <= max_bytes:
+                    ok = await self._send_batch(chan, [(fp, Path(ds_path), ds_sz)], source_path=fp)
+                    try:
+                        Path(ds_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    if ok:
+                        uploaded += 1
+                        uploaded_bytes += ds_sz
+                    else:
+                        errors += 1
+                else:
+                    if ds_path:
+                        try:
+                            Path(ds_path).unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    self.bot.logger.log(MODULE_NAME, f"Downsample failed or still too large: {p.name}", "WARNING")
+                    errors += 1
+                sent_batches += 1
+                await asyncio.sleep(2)
                 continue
             if batch and batch_size + sz > max_bytes:
                 await self._update_backfill_embed(
@@ -691,13 +738,14 @@ class ARCHIVEManager:
         msg = await chan.send(embed=embed)
         self._status_msg_id = msg.id
 
-    async def _send_batch(self, chan, batch) -> bool:
+    async def _send_batch(self, chan, batch, source_path=None) -> bool:
         read_start = time.time()
         loop = asyncio.get_running_loop()
         file_data = []
         for fp, p, sz in batch:
             data = await loop.run_in_executor(METADATA_EXECUTOR, p.read_bytes)
-            file_data.append((fp, p.name, data, sz))
+            cache_key = source_path if source_path and len(batch) == 1 else fp
+            file_data.append((cache_key, p.name, data, sz))
         read_elapsed = time.time() - read_start
         files = [discord.File(io.BytesIO(d), filename=n) for _, n, d, _ in file_data]
         total_mb = sum(sz for _, _, _, sz in file_data) // 1024 // 1024

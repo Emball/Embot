@@ -680,8 +680,15 @@ class ClaudeBridgeListener:
     def _zero_on_start(self):
         cmd_sha = self._gh_get_sha("cmd.json")
         result_sha = self._gh_get_sha("result.json")
+        status_sha = self._gh_get_sha("status.json")
         self._gh_put_file("cmd.json", {"seq": 0, "command": "", "args": []}, cmd_sha or "", "clear")
         self._gh_put_file("result.json", {"seq": 0, "command": "", "output": "", "error": ""}, result_sha or "", "clear")
+        version = getattr(self.bot, "version", "unknown")
+        self._gh_put_file("status.json", {
+            "online": True,
+            "version": version,
+            "started_at": datetime.now().isoformat(),
+        }, status_sha or "", "online")
 
     async def stop(self):
         if self._task:
@@ -925,7 +932,30 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
 
         print(f"[bridge] sent seq={seq} cmd={command} args={args}", file=sys.stderr)
 
-        time.sleep(15 if command in ("restart", "update") else 1)
+        if command in ("restart", "update"):
+            # read pre-restart timestamp, then wait for status.json to show a newer started_at
+            try:
+                old_started_at = read_json(work, "status.json").get("started_at", "")
+            except Exception:
+                old_started_at = ""
+            time.sleep(2)
+            restart_deadline = time.time() + timeout
+            while time.time() < restart_deadline:
+                git(work, "fetch", "origin")
+                git(work, "reset", "--hard", "origin/main")
+                try:
+                    st = read_json(work, "status.json")
+                    if st.get("online") and st.get("started_at", "") != old_started_at:
+                        print(f"[bridge] bot online — version {st.get('version')}", file=sys.stderr)
+                        break
+                except Exception:
+                    pass
+                time.sleep(1)
+            else:
+                print("[bridge] timed out waiting for bot restart", file=sys.stderr)
+                sys.exit(1)
+        else:
+            time.sleep(1)
 
         # poll using fast pull on the same clone — no stale state since we just pushed clean
         deadline = time.time() + timeout

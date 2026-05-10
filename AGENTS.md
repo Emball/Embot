@@ -128,7 +128,7 @@ Each module exposes `setup(bot)` — called during boot. Private `_*.py` files a
 | `links.json` | links | link name→value map |
 | `starboard.json` | starboard | channel_id, threshold, emoji, self_star, ignore_before |
 | `youtube.json` | youtube | channel_id, announce_channel_id, poll_interval, cookies_txt |
-| `remote_debug.json` | remote_debug | enabled, host, port, token (auto-generated), allowed_ips, url |
+| `remote_debug.json` | remote_debug | enabled, host, port, token (auto-generated), allowed_ips |
 
 ### Databases (`db/`)
 

@@ -26,7 +26,6 @@ RD_CONFIG_DEFAULTS = {
     "port": 8765,
     "token": "",
     "allowed_ips": [],
-    "url": "http://192.168.1.100:8765",
 }
 
 
@@ -38,8 +37,6 @@ def _migrate_client_config():
         with open(client_cfg, "r") as f:
             client_data = json.load(f)
         cfg = _load_config()
-        if client_data.get("url"):
-            cfg["url"] = client_data["url"]
         if client_data.get("token") and not cfg.get("token"):
             cfg["token"] = client_data["token"]
         atomic_json_write(RD_CONFIG_PATH, cfg)
@@ -50,6 +47,9 @@ def _migrate_client_config():
 
 def _load_config() -> dict:
     cfg = migrate_config(RD_CONFIG_PATH, RD_CONFIG_DEFAULTS)
+    if "url" in cfg:
+        del cfg["url"]
+        atomic_json_write(RD_CONFIG_PATH, cfg)
     if not cfg.get("token", "").strip():
         cfg["token"] = secrets.token_hex(32)
         atomic_json_write(RD_CONFIG_PATH, cfg)
@@ -533,15 +533,24 @@ def setup(bot):
 # ── Client mode (when run as `python modules/remote_debug.py <command>`) ──
 
 
+def _client_url(cfg):
+    url = cfg.get("url")
+    if url:
+        return url
+    host = os.environ.get("REMOTE_HOST", cfg.get("host", "0.0.0.0"))
+    port = os.environ.get("REMOTE_PORT", cfg.get("port", 8765))
+    host = "127.0.0.1" if host == "0.0.0.0" else host
+    return f"http://{host}:{port}"
+
+
 def _load_client_config() -> dict:
     cfg = migrate_config(RD_CONFIG_PATH, RD_CONFIG_DEFAULTS)
-    cfg["url"] = os.environ.get("REMOTE_URL", cfg["url"])
     cfg["token"] = os.environ.get("REMOTE_TOKEN", cfg["token"])
     return cfg
 
 
 def _client_request(cfg, path, raw=False, method="GET", data=None):
-    url = cfg["url"].rstrip("/") + path
+    url = _client_url(cfg).rstrip("/") + path
     req = urllib.request.Request(url, data=data, method=method)
     if cfg["token"]:
         req.add_header("X-Debug-Token", cfg["token"])
@@ -610,7 +619,7 @@ def _cmd_logs_search(cfg, query, max_results=100, max_files=0):
 
 
 def _cmd_stream(cfg):
-    url = cfg["url"].rstrip("/") + "/logs/stream"
+    url = _client_url(cfg).rstrip("/") + "/logs/stream"
     req = urllib.request.Request(url)
     if cfg["token"]:
         req.add_header("X-Debug-Token", cfg["token"])
@@ -647,7 +656,7 @@ def _cmd_config(cfg, name):
 
 
 def _wait_for_server(cfg, timeout=30):
-    url = cfg["url"].rstrip("/") + "/ping"
+    url = _client_url(cfg).rstrip("/") + "/ping"
     deadline = time.time() + timeout
     last_msg = 0
     while time.time() < deadline:
@@ -703,7 +712,6 @@ def main():
     cfg = _load_client_config()
 
     parser = argparse.ArgumentParser(description="Embot remote debug client")
-    parser.add_argument("--url", default=cfg["url"], help="Server URL")
     parser.add_argument("--token", default=cfg["token"], help="Auth token")
 
     sub = parser.add_subparsers(dest="command", required=True)
@@ -746,36 +754,36 @@ def main():
     sub.add_parser("restart", help="Restart the bot")
 
     args = parser.parse_args()
-    run_cfg = {"url": args.url, "token": args.token}
+    cfg["token"] = args.token
 
     if args.command == "ping":
-        _cmd_ping(run_cfg)
+        _cmd_ping(cfg)
     elif args.command == "status":
-        _cmd_status(run_cfg)
+        _cmd_status(cfg)
     elif args.command == "guilds":
-        _cmd_guilds(run_cfg)
+        _cmd_guilds(cfg)
     elif args.command == "modules":
-        _cmd_modules(run_cfg)
+        _cmd_modules(cfg)
     elif args.command == "logs":
-        _cmd_logs(run_cfg, args.lines, args.file, args.session)
+        _cmd_logs(cfg, args.lines, args.file, args.session)
     elif args.command == "logs-list":
-        _cmd_logs_list(run_cfg)
+        _cmd_logs_list(cfg)
     elif args.command == "logs-search":
-        _cmd_logs_search(run_cfg, args.query, args.max, args.files)
+        _cmd_logs_search(cfg, args.query, args.max, args.files)
     elif args.command == "stream":
-        _cmd_stream(run_cfg)
+        _cmd_stream(cfg)
     elif args.command == "db-download":
-        _cmd_db_download(run_cfg, args.name)
+        _cmd_db_download(cfg, args.name)
     elif args.command == "db-query":
-        _cmd_db_query(run_cfg, args.name, args.query)
+        _cmd_db_query(cfg, args.name, args.query)
     elif args.command == "config":
-        _cmd_config(run_cfg, args.name)
+        _cmd_config(cfg, args.name)
     elif args.command == "exec":
-        _cmd_exec(run_cfg, args.cmd, args.timeout)
+        _cmd_exec(cfg, args.cmd, args.timeout)
     elif args.command == "update":
-        _cmd_update(run_cfg)
+        _cmd_update(cfg)
     elif args.command == "restart":
-        _cmd_restart(run_cfg)
+        _cmd_restart(cfg)
 
 
 if __name__ == "__main__":

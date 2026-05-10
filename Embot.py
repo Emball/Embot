@@ -566,16 +566,24 @@ def get_modules_data():
                 failed.append(m.group(1))
     return {'loaded': loaded, 'failed': failed}
 
+_SENSITIVE_KEYS = {'token', 'secret', 'password', 'api_key', 'webhook', 'client_secret'}
+
+def _redact(obj):
+    """Recursively redact sensitive keys from a config dict."""
+    if isinstance(obj, dict):
+        return {k: ('[REDACTED]' if k.lower() in _SENSITIVE_KEYS else _redact(v)) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_redact(i) for i in obj]
+    return obj
+
 def get_config_data(name):
-    """Returns (data, error) for a config file. Blocks auth/token."""
-    if name.lower() in ('auth', 'token'):
-        return None, 'access denied'
+    """Returns (data, error) for a config file. Sensitive keys are redacted."""
     cfg_path = script_dir / 'config' / f'{name}.json'
     if not cfg_path.exists():
         return None, f"config '{name}.json' not found"
     try:
         with open(cfg_path, 'r', encoding='utf-8') as f:
-            return json.load(f), None
+            return _redact(json.load(f)), None
     except Exception as e:
         return None, str(e)
 

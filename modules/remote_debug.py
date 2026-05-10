@@ -404,7 +404,8 @@ class RemoteDebugServer:
             await site.start()
             lan_ip = _detect_lan_ip()
             self.bot.logger.log(MODULE_NAME, f"Remote debug API online at http://{lan_ip}:{port}")
-            self.bot.logger.log(MODULE_NAME, f"Auth token: {self._config['token']}")
+            tok = self._config['token']
+            self.bot.logger.log(MODULE_NAME, f"Auth token: {tok[:4]}{'*' * (len(tok) - 4)}")
         else:
             self.bot.logger.log(MODULE_NAME, "Server mode disabled in config")
 

@@ -13,9 +13,9 @@ from typing import Optional, Dict, List
 import sqlite3
 import io
 from collections import deque
-from cryptography.fernet import Fernet
 import pytz
 from _utils import script_dir, _now
+import messages as msg_cache
 
 MODULE_NAME = "MODERATION"
 
@@ -530,19 +530,10 @@ class ModerationSystem:
         _migrate_logger_config()
         self.cfg     = ModConfig()
 
-        self._fernet = Fernet(Fernet.generate_key())
-
         self._bot_log_cache: Dict[int, Dict] = {}
         self._bot_log_order: deque           = deque()
         self._bot_log_cache_size             = 500
         self._deletion_warnings: Dict[int, str] = {}
-
-        self._msg_cache_max_channels = 200
-        self.message_cache = {}
-
-        self._media_cache_ttl = 3600
-        self.media_cache = {}
-
         self.tracked_embeds = {}
 
         _db_exec(self._db,
@@ -551,7 +542,6 @@ class ModerationSystem:
 
         self.check_expired_mutes.start()
         self.cleanup_invites.start()
-        self.cleanup_media_cache.start()
         self.send_daily_report.start()
         self.resolve_expired_appeals.start()
 
@@ -648,85 +638,13 @@ class ModerationSystem:
             (now,))
         return [{"guild_id": int(r["guild_id"]), "user_id": int(r["user_id"])} for r in rows]
 
-    def _encrypt(self, data: bytes) -> bytes:
-        return self._fernet.encrypt(data)
-
-    def _decrypt(self, data: bytes) -> bytes:
-        return self._fernet.decrypt(data)
-
-    def _delete_media(self, message_id: int):
-        self.media_cache.pop(message_id, None)
-
-    async def cache_message(self, message: discord.Message):
-        if message.guild is None or message.author.bot:
-            return
-        guild_id   = str(message.guild.id)
-        channel_id = str(message.channel.id)
-        guild_cache = self.message_cache.setdefault(guild_id, {})
-
-        if channel_id not in guild_cache and len(guild_cache) >= self._msg_cache_max_channels:
-            evict_ch = next(iter(guild_cache))
-            evicted_msgs = guild_cache.pop(evict_ch, [])
-            for m in evicted_msgs:
-                if m.get('id'):
-                    self._delete_media(m['id'])
-
-        guild_cache.setdefault(channel_id, [])
-
-        downloaded = []
-        for att in message.attachments:
-            try:
-                data = await att.read()
-                downloaded.append({
-                    'filename':     att.filename,
-                    'data':         self._encrypt(data),
-                    'content_type': att.content_type or 'application/octet-stream',
-                    'url':          att.url,
-                })
-            except Exception as e:
-                self.bot.logger.log(
-                    MODULE_NAME,
-                    f"Failed to cache attachment {att.filename}: {e}", "WARNING")
-
-        if downloaded:
-            self.media_cache[message.id] = {
-                'files':     downloaded,
-                'author_id': message.author.id,
-                'guild_id':  message.guild.id,
-                'cached_at': _now().timestamp(),
-            }
-
-        msg_data = {
-            'id':          message.id,
-            'author':      str(message.author),
-            'author_id':   message.author.id,
-            'content':     message.content,
-            'timestamp':   message.created_at.isoformat(),
-            'attachments': [att.url for att in message.attachments],
-            'embeds':      len(message.embeds),
-        }
-        cache_list = guild_cache[channel_id]
-        cache_list.append(msg_data)
-        if len(cache_list) > 100:
-            evicted = cache_list.pop(0)
-            if evicted.get('id'):
-                self._delete_media(evicted['id'])
-
     def get_context_messages(
         self, guild_id: int, channel_id: int,
         around_message_id: int, count: int = None
     ) -> List[Dict]:
         if count is None:
             count = self.cfg.context_message_count
-        messages = self.message_cache.get(str(guild_id), {}).get(str(channel_id), [])
-        target_idx = next(
-            (i for i, m in enumerate(messages) if m['id'] == around_message_id), None)
-        if target_idx is None:
-            return messages[-count:]
-        half  = count // 2
-        start = max(0, target_idx - half)
-        end   = min(len(messages), target_idx + half + 1)
-        return messages[start:end]
+        return msg_cache.get_context_messages(guild_id, channel_id, around_message_id, count)
 
     @tasks.loop(minutes=1)
     async def check_expired_mutes(self):
@@ -1228,7 +1146,7 @@ def setup(bot):
     async def on_message(message):
         if message.author.bot or not message.guild:
             return
-        await mod_system.cache_message(message)
+        await msg_cache.cache_message(message)
 
     @bot.listen()
     async def on_message_delete(message):
@@ -1287,15 +1205,15 @@ def setup(bot):
                             MODULE_NAME, f"Failed to repost deletion warning: {e}")
             return
 
-        if not message.author.bot and message.id in mod_system.media_cache:
+        if not message.author.bot and message.id in msg_cache.media_cache:
             guild_id   = str(message.guild.id)
             channel_id = str(message.channel.id)
-            cached     = mod_system.media_cache.get(message.id)
+            cached     = msg_cache.media_cache.get(message.id)
             rehosted   = []
             if cached:
                 for f in cached['files']:
                     try:
-                        data = mod_system._decrypt(f['data'])
+                        data = msg_cache.decrypt(f['data'])
                         rehosted.append({'filename': f['filename'], 'data': data})
                     except Exception as e:
                         mod_system.bot.logger.log(
@@ -1305,9 +1223,9 @@ def setup(bot):
             if not hasattr(bot, '_pending_rehosted_media'):
                 bot._pending_rehosted_media = {}
             bot._pending_rehosted_media[message.id] = rehosted
-            mod_system._delete_media(message.id)
-            channel_msgs = mod_system.message_cache.get(guild_id, {}).get(channel_id, [])
-            mod_system.message_cache[guild_id][channel_id] = [
+            msg_cache.delete_media(message.id)
+            channel_msgs = msg_cache.message_cache.get(guild_id, {}).get(channel_id, [])
+            msg_cache.message_cache[guild_id][channel_id] = [
                 m for m in channel_msgs if m['id'] != message.id
             ]
 
@@ -1325,13 +1243,13 @@ def setup(bot):
         guild_id   = str(after.guild.id)
         channel_id = str(after.channel.id)
 
-        channel_msgs = mod_system.message_cache.get(guild_id, {}).get(channel_id, [])
+        channel_msgs = msg_cache.message_cache.get(guild_id, {}).get(channel_id, [])
         for msg in channel_msgs:
             if msg['id'] == after.id:
                 msg['attachments'] = [att.url for att in after.attachments]
                 break
 
-        cached        = mod_system.media_cache.get(after.id)
+        cached        = msg_cache.media_cache.get(after.id)
         removed_files = []
         if cached:
             removed_filenames = {
@@ -1340,7 +1258,7 @@ def setup(bot):
             for f in cached['files']:
                 if f['filename'] in removed_filenames:
                     try:
-                        data = mod_system._decrypt(f['data'])
+                        data = msg_cache.decrypt(f['data'])
                         removed_files.append({'filename': f['filename'], 'data': data})
                     except Exception as e:
                         mod_system.bot.logger.log(
@@ -1350,9 +1268,9 @@ def setup(bot):
                 else:
                     kept.append(f)
             if kept:
-                mod_system.media_cache[after.id]['files'] = kept
+                msg_cache.media_cache[after.id]['files'] = kept
             else:
-                mod_system.media_cache.pop(after.id, None)
+                msg_cache.media_cache.pop(after.id, None)
 
         image_exts = ('.png', '.jpg', '.jpeg', '.gif', '.webp')
         audio_exts = ('.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.opus',
@@ -1478,4 +1396,104 @@ def setup(bot):
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
     _setup_suspicion(bot, mod_system, mod_system.cfg)
+
+    # media cache TTL cleanup
+    @tasks.loop(minutes=15)
+    async def _cleanup_media_cache():
+        try:
+            evicted = msg_cache.evict_media_ttl()
+            if evicted:
+                bot.logger.log(MODULE_NAME, f"media_cache TTL eviction: removed {evicted} stale entry/entries")
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "media_cache cleanup error", e)
+
+    @_cleanup_media_cache.before_loop
+    async def _before_cleanup():
+        await bot.wait_until_ready()
+
+    _cleanup_media_cache.start()
+
+    # automod cache for VM transcript scanning
+    _automod_keywords: list = []
+    _automod_cache_time: float = 0.0
+
+    async def _get_automod_keywords(guild: discord.Guild) -> list:
+        nonlocal _automod_keywords, _automod_cache_time
+        if time.time() - _automod_cache_time < 600 and _automod_keywords:
+            return _automod_keywords
+        try:
+            rules = await guild.fetch_automod_rules()
+            keywords = []
+            for rule in rules:
+                if not rule.enabled:
+                    continue
+                meta = rule.trigger_metadata
+                if meta and hasattr(meta, 'keyword_filter') and meta.keyword_filter:
+                    keywords.extend(meta.keyword_filter)
+            _automod_keywords = keywords
+            _automod_cache_time = time.time()
+            bot.logger.log(MODULE_NAME, f"Automod keyword cache refreshed ({len(keywords)} keywords)")
+        except Exception as e:
+            bot.logger.log(MODULE_NAME, f"Failed to fetch automod rules: {e}", "WARNING")
+        return _automod_keywords
+
+    def _transcript_violates(transcript: str, keywords: list):
+        if not transcript or not keywords:
+            return None
+        normalized = transcript.lower()
+        for kw in keywords:
+            kw = kw.strip().lower()
+            if not kw:
+                continue
+            parts = kw.split('*')
+            pattern = r'\w*'.join(re.escape(p) for p in parts)
+            prefix = r'\b' if re.match(r'\w', pattern) else ''
+            suffix = r'\b' if re.search(r'\w$', pattern) else ''
+            try:
+                if re.search(f'{prefix}{pattern}{suffix}', normalized):
+                    return kw
+            except re.error:
+                continue
+        return None
+
+    @bot.listen()
+    async def on_vm_transcribed(vm_id, transcript, vm_message, reply_message, guild):
+        # gracefully no-op if VMS isn't providing expected data
+        try:
+            if not transcript or not guild:
+                return
+            keywords = await _get_automod_keywords(guild)
+            matched = _transcript_violates(transcript, keywords)
+            if not matched:
+                return
+            bot.logger.log(MODULE_NAME,
+                f"VM #{vm_id} flagged by automod (matched: {matched!r}) - purging", "WARNING")
+            # delete transcript reply
+            if reply_message:
+                try:
+                    await reply_message.delete()
+                except Exception:
+                    pass
+            # delete original VM message
+            if vm_message:
+                try:
+                    await vm_message.delete()
+                except Exception:
+                    pass
+            # purge from DB and disk via VMS manager if available
+            vms = getattr(bot, 'vms_manager', None)
+            if vms:
+                try:
+                    row = vms._db_one("SELECT filename FROM vms WHERE id=?", (vm_id,))
+                    if row:
+                        fp = vms._resolve_path(row[0])
+                        if fp and fp.exists():
+                            fp.unlink()
+                    vms._db_exec("DELETE FROM vms_playback WHERE vm_id=?", (vm_id,))
+                    vms._db_exec("DELETE FROM vms WHERE id=?", (vm_id,))
+                except Exception as e:
+                    bot.logger.log(MODULE_NAME, f"VM #{vm_id} DB/file purge error: {e}", "WARNING")
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "on_vm_transcribed handler error", e)
+
     bot.logger.log(MODULE_NAME, "Moderation setup complete")

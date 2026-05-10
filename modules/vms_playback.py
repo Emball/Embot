@@ -254,13 +254,10 @@ def set_ping_cooldown(manager, user_id: str):
 
 def recent_messages(manager, guild_id: str, channel_id: str, limit: int = 20) -> List[str]:
     try:
-        mod = getattr(manager.bot, '_mod_system', None)
-        if mod and hasattr(mod, 'message_cache'):
-            msgs = mod.message_cache.get(guild_id, {}).get(channel_id, [])
-            return [m.get('content', '') for m in msgs[-limit:] if m.get('content')]
+        import messages as msg_cache
+        return msg_cache.get_recent_messages(guild_id, channel_id, limit)
     except Exception:
-        pass
-    return []
+        return []
 
 
 def setup(bot):

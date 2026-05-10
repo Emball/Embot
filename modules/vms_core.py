@@ -217,8 +217,6 @@ class VMSManager:
         self._bulk_stop = threading.Event()
         self._bulk_proc: Optional["BulkProcessor"] = None
         self._backfill_running = False
-        self._automod_keywords: list = []
-        self._automod_cache_time: float = 0.0
 
         _init_db(self.db_path)
         self._migrate_filepath_column()
@@ -380,37 +378,17 @@ class VMSManager:
                     self.bot.logger.log(MODULE_NAME,
                         f"VM #{vm_id} transcribed ({duration:.1f}s): {preview!r}")
 
-                    # automod scan
-                    scan_guild = guild or (reply_to.guild if reply_to else None)
-                    if transcript and scan_guild:
-                        keywords = await self._get_automod_keywords(scan_guild)
-                        matched = self._transcript_violates(transcript, keywords)
-                        if matched:
-                            self.bot.logger.log(MODULE_NAME,
-                                f"VM #{vm_id} flagged by automod (matched: {matched!r}) - purging", "WARNING")
-                            # delete Discord message
-                            try:
-                                await reply_to.delete()
-                            except Exception:
-                                pass
-                            # delete file
-                            fp = self._resolve_path(actual_filename)
-                            if fp and fp.exists():
-                                try:
-                                    fp.unlink()
-                                except Exception:
-                                    pass
-                            # wipe from DB entirely
-                            self._db_exec("DELETE FROM vms_playback WHERE vm_id=?", (vm_id,))
-                            self._db_exec("DELETE FROM vms WHERE id=?", (vm_id,))
-                            continue
-
                     if reply_to is not None and transcript:
                         try:
-                            await reply_to.reply(f"> {transcript}")
+                            reply_msg = await reply_to.reply(f"> {transcript}")
                         except Exception as exc:
                             self.bot.logger.log(MODULE_NAME,
                                 f"Failed to post transcript for VM #{vm_id}: {exc}", "WARNING")
+                            reply_msg = None
+                    else:
+                        reply_msg = None
+
+                    self.bot.dispatch("vm_transcribed", vm_id, transcript, reply_to, reply_msg, guild)
                 except Exception as exc:
                     self.bot.logger.error(MODULE_NAME,
                         f"Queue worker error on VM #{vm_id}", exc)
@@ -428,46 +406,6 @@ class VMSManager:
                       guild: Optional[discord.Guild] = None):
         await self.queue.put((vm_id, filepath, reply_to, guild))
         self.bot.logger.log(MODULE_NAME, f"VM #{vm_id} queued for transcription")
-
-    async def _get_automod_keywords(self, guild: discord.Guild) -> list:
-        if time.time() - self._automod_cache_time < 600 and self._automod_keywords:
-            return self._automod_keywords
-        try:
-            rules = await guild.fetch_automod_rules()
-            keywords = []
-            for rule in rules:
-                if not rule.enabled:
-                    continue
-                meta = rule.trigger_metadata
-                if meta and hasattr(meta, 'keyword_filter') and meta.keyword_filter:
-                    keywords.extend(meta.keyword_filter)
-            self._automod_keywords = keywords
-            self._automod_cache_time = time.time()
-            self.bot.logger.log(MODULE_NAME, f"Automod keyword cache refreshed ({len(keywords)} keywords)")
-        except Exception as e:
-            self.bot.logger.log(MODULE_NAME, f"Failed to fetch automod rules: {e}", "WARNING")
-        return self._automod_keywords
-
-    def _transcript_violates(self, transcript: str, keywords: list) -> Optional[str]:
-        if not transcript or not keywords:
-            return None
-        normalized = transcript.lower()
-        for kw in keywords:
-            kw = kw.strip().lower()
-            if not kw:
-                continue
-            # convert automod wildcards to regex, escape everything else
-            parts = kw.split('*')
-            pattern = r'\w*'.join(re.escape(p) for p in parts)
-            # only match on word boundaries if pattern starts/ends on word char
-            prefix = r'\b' if re.match(r'\w', pattern) else ''
-            suffix = r'\b' if re.search(r'\w$', pattern) else ''
-            try:
-                if re.search(f'{prefix}{pattern}{suffix}', normalized):
-                    return kw
-            except re.error:
-                continue
-        return None
 
     def is_transcription_disabled(self, user_id: str, guild_id: str) -> bool:
         row = self._db_one(

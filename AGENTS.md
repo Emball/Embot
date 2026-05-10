@@ -124,7 +124,6 @@ Owner-only slash commands registered in `Embot.py` (`bot.tree.add_command(_conso
 | `/console logs [tail] [search]` | Recent log lines or regex search — sent as file attachment |
 | `/console config <name>` | View a config file (redacted) — sent as file attachment |
 | `/console dbquery <name> <query>` | Read-only SQL query — sent as file attachment if large |
-| `/console exec <cmd>` | Shell command — inline if short, file if long |
 | `/console restart` | Restart the bot |
 
 ## Claude Bridge

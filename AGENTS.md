@@ -64,6 +64,8 @@ GitHub-based command queue via private `Emball/EmbotDebug` repo. The bot polls `
 - File artifacts (logs, logs-list, logs-search, config, db-query) → committed under `logs/`, `config/`, `db/`
 - Blocked: db-download, stream
 
+**Startup behaviour:** On bridge start, the bot zeroes out both `cmd.json` and `result.json` (seq → 0). This clears any stale command left over from a previous session or mid-cycle restart, preventing it from being re-executed.
+
 **Claude's workflow per session:**
 ```bash
 git clone https://TOKEN@github.com/Emball/EmbotDebug.git /tmp/EmbotDebug

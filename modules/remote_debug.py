@@ -660,8 +660,15 @@ class ClaudeBridgeListener:
         await asyncio.get_event_loop().run_in_executor(None, _zero)
 
     async def start(self):
+        await asyncio.get_event_loop().run_in_executor(None, self._zero_on_start)
         self._task = asyncio.create_task(self._poll())
         self.bot.logger.log(MODULE_NAME, f"[bridge] Claude bridge active — polling {self._repo}")
+
+    def _zero_on_start(self):
+        cmd_sha = self._gh_get_sha("cmd.json")
+        result_sha = self._gh_get_sha("result.json")
+        self._gh_put_file("cmd.json", {"seq": 0, "command": "", "args": []}, cmd_sha or "", "clear")
+        self._gh_put_file("result.json", {"seq": 0, "command": "", "output": "", "error": ""}, result_sha or "", "clear")
 
     async def stop(self):
         if self._task:

@@ -163,6 +163,50 @@ LAN: `uv run python modules/remote_debug.py <command> [args...]`
 
 `restart`/`update` wait smartly for the bot to come back online.
 
+## Full Audit Protocol
+
+Triggered by Michael saying **"full audit"** or **"audit: \<scope\>"**.
+
+A full audit is not a quick scan. It requires loading every file in scope into context and reasoning across them together. Do not shortcut this — targeted reads miss architectural bugs that only appear when files are compared.
+
+### Read Order
+
+1. `Embot.py` — entry point, shared logic (`get_modules_data`, `get_logs_data`, `get_config_data`, `run_db_query`, `run_exec`), console commands, slash commands
+2. `modules/_utils.py` — shared utilities used everywhere
+3. `modules/messages.py` — shared state, no bot dependency
+4. `modules/mod_core.py` — auth helpers, DB helpers, ModerationSystem; depended on by most mod modules
+5. Mod cluster: `mod_actions.py`, `mod_appeals.py`, `mod_oversight.py`, `mod_rules.py`, `mod_suspicion.py`, `mod_logger.py`
+6. VMS cluster: `vms_core.py`, `vms_transcribe.py`, `vms_storage.py`, `vms_playback.py`
+7. `modules/remote_debug.py` — HTTP server, Claude bridge, LAN client; cross-references `__main__` shared logic
+8. Remaining modules: `music_archive.py`, `music_player.py`, `community.py`, `starboard.py`, `youtube.py`, `links.py`, `icons.py`, `artwork.py`, `magic_emball.py`
+
+For a scoped audit (`audit: mod`, `audit: vms`, etc.), read only the relevant cluster plus `Embot.py`, `_utils.py`, and `mod_core.py`.
+
+### Reasoning Passes (run both, in order)
+
+**Pass 1 — Within-file:** For each file, check:
+- Silent error swallowing (`bare except`, `except: pass`, errors not logged)
+- Dead code (assigned but never read, tasks never started, unreachable branches)
+- Auth checks — correct pattern used? (`is_owner()` vs guild owner ID vs no check)
+- Resource leaks (connections, sessions, executors not closed)
+
+**Pass 2 — Cross-file:** After all files are loaded, check:
+- Shared logic usage — does every call site use the canonical function, or does anything reimplement it inline? (`run_exec`, `_check_for_update`, `get_logs_data`, etc.)
+- Auth consistency — same operation uses same auth pattern across all three surfaces (console, guild slash, remote_debug)
+- Module dependencies — does anything import or reference a symbol that was removed or renamed?
+- Duplicate restart/cleanup logic across classes or modules
+
+### Output Format
+
+Group findings by severity:
+
+**Bugs** — incorrect behaviour, wrong logic, silent failures
+**Dead Code** — never runs, never read, can be deleted
+**Inconsistencies** — same operation done differently in different places
+**Suggestions** — not broken, but worth improving
+
+For each finding: file + line range, one-line description, and whether it's safe to fix immediately or needs discussion first.
+
 ## Debugging
 
 The bot auto-updates. After every push it polls git every ~1 minute, detects the version bump, pulls, and restarts. Use `bridge update` or `bridge restart` to trigger this immediately rather than waiting out the interval. Auto-update is a good fallback if the server is unreachable.

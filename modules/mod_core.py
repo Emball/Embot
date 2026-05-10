@@ -15,7 +15,7 @@ import io
 from collections import deque
 import pytz
 from _utils import script_dir, _now
-import messages as msg_cache
+import _messages as msg_cache
 
 MODULE_NAME = "MODERATION"
 

@@ -214,7 +214,6 @@ def load_modules():
     # Load order is explicit — mod_core must precede mod_logger so that
     # bot._pending_rehosted_media is populated before mod_logger's on_message_delete fires.
     _MODULE_ORDER = [
-        "messages",
         "mod_core",
         "mod_suspicion",
         "mod_actions",

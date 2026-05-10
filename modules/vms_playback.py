@@ -254,7 +254,7 @@ def set_ping_cooldown(manager, user_id: str):
 
 def recent_messages(manager, guild_id: str, channel_id: str, limit: int = 20) -> List[str]:
     try:
-        import messages as msg_cache
+        import _messages as msg_cache
         return msg_cache.get_recent_messages(guild_id, channel_id, limit)
     except Exception:
         return []

@@ -53,7 +53,7 @@ Modules are listed in **dependency order** — this is also the required read or
 | `vms_storage.py` | VM scan/conform, archival, backfill, purge |
 | `vms_playback.py` | VM selection, CDN upload, counters, ping cooldown |
 | `remote_debug.py` | HTTP debug API + Claude bridge. Bridge timeout 45s. Artifacts committed before `result.json`. Calls shared logic in `Embot.py` via `import __main__` |
-| `music_archive.py` | Eminem music archive — FLAC/MP3 scan, SQLite index, CDN cache, SMB-compatible. `_cache_store` uses `INSERT ... ON CONFLICT DO UPDATE` — do NOT revert to `INSERT OR REPLACE` (wipes `file_checksum`). `_scan_pending` is DB-lookup only. `_downsample_flac` does two passes (resample if >48kHz, then 16-bit) |
+| `music_archive.py` | Eminem music archive — FLAC/MP3 scan, SQLite index, CDN cache, SMB-compatible. `_cache_store` uses `INSERT ... ON CONFLICT DO UPDATE` — do NOT revert to `INSERT OR REPLACE` (wipes `file_checksum`). `_scan_pending` is DB-lookup only |
 | `music_player.py` | Voice playback — queue, FFmpeg, YouTube/SoundCloud, vote-skip |
 | `community.py` | Submission tracking (#projects/#artwork), voting, Spotlight Friday, SQLite |
 | `starboard.py` | Dyno-style starboard, config-driven |

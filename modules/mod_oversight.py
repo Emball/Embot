@@ -504,7 +504,6 @@ async def generate_daily_report(ms):
 
         attempt_rows = _db_all(ms._db,
                                "SELECT * FROM mod_deletion_attempts ORDER BY id")
-        _db_exec(ms._db, "DELETE FROM mod_deletion_attempts")
 
         red_flags    = []
         yellow_flags = []
@@ -557,6 +556,7 @@ async def generate_daily_report(ms):
         for action_id, action in (red_flags + yellow_flags)[:10]:
             await send_action_review(ms, owner, action_id, action)
 
+        _db_exec(ms._db, "DELETE FROM mod_deletion_attempts")
         ms.bot.logger.log(MODULE_NAME, "Daily integrity report sent to owner")
     except Exception as e:
         ms.bot.logger.error(MODULE_NAME, "Failed to generate daily report", e)

@@ -316,7 +316,6 @@ SIGNAL_WEIGHTS: dict[str, int] = {
     "account_age_under_7d":      4,
     "account_age_under_30d":     2,
     "default_avatar":            2,
-    "no_bio":                    1,
     "throwaway_username":        1,
     "joined_recently_under_7d":  1,
     "no_messages":               2,

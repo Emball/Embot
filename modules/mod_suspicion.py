@@ -59,9 +59,7 @@ class SuspicionEngine:
         existing = self._one(
             "SELECT * FROM mod_suspicion WHERE guild_id=? AND user_id=?", (gid, uid))
         if existing:
-            msg_count = self._one(
-                "SELECT msg_count FROM mod_suspicion WHERE guild_id=? AND user_id=?", (gid, uid))
-            if msg_count and msg_count["msg_count"] == 0:
+            if existing["msg_count"] == 0:
                 score += add("no_messages")
 
         releases_role_name = self.cfg.get("releases_role_name",
@@ -76,6 +74,8 @@ class SuspicionEngine:
             score += add("invite_leaktracker")
         elif invite_source == "youtube":
             score += add("invite_youtube")
+        elif invite_source:
+            score += add("invite_unknown")
 
         auto_flagged  = score >= SUSPICION_THRESHOLD
         flagged_at    = now.isoformat() if auto_flagged else None
@@ -243,8 +243,8 @@ def _setup_suspicion(bot: commands.Bot, _mod, _cfg: "ModConfig"):
                 "WHERE guild_id=? AND user_id=?",
                 (gid, uid)
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            bot.logger.log(MODULE_NAME, f"msg_count update failed for {uid}: {exc}", "WARNING")
 
     @bot.tree.command(name="fedcheck",
                       description="[Mod] Show suspicion report for a member")

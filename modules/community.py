@@ -638,7 +638,7 @@ class CommunitySystem:
         user_id   = message.author.id
 
         attachment_hashes: List[str] = []
-        if message.attachments:
+        if message.attachments and HAS_AIOHTTP:
             async with aiohttp.ClientSession() as sess:
                 for att in message.attachments:
                     h = await _hash_attachment(att, sess)
@@ -853,7 +853,7 @@ class CommunitySystem:
         new_links   = _extract_links(new_content)
 
         new_att_hashes: List[str] = []
-        if message.attachments:
+        if message.attachments and HAS_AIOHTTP:
             async with aiohttp.ClientSession() as sess:
                 for att in message.attachments:
                     h = await _hash_attachment(att, sess)

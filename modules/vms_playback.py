@@ -178,7 +178,7 @@ async def send_vm(manager, channel, vm_id: int, filepath: str, duration: float) 
             waveform = await loop.run_in_executor(manager._executor, generate_waveform, filepath)
         session = await _get_or_create_session(manager)
         result = await send_voice_message_api(
-            manager._token, channel.id, filepath, duration, waveform, session
+            manager.bot.http.token, channel.id, filepath, duration, waveform, session
         )
         if result:
             await mark_played(manager, vm_id)

@@ -157,7 +157,7 @@ Once per session: `python modules/remote_debug.py session-init ghp_...`
 | `config-write <name> <json>` | ✓ | — | Write a config file atomically (no shell mangling) |
 | `db-query <name> "<SQL>"` | ✓ | ✓ | Read-only SQL query |
 | `db-download <name>` | ✓ | ✓ | Download .db to temp/ |
-| `exec <cmd>` | ✓ | ✓ | Shell command (read-only) |
+| `exec <cmd>` | ✓ | ✓ | Shell command — use single quotes for inner strings (double quotes get mangled by the bridge shell) |
 | `update` | ✓ | ✓ | Git pull + restart |
 | `restart` | ✓ | ✓ | Restart bot |
 | `session-init <token>` | ✓ | — | Store GitHub token (once per session) |
@@ -188,6 +188,8 @@ Log Workflow:
 If that fails to identify the issue, you can expand to other avenues.
 
 Never use `sleep` to wait for the bot to update or restart. Poll with `bridge ping` instead — retry every few seconds until it responds.
+
+**`bridge exec` quoting:** the command string goes through a shell, so double quotes inside double quotes get mangled. Always use single quotes for inner strings: `bridge exec "python3 -c 'code here'"`. For writing config/data to the server, use `config-write` instead of `exec` — it's shell-free and handles special characters (`$`, backticks, quotes) safely.
 
 ## Full Audit Protocol
 

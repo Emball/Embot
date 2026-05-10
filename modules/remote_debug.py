@@ -427,7 +427,7 @@ class ClaudeBridgeListener:
     """Polls EmbotDebug repo for commands, executes via RemoteDebugServer, commits results back."""
 
     # commands that return file artifacts committed to the repo
-    FILE_COMMANDS = {"logs", "logs-list", "config", "db-query"}
+    FILE_COMMANDS = {"logs", "config", "db-query"}
     # commands blocked entirely
     BLOCKED = {"db-download"}
 
@@ -533,13 +533,6 @@ class ClaudeBridgeListener:
                 "log_file": str(self.bot.logger.log_file.name) if getattr(self.bot.logger, "log_file", None) else None,
             }, indent=2)
 
-        elif command == "guilds":
-            output = json.dumps([
-                {"id": g.id, "name": g.name, "members": g.member_count,
-                 "channels": len(g.channels), "roles": len(g.roles)}
-                for g in self.bot.guilds
-            ], indent=2)
-
         elif command == "modules":
             import __main__
             data = __main__.get_modules_data()
@@ -586,12 +579,6 @@ class ClaudeBridgeListener:
                 artifacts["logs/current.log"] = content
                 output = f"log committed ({len(content.splitlines())} lines)"
 
-        elif command == "logs-list":
-            import __main__
-            data = __main__.get_logs_data(list_files=True)
-            artifacts["logs/list.json"] = data['files']
-            output = f"{len(data['files'])} log files"
-
         elif command == "config":
             name = args[0] if args else ""
             import __main__
@@ -633,12 +620,12 @@ class ClaudeBridgeListener:
             stdout, stderr = await proc.communicate()
             out = stdout.decode().strip() + "\n" + stderr.decode().strip()
             if proc.returncode == 0 and "Already up to date" not in out:
-                asyncio.create_task(self._delayed_restart_with_log(artifacts))
+                asyncio.create_task(self._delayed_restart_with_log())
                 return out + "\n[restarting — log will be committed after startup]", {}
             output = out
 
         elif command == "restart":
-            asyncio.create_task(self._delayed_restart_with_log(artifacts))
+            asyncio.create_task(self._delayed_restart_with_log())
             output = "restarting — log will be committed after startup"
 
         else:
@@ -646,7 +633,7 @@ class ClaudeBridgeListener:
 
         return output, artifacts
 
-    async def _delayed_restart_with_log(self, artifacts):
+    async def _delayed_restart_with_log(self):
         await asyncio.sleep(1)
         await self.bot.close()
         import os as _os, sys as _sys
@@ -701,10 +688,6 @@ class ClaudeBridgeListener:
 def setup(bot):
     _migrate_client_config()
     bot.logger.log(MODULE_NAME, "Setting up remote debug HTTP server")
-    config = _load_config()
-    if not config.get("server", False):
-        bot.logger.log(MODULE_NAME, "Remote debug server disabled in config")
-        return
     server = RemoteDebugServer(bot)
     bot.remote_debug_server = server
 
@@ -720,9 +703,6 @@ def setup(bot):
 
 
 def _client_url(cfg):
-    url = cfg.get("url")
-    if url:
-        return url
     host = os.environ.get("REMOTE_HOST", cfg.get("host", "0.0.0.0"))
     port = os.environ.get("REMOTE_PORT", cfg.get("port", 8765))
     host = "127.0.0.1" if host == "0.0.0.0" else host

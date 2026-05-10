@@ -35,31 +35,33 @@ Discord bot for Eminem fan server (discord.py, single guild, uv environment).
 
 Private `_*.py` files are skipped by the loader.
 
+Modules are listed in **dependency order** — this is also the required read order for audits (see Full Audit Protocol).
+
 | Module | Description |
 |---|---|
-| `messages.py` | Shared message + media cache — text cache, encrypted attachment cache (Fernet), eviction, `cache_message()`, `get_context_messages()`, `get_recent_messages()` |
-| `music_archive.py` | Eminem music archive — FLAC/MP3 scan, SQLite index, CDN cache, batch backfill, lazy CDN refresh, SMB-compatible. `song_cache` has a `transcoded` column (1 = file was resampled/bit-depth reduced before upload). `_cache_store` uses `INSERT ... ON CONFLICT DO UPDATE` — do NOT revert to `INSERT OR REPLACE` as it wipes `file_checksum`. `_scan_pending` is DB-lookup only, no SMB reads. `_downsample_flac` does two passes (resample if >48kHz, then 16-bit) with the size check inside the function — pass 2 only runs if pass 1 is still too large. |
-| `community.py` | Submission tracking (#projects/#artwork), voting, Spotlight Friday, SQLite |
-| `mod_core.py` | Moderation core: DB, config, auth helpers, ModContext, ModerationSystem. Owns media cache TTL loop and `on_vm_transcribed` automod listener |
+| `_utils.py` | `atomic_json_write()`, `migrate_config()`, `script_dir()`, `_now()` — imported by nearly everything |
+| `messages.py` | Shared message + media cache — text cache, encrypted attachment cache (Fernet), eviction, `cache_message()`, `get_context_messages()`, `get_recent_messages()` — no bot dependency, imported directly by mod_core and vms_playback |
+| `mod_core.py` | Moderation core: DB, config, auth helpers, ModContext, ModerationSystem. Provides `is_owner()` (lazy-imported by music_archive, community, links, mod_logger). Owns media cache TTL loop and `on_vm_transcribed` automod listener |
+| `mod_suspicion.py` | Suspicion engine: /fedcheck, /fedflag, /fedclear, /fedscan, /fedinvites. Provides `is_flagged()` (lazy-imported by music_archive) |
 | `mod_actions.py` | ban, kick, mute, warn, purge, lock, slowmode |
 | `mod_appeals.py` | Ban appeal views, modal, voting, lifecycle |
 | `mod_oversight.py` | Action review, bot-log monitoring, daily integrity reports, embed tracking |
 | `mod_rules.py` | RulesManager — sync/display server rules |
-| `mod_suspicion.py` | Suspicion engine: /fedcheck, /fedflag, /fedclear, /fedscan, /fedinvites |
 | `mod_logger.py` | 17 Discord event types → join-logs/bot-logs |
-| `music_player.py` | Voice playback — queue, FFmpeg, YouTube/SoundCloud, vote-skip |
-| `vms_core.py` | VMS core: transcription queue, commands/listeners, dispatches `vm_transcribed` event |
+| `vms_core.py` | VMS core: transcription queue, commands/listeners, dispatches `vm_transcribed` event. mod_core listens — VMS has no moderation knowledge |
 | `vms_transcribe.py` | OGG transcription via Whisper, waveform gen, bulk processing |
 | `vms_storage.py` | VM scan/conform, archival, backfill, purge |
 | `vms_playback.py` | VM selection, CDN upload, counters, ping cooldown |
-| `remote_debug.py` | HTTP debug API + Claude bridge (GitHub-based command queue). Bridge timeout is 45s. Artifacts are committed before `result.json` to prevent stale reads on the Claude side. |
+| `remote_debug.py` | HTTP debug API + Claude bridge (GitHub-based command queue). Bridge timeout is 45s. Artifacts are committed before `result.json` to prevent stale reads on the Claude side. Calls shared logic in `Embot.py` via `import __main__` |
+| `music_archive.py` | Eminem music archive — FLAC/MP3 scan, SQLite index, CDN cache, batch backfill, lazy CDN refresh, SMB-compatible. `song_cache` has a `transcoded` column (1 = file was resampled/bit-depth reduced before upload). `_cache_store` uses `INSERT ... ON CONFLICT DO UPDATE` — do NOT revert to `INSERT OR REPLACE` as it wipes `file_checksum`. `_scan_pending` is DB-lookup only, no SMB reads. `_downsample_flac` does two passes (resample if >48kHz, then 16-bit) with the size check inside the function — pass 2 only runs if pass 1 is still too large. |
+| `music_player.py` | Voice playback — queue, FFmpeg, YouTube/SoundCloud, vote-skip |
+| `community.py` | Submission tracking (#projects/#artwork), voting, Spotlight Friday, SQLite |
 | `starboard.py` | Dyno-style starboard, config-driven |
-| `icons.py` | Holiday icon rotation — server icon + bot avatar |
+| `youtube.py` | YouTube audio extraction + upload monitor |
 | `links.py` | `?name` quick-link triggers, JSON-backed |
+| `icons.py` | Holiday icon rotation — server icon + bot avatar |
 | `artwork.py` | Apple Music artwork fetcher |
 | `magic_emball.py` | Magic 8-ball with Eminem flavor |
-| `youtube.py` | YouTube audio extraction + upload monitor |
-| `_utils.py` | `atomic_json_write()`, `migrate_config()`, `script_dir()`, `_now()` |
 
 ### Config Files (`config/`)
 
@@ -171,16 +173,7 @@ A full audit is not a quick scan. It requires loading every file in scope into c
 
 ### Read Order
 
-1. `Embot.py` — entry point, shared logic (`get_modules_data`, `get_logs_data`, `get_config_data`, `run_db_query`, `run_exec`), console commands, slash commands
-2. `modules/_utils.py` — shared utilities used everywhere
-3. `modules/messages.py` — shared state, no bot dependency
-4. `modules/mod_core.py` — auth helpers, DB helpers, ModerationSystem; depended on by most mod modules
-5. Mod cluster: `mod_actions.py`, `mod_appeals.py`, `mod_oversight.py`, `mod_rules.py`, `mod_suspicion.py`, `mod_logger.py`
-6. VMS cluster: `vms_core.py`, `vms_transcribe.py`, `vms_storage.py`, `vms_playback.py`
-7. `modules/remote_debug.py` — HTTP server, Claude bridge, LAN client; cross-references `__main__` shared logic
-8. Remaining modules: `music_archive.py`, `music_player.py`, `community.py`, `starboard.py`, `youtube.py`, `links.py`, `icons.py`, `artwork.py`, `magic_emball.py`
-
-For a scoped audit (`audit: mod`, `audit: vms`, etc.), read only the relevant cluster plus `Embot.py`, `_utils.py`, and `mod_core.py`.
+Read `Embot.py` first, then the Modules table top-to-bottom — it is already ordered by dependency. For a scoped audit (`audit: mod`, `audit: vms`, etc.), read only the relevant cluster plus `Embot.py`, `_utils.py`, and `mod_core.py`.
 
 ### Reasoning Passes (run both, in order)
 

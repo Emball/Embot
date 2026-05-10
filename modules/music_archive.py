@@ -484,22 +484,29 @@ async def send_bot_log(bot, log_data):
 
 
 def _downsample_flac(source_path: str):
-    import subprocess, tempfile
+    import subprocess
     p = Path(source_path)
-    tmp = tempfile.NamedTemporaryFile(suffix='.flac', delete=False, dir=script_dir() / 'temp')
-    tmp.close()
+    tmp_path = script_dir() / 'temp' / p.name
     try:
         result = subprocess.run(
-            ['ffmpeg', '-y', '-i', source_path, '-ar', '48000', '-c:a', 'flac', tmp.name],
-            capture_output=True, timeout=120,
+            [
+                'ffmpeg', '-y', '-i', source_path,
+                '-af', 'aresample=resampler=soxr:precision=28',
+                '-ar', '48000',
+                '-c:a', 'flac',
+                '-compression_level', '8',
+                '-map_metadata', '0',
+                str(tmp_path),
+            ],
+            capture_output=True, timeout=180,
         )
         if result.returncode != 0:
-            Path(tmp.name).unlink(missing_ok=True)
+            tmp_path.unlink(missing_ok=True)
             return None, None
-        sz = Path(tmp.name).stat().st_size
-        return tmp.name, sz
+        sz = tmp_path.stat().st_size
+        return str(tmp_path), sz
     except Exception:
-        Path(tmp.name).unlink(missing_ok=True)
+        tmp_path.unlink(missing_ok=True)
         return None, None
 
 class ARCHIVEManager:

@@ -1396,31 +1396,6 @@ def setup(bot):
         await asyncio.sleep(1)
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
-    @bot.tree.command(name="cleanupinvites",
-                      description="[Owner only] Delete stale 0-use 1-max invites")
-    async def slash_cleanup_invites(interaction: discord.Interaction):
-        if not has_owner_role(interaction.user, mod_system.cfg):
-            await interaction.response.send_message(ERROR_NO_PERMISSION, ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        deleted = 0
-        for guild in bot.guilds:
-            try:
-                invites = await guild.invites()
-            except discord.Forbidden:
-                continue
-            for inv in invites:
-                if (inv.inviter and inv.inviter.id == bot.user.id
-                        and inv.uses == 0
-                        and inv.max_uses == 1
-                        and inv.max_age == 0):
-                    try:
-                        await inv.delete(reason="Cleanup stale 0-use invite")
-                        deleted += 1
-                    except Exception:
-                        pass
-        await interaction.followup.send(f"Deleted {deleted} stale invites.", ephemeral=True)
-
     _setup_suspicion(bot, mod_system, mod_system.cfg)
 
     # media cache TTL cleanup

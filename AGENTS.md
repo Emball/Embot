@@ -12,7 +12,7 @@ Michael (Emball/Embis). Vibe-coder with beginner Python knowledge. Dual-boots Li
 
 ## Environment & Testing
 
-**The bot auto-updates.** After every push it polls git every ~30s, detects the version bump, pulls, and restarts on its own. Never manually trigger `update` after a push — just wait a moment and test.
+**The bot auto-updates.** After every push it polls git every ~30s, detects the version bump, pulls, and restarts on its own. The standard workflow is: push → wait ~30s → verify version via `bridge status` → continue. The `update` and `restart` bridge commands exist only as a manual override if the auto-update loop appears broken — they are not part of the normal post-push flow.
 
 NEVER run Embot.py locally for testing — the live bot runs on the Linux machine 24/7. A duplicate instance registers two bots at once and causes issues. All testing happens against the live server via remote debug.
 
@@ -118,7 +118,7 @@ Workflow:
   - `300+` → MAJOR, `100+` → minor, `20+` → patch, `1+` → micro
 - Commit message = version number only.
 - Increment version, commit, and push after every edit. No permission needed.
-- After pushing, **do nothing** — the bot auto-updates. It polls git every 30s, detects the new version, pulls, and restarts automatically. Never manually run `update` after a push unless something is broken.
+- After pushing, wait ~30s for the bot to auto-update, then verify with `bridge status`. Only use the `update` or `restart` bridge commands if the auto-update loop appears broken.
 - Keep `requirements.txt` synced. Keep `.gitignore` clean. Keep AGENTS.md current.
 - Temp/test code goes in `/temp` (gitignored).
 

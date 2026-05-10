@@ -44,8 +44,12 @@ git clone https://TOKEN@github.com/Emball/EmbotDebug.git /tmp/EmbotDebug
 1. Read current `seq` from `cmd.json`, increment by 1
 2. Write `cmd.json` with new `seq`, `command`, and `args`
 3. Commit and push
-4. Loop: `git pull` every 2-3s until `result.json` seq matches
+4. Sleep, then `git pull` and check if `result.json` seq matches — if not, sleep again and retry
 5. Read output from `result.json` and/or artifact files
+
+**Sleep times after push:**
+- Normal commands (ping, status, guilds, modules, logs, config, db-query, exec): `sleep 3`
+- restart / update: `sleep 15` (bot needs to go down and come back up)
 
 **EXEC IS READ-ONLY via bridge too.** Never use exec to edit files. All code changes go through git on the Windows side.
 

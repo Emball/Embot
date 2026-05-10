@@ -19,11 +19,7 @@ DEFAULTS = {
         },
         {
             "title": "Links",
-            "content": "[My Edit & Remaster Archive](https://drive.google.com/drive/folders/1RJ9IU9hivytvKnO4qDhlMlnaZr3e7q0W?usp=sharing)\n[Eminem Leak Tracker](https://docs.google.com/spreadsheets/d/1x9tTOOqH5WpKOoptdQzABSN_x8oZbMgzIGlGH9w1IKA/edit?usp=sharing)\n[Emball Community Edits Tracker](https://docs.google.com/spreadsheets/d/1FCJmG1RlT6N0cQio7t4xgup9scFkezsA87GS2dObZAg/edit?gid=207340854#gid=207340854)\n[The Complete Eminem Archive](https://docs.google.com/document/d/179l9aN3Y5gStie83tI-oS9dwE45UoYtU/edit?usp=sharing&ouid=106288690543947942103&rtpof=true&sd=true)\n[PayPal Tip Jar](https://www.paypal.com/donate/?business=FPWACREA4X5Z8&no_recurring=0&item_name=Remastering+content+to+preserve+for+the+future&currency_code=USD)"
-        },
-        {
-            "title": "\u200b",
-            "content": "I also do paid remaster requests for $10. If you want a song remastered, DM me."
+            "content": "[My Edit & Remaster Archive](https://drive.google.com/drive/folders/1RJ9IU9hivytvKnO4qDhlMlnaZr3e7q0W?usp=sharing)\n[Eminem Leak Tracker](https://docs.google.com/spreadsheets/d/1x9tTOOqH5WpKOoptdQzABSN_x8oZbMgzIGlGH9w1IKA/edit?usp=sharing)\n[Emball Community Edits Tracker](https://docs.google.com/spreadsheets/d/1FCJmG1RlT6N0cQio7t4xgup9scFkezsA87GS2dObZAg/edit?gid=207340854#gid=207340854)\n[The Complete Eminem Archive](https://docs.google.com/document/d/179l9aN3Y5gStie83tI-oS9dwE45UoYtU/edit?usp=sharing&ouid=106288690543947942103&rtpof=true&sd=true)\n[PayPal Tip Jar](https://www.paypal.com/donate/?business=FPWACREA4X5Z8&no_recurring=0&item_name=Remastering+content+to+preserve+for+the+future&currency_code=USD)\n\nI also do paid remaster requests for $10. If you want a song remastered, DM me."
         },
         {
             "title": "Commands",
@@ -95,13 +91,9 @@ def _build_layout(cfg: dict) -> discord.ui.LayoutView:
         else:
             text = content
 
-        # Wrap in a Container so each section gets its own accent border block.
-        # Only the first section carries the color; the rest are un-colored so they
-        # don't look like a rainbow. Adjust if you want all sections colored.
-        accent = color if i == 0 else None
         container = discord.ui.Container(
             discord.ui.TextDisplay(text),
-            accent_color=accent,
+            accent_color=color,
         )
         items.append(container)
 

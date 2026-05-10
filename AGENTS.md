@@ -34,8 +34,9 @@ Run from project root:
 | `uv run python modules/remote_debug.py logs --file session_20250101.log` | Specific day file |
 | `uv run python modules/remote_debug.py logs --session 2` | Specific session |
 | `uv run python modules/remote_debug.py logs --lines 1000` | Last N lines |
+| `uv run python modules/remote_debug.py logs --search <pattern>` | Regex search logs |
+| `uv run python modules/remote_debug.py logs --search <pattern> --max 50` | Search with result limit |
 | `uv run python modules/remote_debug.py logs-list` | All log files |
-| `uv run python modules/remote_debug.py logs-search <pattern>` | Regex search logs |
 | `uv run python modules/remote_debug.py stream` | Live log tail |
 | `uv run python modules/remote_debug.py db-download <name>` | Download .db to temp/ |
 | `uv run python modules/remote_debug.py db-query <name> "<SQL>"` | SELECT/PRAGMA query |

@@ -427,7 +427,7 @@ class ClaudeBridgeListener:
     """Polls EmbotDebug repo for commands, executes via RemoteDebugServer, commits results back."""
 
     # commands that return file artifacts committed to the repo
-    FILE_COMMANDS = {"logs", "logs-list", "logs-search", "config", "db-query"}
+    FILE_COMMANDS = {"logs", "logs-list", "config", "db-query"}
     # commands blocked entirely
     BLOCKED = {"db-download"}
 
@@ -753,7 +753,18 @@ def _cmd_modules(cfg):
     print(json.dumps(_client_request(cfg, "/modules"), indent=2))
 
 
-def _cmd_logs(cfg, lines=200, file=None, session=None):
+def _cmd_logs(cfg, lines=200, file=None, session=None, search=None, max_results=100):
+    if search:
+        path = f"/logs/search?q={urllib.parse.quote(search)}&max={max_results}"
+        result = _client_request(cfg, path)
+        matches = result.get("matches", [])
+        print(f"Found {result.get('total_matches', 0)} match(es)")
+        if result.get("truncated"):
+            print("(results truncated — use --max for more)")
+        print()
+        for m in matches:
+            print(f"  {m['file']}:{m['line']}  {m['content']}")
+        return
     path = f"/logs?lines={lines}"
     if file:
         path += f"&file={urllib.parse.quote(file)}"
@@ -765,20 +776,6 @@ def _cmd_logs(cfg, lines=200, file=None, session=None):
 
 def _cmd_logs_list(cfg):
     print(json.dumps(_client_request(cfg, "/logs/list"), indent=2))
-
-
-def _cmd_logs_search(cfg, query, max_results=100, max_files=0):
-    path = f"/logs/search?q={urllib.parse.quote(query)}&max={max_results}"
-    if max_files:
-        path += f"&files={max_files}"
-    result = _client_request(cfg, path)
-    matches = result.get("matches", [])
-    print(f"Found {result.get('total_matches', 0)} match(es) across {result.get('files_searched', 0)} file(s)")
-    if result.get("truncated"):
-        print("(results truncated — use --max for more)")
-    print()
-    for m in matches:
-        print(f"  {m['file']}:{m['line']}  {m['content']}")
 
 
 
@@ -876,13 +873,10 @@ def main():
     logs_parser.add_argument("--lines", type=int, default=200)
     logs_parser.add_argument("--file", default=None, help="Day log file (default: today)")
     logs_parser.add_argument("--session", default=None, help="Session number within day file (or 'all')")
+    logs_parser.add_argument("--search", default=None, help="Regex search across all log files")
+    logs_parser.add_argument("--max", type=int, default=100, help="Max search results (default: 100)")
 
     sub.add_parser("logs-list", help="List all log files")
-
-    logs_search = sub.add_parser("logs-search", help="Search all log files")
-    logs_search.add_argument("query", help="Search pattern (regex)")
-    logs_search.add_argument("--max", type=int, default=100, help="Max results (default: 100)")
-    logs_search.add_argument("--files", type=int, default=0, help="Max files to search (0=all)")
 
     sub.add_parser("guilds", help="List guilds with details")
     sub.add_parser("modules", help="List loaded module names")
@@ -917,11 +911,9 @@ def main():
     elif args.command == "modules":
         _cmd_modules(cfg)
     elif args.command == "logs":
-        _cmd_logs(cfg, args.lines, args.file, args.session)
+        _cmd_logs(cfg, args.lines, args.file, args.session, args.search, args.max)
     elif args.command == "logs-list":
         _cmd_logs_list(cfg)
-    elif args.command == "logs-search":
-        _cmd_logs_search(cfg, args.query, args.max, args.files)
     elif args.command == "db-download":
         _cmd_db_download(cfg, args.name)
     elif args.command == "db-query":

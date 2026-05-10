@@ -182,3 +182,7 @@ Log Workflow:
 4. If the log doesn't show the error, go wider or pull the entire log file if necessary
 
 If that fails to identify the issue, you can expand to other avenues.
+
+## Session Start Acknowledgement
+
+After reading this file, respond with exactly: "Ready. Embot vX.Y.Z.W — [one line summary of current bot state or last known activity]."

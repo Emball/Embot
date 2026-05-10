@@ -115,16 +115,16 @@ Ensure there's no avenues in a module where an error could be silently swallowed
 
 ## Discord Console Commands
 
-Owner-only slash commands registered in `Embot.py` (`bot.tree.add_command(_console)`). All responses are ephemeral. Auth uses `interaction.user.id == interaction.guild.owner_id`.
+Server-owner-only slash commands registered in `Embot.py` as top-level commands. All responses are ephemeral. Auth uses `interaction.user.id == interaction.guild.owner_id` (actual Discord guild owner, not bot owner). Output is embedded inline as a code block; falls back to file attachment only if content exceeds 2000 characters.
 
 | Command | Description |
 |---|---|
-| `/console status` | Version, latency, uptime, guilds, log file |
-| `/console modules` | Loaded and failed module list |
-| `/console logs [tail] [search]` | Recent log lines or regex search — sent as file attachment |
-| `/console config <name>` | View a config file (redacted) — sent as file attachment |
-| `/console dbquery <name> <query>` | Read-only SQL query — sent as file attachment if large |
-| `/console restart` | Restart the bot |
+| `/status` | Version, latency, uptime, guilds, log file |
+| `/modules` | Loaded and failed module list |
+| `/logs [tail] [search]` | Recent log lines or regex search — inline, file if large |
+| `/config <name>` | View a config file — inline, file if large |
+| `/dbquery <name> <query>` | Read-only SQL query — inline, file if large |
+| `/restart` | Restart the bot |
 
 ## Claude Bridge
 

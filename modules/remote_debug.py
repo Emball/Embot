@@ -632,6 +632,28 @@ class ClaudeBridgeListener:
             except asyncio.TimeoutError:
                 output = "timed out"
 
+        elif command == "script-exec":
+            # args[0] is the full Python script source
+            script_src = " ".join(args) if args else ""
+            if not script_src:
+                return "missing script", {}
+            tmp = script_dir() / "temp" / "_bridge_script.py"
+            tmp.parent.mkdir(exist_ok=True)
+            tmp.write_text(script_src)
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "uv", "run", "python", str(tmp),
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    cwd=str(script_dir())
+                )
+                try:
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+                    output = stdout.decode(errors="replace") + stderr.decode(errors="replace")
+                except asyncio.TimeoutError:
+                    output = "timed out"
+            finally:
+                tmp.unlink(missing_ok=True)
+
         elif command == "update":
             proc = await asyncio.create_subprocess_exec(
                 "git", "-c", "credential.helper=", "pull", "--ff-only", "origin", "main",

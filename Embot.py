@@ -415,9 +415,11 @@ async def _smart_update(bot, caller="UPDATE") -> dict:
     bot.version = load_version()
 
     needs_restart = any(
-        not f.startswith('modules/') or
-        f.startswith('modules/_') or
-        not f.endswith('.py')
+        f != '_version.py' and (
+            not f.startswith('modules/') or
+            f.startswith('modules/_') or
+            not f.endswith('.py')
+        )
         for f in changed
     )
 

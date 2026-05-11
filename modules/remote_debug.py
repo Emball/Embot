@@ -489,11 +489,19 @@ class ClaudeBridgeListener:
             return None
 
     async def _poll(self):
+        backoff = self._interval
+        consecutive_errors = 0
+        BACKOFF_MAX = 60.0
+        DEAF_THRESHOLD = 45.0  # warn if delay exceeds client timeout
         while True:
             try:
                 cmd, _ = await asyncio.get_event_loop().run_in_executor(
                     self._executor, self._gh_get_file, "cmd.json"
                 )
+                if consecutive_errors > 0:
+                    self.bot.logger.log(MODULE_NAME, f"[bridge] poll recovered after {consecutive_errors} error(s)")
+                    consecutive_errors = 0
+                    backoff = self._interval
                 seq = cmd.get("seq", 0)
                 if seq != 0 and seq != self._last_seq:
                     command = cmd.get("command", "")
@@ -502,9 +510,15 @@ class ClaudeBridgeListener:
                     self._last_seq = seq
                     output, artifacts = await self._execute(command, args)
                     asyncio.create_task(self._write_results(seq, command, output, artifacts))
+                await asyncio.sleep(self._interval)
             except Exception as e:
-                self.bot.logger.error(MODULE_NAME, f"[bridge] poll error", e)
-            await asyncio.sleep(self._interval)
+                consecutive_errors += 1
+                backoff = min(backoff * 2, BACKOFF_MAX)
+                if backoff >= DEAF_THRESHOLD:
+                    self.bot.logger.log(MODULE_NAME, f"[bridge] poll backoff {backoff:.0f}s — bridge effectively deaf to new commands (error #{consecutive_errors}: {e})", "WARNING")
+                else:
+                    self.bot.logger.error(MODULE_NAME, f"[bridge] poll error #{consecutive_errors}, retrying in {backoff:.0f}s", e)
+                await asyncio.sleep(backoff)
 
     async def _execute(self, command, args):
         """Route command to server handler, return (output_str, artifacts_dict)."""

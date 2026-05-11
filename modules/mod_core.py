@@ -1343,8 +1343,8 @@ def setup(bot):
             await interaction.response.send_message(
                 "Rules file not found or could not be loaded.", ephemeral=True)
             return
-        embed = rules_manager.build_embed(data)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        layout = rules_manager._build_layout(data)
+        await interaction.response.send_message(view=layout, ephemeral=True)
 
     @bot.tree.command(name="updaterules",
                       description="[Owner only] Force-refresh the #rules channel embed")

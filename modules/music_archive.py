@@ -659,10 +659,12 @@ class ARCHIVEManager:
             f"(max {max_bytes // 1024 // 1024}MB per message)")
 
         if not pending:
-            await chan.send(embed=discord.Embed(
-                title="📦 Cache Backfill",
-                description="All files already cached. Nothing to do.",
-                color=0x2ecc71))
+            view = discord.ui.LayoutView(timeout=None)
+            view.add_item(discord.ui.Container(
+                discord.ui.TextDisplay("## 📦 Cache Backfill\n▓▓▓▓▓▓▓▓▓▓▓▓ **100.0%**\nAll files already cached. Nothing to do."),
+                accent_color=0x2ecc71,
+            ))
+            await chan.send(view=view)
             return
 
         uploaded = 0
@@ -797,20 +799,25 @@ class ARCHIVEManager:
             eta_secs = 0
             speed = "—"
 
-        embed = discord.Embed(
-            title="📦 Cache Backfill",
-            description=f"`{bar}` **{pct:.1f}%** ({done}/{total})",
-            color=0x3498db if current_name else 0x2ecc71,
-        )
-        embed.add_field(name="Uploaded", value=f"{uploaded} files\n{uploaded_bytes / 1024 / 1024:.0f} MB", inline=True)
-        embed.add_field(name="Speed / ETA",
-                        value=f"{speed}\n{'—' if not eta_secs else f'{eta_secs / 60:.0f}m {eta_secs % 60:.0f}s'}",
-                        inline=True)
-        embed.add_field(name="Status", value=f"✅ {cached} cached\n❌ {errors} errors", inline=True)
-        if current_name:
-            embed.set_footer(text=f"Current: {current_name[:120]}")
-        else:
-            embed.set_footer(text="Complete!")
+        accent = 0x2ecc71 if not current_name else 0x3498db
+        eta_str = "—" if not eta_secs else f"{eta_secs / 60:.0f}m {eta_secs % 60:.0f}s"
+        footer = f"-# {'Complete!' if not current_name else f'Current: {current_name[:110]}'}"
+
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(
+                f"## 📦 Cache Backfill\n`{bar}` **{pct:.1f}%** ({done}/{total})"
+            ),
+            discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+            discord.ui.TextDisplay(
+                f"**Uploaded**\n{uploaded} files — {uploaded_bytes / 1024 / 1024:.0f} MB\n\n"
+                f"**Speed / ETA**\n{speed} — {eta_str}\n\n"
+                f"**Status**\n✅ {cached} cached  ❌ {errors} errors"
+            ),
+            discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+            discord.ui.TextDisplay(footer),
+            accent_color=accent,
+        ))
 
         if self._status_msg_id:
             try:
@@ -818,7 +825,7 @@ class ARCHIVEManager:
                 await msg.delete()
             except Exception:
                 pass
-        msg = await chan.send(embed=embed)
+        msg = await chan.send(view=view)
         self._status_msg_id = msg.id
 
     async def _send_batch(self, chan, batch, source_path=None, transcoded=False) -> bool:

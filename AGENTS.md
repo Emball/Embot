@@ -2,14 +2,17 @@
 
 **Read this entire file before doing anything else.** Update it in the same commit as any change that affects the architecture, workflow, or anything documented here.
 
-## AGENTS.md Etiquette
+## AGENTS.md Editing Etiquette
 
+- **Purpose: this file is a guide for future agents so they know the basic workflows and code layout.**
 - **One place per fact.** Duplication guarantees drift.
 - **State only, no backstory.** Document what the current state is, not why it got there or what happened in a past session.
 - **Don't document the obvious.** If it's readable from the code, it doesn't belong here.
 - **No unverified constraints.** Don't add "do NOT do X" unless it's been confirmed to actually fail.
 - **Cut before adding.** If something new makes something else redundant, remove the old one.
 - **No session discoveries as permanent rules.** A one-off observation isn't a policy.
+- **Be brief in your explanations.** This file takes up vital context in every agents session.
+- **This is a living document.** Feel free to iterate on it any way you see fit during coding, post-confirmation.
 
 ## Code Style
 
@@ -25,7 +28,9 @@ Michael (Emball/Embis). Vibe-coder with beginner Python knowledge — don't assu
 
 GitHub: `Emball/Embot`. Discord bot for an Eminem fan server (discord.py, single guild).
 
-**Always read the actual source files before making changes.** The repo is cloned locally at session start — read from there, not via the bridge.
+**Always read the actual source files before making changes.** 
+
+The repo should be cloned locally at session start, always edit and read code from here.
 
 ### Top-Level
 
@@ -75,7 +80,7 @@ Private `_*.py` files are skipped by the loader. Module load order is enforced v
 
 ### Config Files (`config/`)
 
-All configs are gitignored. mod_core, starboard, youtube, and remote_debug sync their in-memory config from disk every 30 seconds. `vms.json` and `music.json` contain path configs resolved at boot — changes require a restart.
+All configs are gitignored.
 
 | File | Owner | Keys |
 |---|---|---|
@@ -235,4 +240,4 @@ Markdown renders fully in TextDisplay: `**bold**`, `## headings`, `` `code` ``, 
 
 ## Session Start Acknowledgement
 
-After reading this file, respond with: "I've read AGENTS.md! [quick summary of your understanding of the workflows and codebase]. What are we working on today, Michael?"
+After reading this file, respond with: "I've read AGENTS.md! [Duick summary of your understanding of the workflows and codebase] [friendly question]"

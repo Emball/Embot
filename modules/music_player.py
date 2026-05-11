@@ -44,11 +44,10 @@ class Song:
         return 0
 
 class UrlSong:
-    __slots__ = ('url', 'stream_url', 'requested_by', 'title', 'duration')
+    __slots__ = ('url', 'requested_by', 'title', 'duration')
 
-    def __init__(self, url, stream_url, title, duration, requested_by):
+    def __init__(self, url, title, duration, requested_by):
         self.url = url
-        self.stream_url = stream_url
         self.requested_by = requested_by
         self.title = title
         self.duration = duration
@@ -97,10 +96,19 @@ class MusicPlayer:
             self.bot.logger.log(MODULE_NAME, f"Now playing: {self.current.title}")
 
             if isinstance(self.current, UrlSong):
-                source = discord.FFmpegPCMAudio(
-                    self.current.stream_url,
+                # Resolve fresh opus stream URL at play time to avoid expiry
+                proc = await asyncio.create_subprocess_exec(
+                    'yt-dlp', '-f', 'bestaudio[ext=webm][acodec=opus]/bestaudio[ext=opus]/bestaudio/best',
+                    '--get-url', '--no-playlist', '--quiet', self.current.url,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL
+                )
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+                stream_url = stdout.decode().strip().splitlines()[0]
+                source = discord.FFmpegOpusAudio(
+                    stream_url,
                     before_options='-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-                    options='-vn'
+                    bitrate=128
                 )
             else:
                 source = discord.FFmpegPCMAudio(
@@ -338,8 +346,8 @@ def setup(bot):
             # Resolve stream URL and metadata via yt-dlp
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    'yt-dlp', '-f', 'bestaudio/best', '--get-url', '--get-title', '--get-duration',
-                    '--no-playlist', '--no-warnings', song_name,
+                    'yt-dlp', '--get-title', '--get-duration',
+                    '--no-playlist', '--quiet', song_name,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
@@ -360,9 +368,7 @@ def setup(bot):
                 return
 
             lines = stdout.decode(errors='replace').strip().splitlines()
-            # yt-dlp outputs: title, duration (seconds), stream URL — order depends on flags
-            # --get-title, --get-duration, --get-url prints them in that order
-            if len(lines) < 3:
+            if len(lines) < 2:
                 await interaction.followup.send("Couldn't parse yt-dlp output.", ephemeral=True)
                 bot.logger.log(MODULE_NAME, f"Unexpected yt-dlp output: {lines}", "WARNING")
                 return
@@ -372,11 +378,9 @@ def setup(bot):
                 duration = int(lines[1])
             except ValueError:
                 duration = 0
-            stream_url = lines[2]
 
             song = UrlSong(
                 url=song_name,
-                stream_url=stream_url,
                 title=title,
                 duration=duration,
                 requested_by=interaction.user

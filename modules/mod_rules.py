@@ -1,9 +1,11 @@
 import discord
 import hashlib
 import json
+import os
+from datetime import datetime, timezone
 from typing import Optional
 import asyncio
-from _utils import _now
+from _utils import _now, script_dir
 from mod_core import _db_one, _db_exec, ModConfig
 
 
@@ -63,8 +65,13 @@ class RulesManager:
             lines.append(description)
         for rule in data.get("rules", []):
             lines.append(f"### Rule {rule['number']} — {rule['title']}\n{rule['description']}")
-        footer = data.get("footer", "")
         text = "\n".join(lines)
+        try:
+            mod_path = script_dir() / "config" / "mod.json"
+            mtime = datetime.fromtimestamp(os.path.getmtime(mod_path), tz=timezone.utc)
+            footer = f"Last updated {mtime.strftime('%B %d, %Y')}"
+        except Exception:
+            footer = ""
         view = discord.ui.LayoutView(timeout=None)
         view.add_item(discord.ui.Container(discord.ui.TextDisplay(text)))
         if footer:

@@ -106,7 +106,7 @@ class EventLogger:
             return
 
         header = f"🗑️ **Message deleted** in {message.channel.mention}"
-        footer = f"-# {message.author} • ID: {message.author.id} • Msg: {message.id}"
+        footer = f"-# {message.author} • ID: {message.author.id}"
         body = message.content if message.content else "*[No text content]*"
         main_text = f"{header}\n\n{body}\n{footer}"
 
@@ -184,10 +184,10 @@ class EventLogger:
             after_content = after_content[:797] + "..."
 
         text = (
-            f"✏️ **Message edited** in {after.channel.mention} • [Jump]({after.jump_url})\n\n"
+            f"✏️ **Message edited** in {after.channel.mention}\n\n"
             f"**Before**\n{before_content}\n\n"
             f"**After**\n{after_content}\n"
-            f"-# {after.author} • ID: {after.author.id} • Msg: {after.id}"
+            f"-# {after.author} • ID: {after.author.id} • [Jump]({after.jump_url})"
         )
 
         view = _layout(_section_with_avatar(text, after.author.display_avatar.url))

@@ -801,7 +801,17 @@ def setup(bot):
         await bot.wait_until_ready()
         await server.start()
 
+    async def _sync_config():
+        await bot.wait_until_ready()
+        while True:
+            try:
+                server._config = _load_config()
+            except Exception as e:
+                bot.logger.error(MODULE_NAME, "Config sync error", e)
+            await asyncio.sleep(30)
+
     bot._remote_debug_task = asyncio.create_task(_start())
+    bot._remote_debug_config_sync = asyncio.create_task(_sync_config())
     bot.logger.log(MODULE_NAME, "Remote debug module setup complete")
 
 

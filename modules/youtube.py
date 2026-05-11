@@ -231,5 +231,18 @@ def setup(bot):
     async def before_notify():
         await bot.wait_until_ready()
 
+    @tasks.loop(seconds=30)
+    async def _sync_config():
+        nonlocal cfg
+        try:
+            cfg = load_config()
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, "Config sync error", e)
+
+    @_sync_config.before_loop
+    async def _before_sync_config():
+        await bot.wait_until_ready()
+
+    _sync_config.start()
     notify_task.start()
     bot.logger.log(MODULE_NAME, "YouTube module loaded")

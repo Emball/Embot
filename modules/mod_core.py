@@ -533,6 +533,7 @@ class ModerationSystem:
         self.cleanup_invites.start()
         self.send_daily_report.start()
         self.resolve_expired_appeals.start()
+        self.sync_config.start()
 
         bot.logger.log(MODULE_NAME, "Moderation system initialised (SQLite)")
 
@@ -725,6 +726,17 @@ class ModerationSystem:
 
     @resolve_expired_appeals.before_loop
     async def before_resolve_expired_appeals(self):
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(seconds=30)
+    async def sync_config(self):
+        try:
+            self.cfg.reload()
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "Config sync error", e)
+
+    @sync_config.before_loop
+    async def before_sync_config(self):
         await self.bot.wait_until_ready()
 
 

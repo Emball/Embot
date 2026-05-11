@@ -83,23 +83,15 @@ def bot_logs_channel(ms, guild: discord.Guild) -> Optional[discord.TextChannel]:
     return None
 
 
-def log_bot_register(ms, message_id: int, log_id: str, embed: discord.Embed,
-                     files_data: list = None, is_warning: bool = False,
+def log_bot_register(ms, message_id: int, log_id: str, text: str = "", color: int = 0,
+                     footer: str = None, files_data: list = None, is_warning: bool = False,
                      warning_for_log_id: str = None):
     record = {
         'log_id':             log_id,
         'message_id':         message_id,
-        'embed': {
-            'title':       embed.title,
-            'description': embed.description,
-            'color':       embed.color.value if embed.color else 0,
-            'fields':      [{'name': f.name, 'value': f.value, 'inline': f.inline}
-                             for f in embed.fields],
-            'footer':      embed.footer.text if embed.footer else None,
-            'image_url':   embed.image.url if embed.image else None,
-            'author_name': embed.author.name if embed.author else None,
-            'author_icon': embed.author.icon_url if embed.author else None,
-        },
+        'text':               text,
+        'color':              color,
+        'footer':             footer,
         'files_data':         files_data or [],
         'is_warning':         is_warning,
         'warning_for_log_id': warning_for_log_id,
@@ -111,13 +103,25 @@ def log_bot_register(ms, message_id: int, log_id: str, embed: discord.Embed,
         ms._bot_log_cache.pop(ms._bot_log_order.popleft(), None)
 
 
-async def send_bot_log(ms, guild: discord.Guild, embed: discord.Embed,
-                       files_data: list = None, log_id: str = None) -> Optional[int]:
+async def send_bot_log(ms, guild: discord.Guild, *,
+                       text: str = "", title: str = None, color: int = 0,
+                       footer: str = None, files_data: list = None,
+                       log_id: str = None) -> Optional[int]:
     ch = bot_logs_channel(ms, guild)
     if not ch:
         return None
     if log_id is None:
         log_id = f"LOG-{int(_now().timestamp() * 1000)}"
+
+    view = discord.ui.LayoutView(timeout=None)
+    if title or text:
+        content = f"# {title}\n\n{text}" if title and text else (title or text)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(content), accent_color=color or None
+        ))
+    if footer:
+        view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        view.add_item(discord.ui.TextDisplay(f"-# {footer}"))
 
     try:
         if files_data:
@@ -125,10 +129,11 @@ async def send_bot_log(ms, guild: discord.Guild, embed: discord.Embed,
                 discord.File(fp=io.BytesIO(f['data']), filename=f['filename'])
                 for f in files_data
             ]
-            msg = await ch.send(embed=embed, files=discord_files)
+            msg = await ch.send(view=view, files=discord_files)
         else:
-            msg = await ch.send(embed=embed)
-        log_bot_register(ms, msg.id, log_id, embed, files_data=files_data)
+            msg = await ch.send(view=view)
+        log_bot_register(ms, msg.id, log_id, text, color, footer=footer,
+                         files_data=files_data)
         return msg.id
     except Exception as e:
         ms.bot.logger.error(MODULE_NAME, f"Failed to send bot log: {e}")
@@ -310,21 +315,19 @@ async def _revert_ban(ms, action: Dict, guild: discord.Guild) -> bool:
         await guild.unban(user, reason="Ban reverted after review")
         invite_link = await _create_ban_reversal_invite(ms, guild, user_id)
         try:
-            embed = discord.Embed(
-                title="Ban Reverted",
-                description=f"After reviewing your case, we've decided to revert "
-                            f"your ban from **{guild.name}**.",
-                color=0x2ecc71, timestamp=_now())
-            embed.add_field(name="Rejoin Server",
-                            value=f"You can rejoin using this invite:\n{invite_link}",
-                            inline=False)
-            embed.set_footer(text="This invite is for you only and will not expire")
-            await user.send(embed=embed)
+            view = discord.ui.LayoutView(timeout=None)
+            view.add_item(discord.ui.Container(
+                discord.ui.TextDisplay(f"# Ban Reverted\n\nAfter reviewing your case, we've decided to revert your ban from **{guild.name}**.\n\n**Rejoin Server**\nYou can rejoin using this invite:\n{invite_link}"),
+                accent_color=0x2ecc71
+            ))
+            view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+            view.add_item(discord.ui.TextDisplay("-# This invite is for you only and will not expire"))
+            await user.send(view=view)
         except discord.Forbidden:
             pass
         await _revert_botlog(ms, action, guild,
             title="Ban Reverted (Review System)",
-            description=f"**{user}** ({user_id}) has been unbanned after review.")
+            text=f"**{user}** ({user_id}) has been unbanned after review.")
         return True
     except Exception as e:
         ms.bot.logger.error(MODULE_NAME, f"Failed to revert ban {action['id']}", e)
@@ -341,32 +344,28 @@ async def _revert_mute(ms, action: Dict, guild: discord.Guild) -> bool:
         if muted_role and muted_role in member.roles:
             await member.remove_roles(muted_role, reason="Mute reverted after review")
         try:
-            embed = discord.Embed(
-                title="Mute Reverted",
-                description=f"After reviewing your case, your mute in "
-                            f"**{guild.name}** has been reverted.",
-                color=0x2ecc71, timestamp=_now())
-            await member.send(embed=embed)
+            view = discord.ui.LayoutView(timeout=None)
+            view.add_item(discord.ui.Container(
+                discord.ui.TextDisplay(f"# Mute Reverted\n\nAfter reviewing your case, your mute in **{guild.name}** has been reverted."),
+                accent_color=0x2ecc71
+            ))
+            await member.send(view=view)
         except discord.Forbidden:
             pass
         await _revert_botlog(ms, action, guild,
             title="Mute Reverted (Review System)",
-            description=f"**{member}** has been unmuted after review.")
+            text=f"**{member}** has been unmuted after review.")
         return True
     except Exception as e:
         ms.bot.logger.error(MODULE_NAME, f"Failed to revert mute {action['id']}", e)
         return False
 
 
-async def _revert_botlog(ms, action: Dict, guild: discord.Guild, title: str, description: str):
+async def _revert_botlog(ms, action: Dict, guild: discord.Guild, title: str, text: str):
     ch = bot_logs_channel(ms, guild)
     if ch:
-        log_embed = discord.Embed(
-            title=title, description=description,
-            color=0x2ecc71, timestamp=_now())
-        log_embed.add_field(name="Original Reason", value=action['reason'], inline=False)
-        log_embed.add_field(name="Original Moderator", value=action['moderator'], inline=True)
-        await send_bot_log(ms, guild, log_embed)
+        log_text = f"{text}\n\n**Original Reason** {action['reason']}\n**Original Moderator** {action['moderator']}"
+        await send_bot_log(ms, guild, text=log_text, title=title, color=0x2ecc71)
     _db_exec(ms._db,
              "DELETE FROM mod_pending_actions WHERE action_id=?", (action['id'],))
 
@@ -401,9 +400,11 @@ async def handle_bot_log_deletion(ms, message_id: int, deleter: discord.Member, 
     if not record:
         return
 
-    log_id             = record['log_id']
-    original_embed_data = record['embed']
-    timestamp           = _now()
+    log_id     = record['log_id']
+    orig_text  = record.get('text', '')
+    orig_color = record.get('color', 0)
+    orig_footer = record.get('footer', '')
+    timestamp  = _now()
 
     _db_exec(ms._db,
         "INSERT INTO mod_deletion_attempts "
@@ -412,7 +413,7 @@ async def handle_bot_log_deletion(ms, message_id: int, deleter: discord.Member, 
         (
             log_id, str(deleter), deleter.id,
             timestamp.isoformat(),
-            original_embed_data.get('title') or '(no title)',
+            (orig_text[:100] if orig_text else '(no title)'),
             int(record.get('is_warning', False)),
         ),
     )
@@ -421,67 +422,41 @@ async def handle_bot_log_deletion(ms, message_id: int, deleter: discord.Member, 
         f"Bot-log deletion attempted by {deleter} (ID: {deleter.id}) "
         f"for log {log_id}", "WARNING")
 
-    embed = discord.Embed(
-        title=original_embed_data.get('title'),
-        description=original_embed_data.get('description'),
-        color=0xff0000, timestamp=timestamp)
-    for field in original_embed_data.get('fields', []):
-        embed.add_field(
-            name=field['name'], value=field['value'], inline=field['inline'])
-    if original_embed_data.get('author_name'):
-        embed.set_author(
-            name=original_embed_data['author_name'],
-            icon_url=original_embed_data.get('author_icon') or None)
-    if original_embed_data.get('image_url'):
-        embed.set_image(url=original_embed_data['image_url'])
-    embed.add_field(
-        name="Deletion Attempted By",
-        value=f"{deleter.mention} (`{deleter}` | `{deleter.id}`)", inline=False)
-    original_footer = original_embed_data.get('footer') or ''
-    embed.set_footer(
-        text=f"{original_footer + ' - ' if original_footer else ''}"
-             f"Log ID: {log_id} - Deleting this will cause it to repost")
+    deletion_note = f"**Deletion Attempted By** {deleter.mention} (`{deleter}` | `{deleter.id}`)"
+    footer = f"{orig_footer} - " if orig_footer else ""
+    footer += f"Log ID: {log_id} - Deleting this will cause it to repost"
+    repost_text = f"{deletion_note}\n\n{orig_text}"
 
     new_msg_id = await send_bot_log(
-        ms, guild, embed, files_data=record.get('files_data'), log_id=log_id)
+        ms, guild, text=repost_text, color=0xff0000, footer=footer,
+        files_data=record.get('files_data'), log_id=log_id)
     if new_msg_id:
         ms._deletion_warnings[new_msg_id] = log_id
 
 
 async def send_action_review(ms, owner: discord.User, action_id: str, action: Dict):
-    embed = discord.Embed(
-        title=f"{action['action'].upper()} Action Review",
-        color=(0xe74c3c if 'red_flag' in action['flags'] else
-               0xf39c12 if 'yellow_flag' in action['flags'] else 0x5865f2),
-        timestamp=datetime.fromisoformat(action['timestamp']),
-    )
+    parts = [f"**{action['action'].upper()} Action Review**"]
     if action['flags']:
         flags_text = []
         if 'red_flag' in action['flags']:
-            flags_text.append("**RED FLAG** - Both embeds deleted")
+            flags_text.append("RED FLAG - Both embeds deleted")
         elif 'yellow_flag' in action['flags']:
-            flags_text.append("**YELLOW FLAG** - Embed deleted")
+            flags_text.append("YELLOW FLAG - Embed deleted")
         if 'inchat_deleted' in action['flags']:
             flags_text.append("In-chat embed deleted")
         if 'botlog_deleted' in action['flags']:
             flags_text.append("Bot-log embed deleted")
-        embed.add_field(name="Flags", value="\n".join(flags_text), inline=False)
-    embed.add_field(
-        name="Moderator",
-        value=f"{action['moderator']} (ID: {action['moderator_id']})", inline=True)
+        parts.append("Flags: " + ", ".join(flags_text))
+    parts.append(f"Moderator: {action['moderator']} (ID: {action['moderator_id']})")
     if action.get('user'):
-        embed.add_field(
-            name="User",
-            value=f"{action['user']} (ID: {action['user_id']})", inline=True)
-    embed.add_field(name="Reason", value=action['reason'], inline=False)
+        parts.append(f"User: {action['user']} (ID: {action['user_id']})")
+    parts.append(f"Reason: {action['reason']}")
     if action.get('duration'):
-        embed.add_field(name="Duration", value=action['duration'], inline=True)
+        parts.append(f"Duration: {action['duration']}")
     if action['context_messages']:
-        embed.add_field(
-            name="Context",
-            value=f"{len(action['context_messages'])} messages logged", inline=True)
+        parts.append(f"Context: {len(action['context_messages'])} messages logged")
     view = ActionReviewView(ms, action_id, action)
-    await owner.send(embed=embed, view=view)
+    await owner.send(content="\n".join(parts), view=view)
     if action['context_messages']:
         lines = []
         for msg in action['context_messages']:
@@ -519,39 +494,34 @@ async def generate_daily_report(ms):
         total_issues = len(attempt_rows) + len(red_flags) + len(yellow_flags)
 
         if total_issues == 0:
-            embed = discord.Embed(
-                title="Daily Integrity Report",
-                description="No deletion attempts or mod-action flags in the last 24 hours.",
-                color=0x2ecc71, timestamp=_now())
-            await owner.send(embed=embed)
+            view = discord.ui.LayoutView(timeout=None)
+            view.add_item(discord.ui.Container(
+                discord.ui.TextDisplay("No deletion attempts or mod-action flags in the last 24 hours."),
+                accent_color=0x2ecc71
+            ))
+            await owner.send(view=view)
             return
 
-        embed = discord.Embed(
-            title="Daily Integrity Report",
-            description=(
-                f"**{len(attempt_rows)}** bot-log deletion attempt(s)\n"
-                f"**{len(red_flags)}**  red-flag mod action(s)\n"
-                f"**{len(yellow_flags)}**  yellow-flag mod action(s)"
-            ),
-            color=0xff4500, timestamp=_now())
-        await owner.send(embed=embed)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# Daily Integrity Report\n\n**{len(attempt_rows)}** bot-log deletion attempt(s)\n**{len(red_flags)}** red-flag mod action(s)\n**{len(yellow_flags)}** yellow-flag mod action(s)"),
+            accent_color=0xff4500
+        ))
+        await owner.send(view=view)
 
         if attempt_rows:
-            detail = discord.Embed(
-                title="Bot-Log Deletion Attempts",
-                color=0xff0000, timestamp=_now())
+            detail_parts = ["# Bot-Log Deletion Attempts"]
             for attempt in attempt_rows[:20]:
-                detail.add_field(
-                    name=f"Log `{attempt['log_id']}`",
-                    value=(
-                        f"**By:** {attempt['deleter']} (`{attempt['deleter_id']}`)\n"
-                        f"**Original:** {attempt['original_title']}\n"
-                        f"**At:** {attempt['timestamp'][:19].replace('T', '')} UTC"
-                    ),
-                    inline=False)
+                detail_parts.append(f"**Log** `{attempt['log_id']}`\n**By:** {attempt['deleter']} (`{attempt['deleter_id']}`)\n**Original:** {attempt['original_title']}\n**At:** {attempt['timestamp'][:19].replace('T', '')} UTC")
+            detail_view = discord.ui.LayoutView(timeout=None)
+            detail_view.add_item(discord.ui.Container(
+                discord.ui.TextDisplay("\n\n".join(detail_parts)),
+                accent_color=0xff0000
+            ))
             if len(attempt_rows) > 20:
-                detail.set_footer(text=f"...and {len(attempt_rows) - 20} more.")
-            await owner.send(embed=detail)
+                detail_view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+                detail_view.add_item(discord.ui.TextDisplay(f"-# ...and {len(attempt_rows) - 20} more."))
+            await owner.send(view=detail_view)
 
         for action_id, action in (red_flags + yellow_flags)[:10]:
             await send_action_review(ms, owner, action_id, action)

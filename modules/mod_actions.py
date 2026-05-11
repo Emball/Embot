@@ -48,38 +48,37 @@ async def _do_ban(ctx: ModContext, ms, user: discord.User, reason: str = None,
 
         if not fake:
             try:
-                dm = discord.Embed(
-                    title="You have been banned",
-                    description=f"You have been banned from **{ctx.guild.name}**",
-                    color=0x992d22, timestamp=_now())
-                dm.add_field(name="Reason",    value=dm_reason_field,    inline=False)
-                dm.add_field(name="Moderator", value=str(ctx.author),    inline=True)
-                dm.add_field(name="Appeal Process",
-                             value="If you believe this ban was unjustified, submit an "
-                                   "appeal below. Staff will vote within 24 hours.",
-                             inline=False)
-                dm.set_footer(text="Appeals are reviewed by server staff")
-                await user.send(embed=dm, view=BanAppealView(ctx.guild.id))
+                dm_text = (
+                    f"**You have been banned**\n\nYou have been banned from **{ctx.guild.name}**\n\n"
+                    f"**Reason** {dm_reason_field}\n"
+                    f"**Moderator** {ctx.author}\n"
+                    f"**Appeal Process** If you believe this ban was unjustified, submit an "
+                    f"appeal below. Staff will vote within 24 hours.\n"
+                    f"-# Appeals are reviewed by server staff"
+                )
+                await user.send(content=dm_text, view=BanAppealView(ctx.guild.id))
             except discord.Forbidden:
                 pass
             await ctx.guild.ban(user, reason=f"{reason} - By {ctx.author}",
                                  delete_message_days=delete_days)
 
-        embed = discord.Embed(
-            title="User Banned",
-            description=f"{user.mention} has been banned.",
-            color=0x992d22, timestamp=_now())
+        parts = [f"# User Banned\n\n{user.mention} has been banned."]
         if rule_number is not None:
-            embed.add_field(name="Rule Violated", value=f"Rule {rule_number}", inline=True)
-            embed.add_field(name="Rule Text",     value=rule_text,             inline=False)
+            parts.append(f"**Rule Violated** Rule {rule_number}")
+            parts.append(f"**Rule Text** {rule_text}")
             extra = reason[len(rule_text):].lstrip("|").strip()
             if extra:
-                embed.add_field(name="Additional Note", value=extra, inline=False)
+                parts.append(f"**Additional Note** {extra}")
         else:
-            embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Moderator",         value=ctx.author.mention,    inline=True)
-        embed.add_field(name="Messages Deleted",  value=f"{delete_days} days", inline=True)
-        inchat_msg_id = await ctx.reply(embed=embed)
+            parts.append(f"**Reason** {reason}")
+        parts.append(f"**Moderator** {ctx.author.mention}")
+        parts.append(f"**Messages Deleted** {delete_days} days")
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n\n".join(parts)),
+            accent_color=0x992d22
+        ))
+        inchat_msg_id = await ctx.reply(view=view)
 
         if not fake:
             el             = get_event_logger(ctx.bot)
@@ -119,13 +118,12 @@ async def _do_unban(ctx: ModContext, ms, user_id: str, reason: str = "No reason 
         if not fake:
             await ctx.guild.unban(user, reason=f"{reason} - By {ctx.author}")
             action_resolve_pending(ms, user.id, 'ban')
-        embed = discord.Embed(
-            title="User Unbanned",
-            description=f"{user.mention} has been unbanned.",
-            color=0x2ecc71, timestamp=_now())
-        embed.add_field(name="Reason",    value=reason,              inline=False)
-        embed.add_field(name="Moderator", value=ctx.author.mention,  inline=True)
-        await ctx.reply(embed=embed)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# User Unbanned\n\n{user.mention} has been unbanned.\n\n**Reason** {reason}\n**Moderator** {ctx.author.mention}"),
+            accent_color=0x2ecc71
+        ))
+        await ctx.reply(view=view)
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} unbanned {user}")
     except ValueError:
         await ctx.error("Invalid user ID.")
@@ -151,25 +149,24 @@ async def _do_kick(ctx: ModContext, ms, member: discord.Member, reason: str, fak
         return await ctx.error(ERROR_HIGHER_ROLE)
     try:
         try:
-            dm = discord.Embed(
-                title="You have been kicked",
-                description=f"You have been kicked from **{ctx.guild.name}**",
-                color=0xe67e22, timestamp=_now())
-            dm.add_field(name="Reason",    value=reason,          inline=False)
-            dm.add_field(name="Moderator", value=str(ctx.author), inline=True)
-            dm.set_footer(text="You can rejoin if you have an invite link")
-            await member.send(embed=dm)
+            kick_dm = discord.ui.LayoutView(timeout=None)
+            kick_dm.add_item(discord.ui.Container(
+                discord.ui.TextDisplay(f"# You have been kicked\n\nYou have been kicked from **{ctx.guild.name}**\n\n**Reason** {reason}\n**Moderator** {ctx.author}"),
+                accent_color=0xe67e22
+            ))
+            kick_dm.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+            kick_dm.add_item(discord.ui.TextDisplay("-# You can rejoin if you have an invite link"))
+            await member.send(view=kick_dm)
         except discord.Forbidden:
             pass
         if not fake:
             await member.kick(reason=f"{reason} - By {ctx.author}")
-        embed = discord.Embed(
-            title="Member Kicked",
-            description=f"{member.mention} has been kicked.",
-            color=0xe67e22, timestamp=_now())
-        embed.add_field(name="Reason",    value=reason,             inline=False)
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        inchat_msg_id = await ctx.reply(embed=embed)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# Member Kicked\n\n{member.mention} has been kicked.\n\n**Reason** {reason}\n**Moderator** {ctx.author.mention}"),
+            accent_color=0xe67e22
+        ))
+        inchat_msg_id = await ctx.reply(view=view)
         el = get_event_logger(ctx.bot)
         botlog_msg_id = None
         if el:
@@ -211,14 +208,12 @@ async def _do_timeout(ctx: ModContext, ms, member: discord.Member, duration: int
             await member.timeout(
                 _now() + timedelta(minutes=duration),
                 reason=f"{reason} - By {ctx.author}")
-        embed = discord.Embed(
-            title="Member Timed Out",
-            description=f"{member.mention} timed out for **{duration}** minutes.",
-            color=0xe74c3c, timestamp=_now())
-        embed.add_field(name="Reason",    value=reason,              inline=False)
-        embed.add_field(name="Moderator", value=ctx.author.mention,  inline=True)
-        embed.add_field(name="Duration",  value=f"{duration} minutes", inline=True)
-        await ctx.reply(embed=embed)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# Member Timed Out\n\n{member.mention} timed out for **{duration}** minutes.\n\n**Reason** {reason}\n**Moderator** {ctx.author.mention}\n**Duration** {duration} minutes"),
+            accent_color=0xe74c3c
+        ))
+        await ctx.reply(view=view)
         el = get_event_logger(ctx.bot)
         if el:
             await el.log_timeout(
@@ -240,12 +235,12 @@ async def _do_untimeout(ctx: ModContext, ms, member: discord.Member, fake: bool 
     try:
         if not fake:
             await member.timeout(None, reason=f"Timeout removed by {ctx.author}")
-        embed = discord.Embed(
-            title="Timeout Removed",
-            description=f"{member.mention}'s timeout has been removed.",
-            color=0x2ecc71, timestamp=_now())
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        await ctx.reply(embed=embed)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# Timeout Removed\n\n{member.mention}'s timeout has been removed.\n\n**Moderator** {ctx.author.mention}"),
+            accent_color=0x2ecc71
+        ))
+        await ctx.reply(view=view)
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} removed timeout from {member}")
     except Exception as e:
         await ctx.error("An error occurred while removing the timeout.")
@@ -277,22 +272,20 @@ async def _do_mute(ctx: ModContext, ms, member: discord.Member, reason: str = "N
             await member.add_roles(muted_role, reason=reason)
             ms.add_mute(ctx.guild.id, member.id, reason, ctx.author, duration_seconds)
         try:
-            dm = discord.Embed(title="You Have Been Muted",
-                description=f"You have been muted in **{ctx.guild.name}**.",
-                color=0xf39c12, timestamp=_now())
-            dm.add_field(name="Reason", value=reason, inline=False)
-            dm.add_field(name="Duration", value=duration_str, inline=True)
-            dm.add_field(name="Moderator", value=str(ctx.author), inline=True)
-            await member.send(embed=dm)
+            mute_dm = discord.ui.LayoutView(timeout=None)
+            mute_dm.add_item(discord.ui.Container(
+                discord.ui.TextDisplay(f"# You Have Been Muted\n\nYou have been muted in **{ctx.guild.name}**.\n\n**Reason** {reason}\n**Duration** {duration_str}\n**Moderator** {ctx.author}"),
+                accent_color=0xf39c12
+            ))
+            await member.send(view=mute_dm)
         except discord.Forbidden:
             pass
-        embed = discord.Embed(title="Member Muted",
-            description=f"{member.mention} has been muted.",
-            color=0xf39c12, timestamp=_now())
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Duration", value=duration_str, inline=True)
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        await ctx.reply(embed=embed)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# Member Muted\n\n{member.mention} has been muted.\n\n**Reason** {reason}\n**Duration** {duration_str}\n**Moderator** {ctx.author.mention}"),
+            accent_color=0xf39c12
+        ))
+        await ctx.reply(view=view)
         el = get_event_logger(ctx.bot)
         if el:
             await el.log_mute(ctx.guild, member, ctx.author, reason, duration_str, ctx.channel)
@@ -315,11 +308,12 @@ async def _do_unmute(ctx: ModContext, ms, member: discord.Member, fake: bool = F
         if not fake:
             await member.remove_roles(muted_role, reason=f"Unmuted by {ctx.author}")
             ms.remove_mute(ctx.guild.id, member.id)
-        embed = discord.Embed(title="Member Unmuted",
-            description=f"{member.mention} has been unmuted.",
-            color=0x2ecc71, timestamp=_now())
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        await ctx.reply(embed=embed)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# Member Unmuted\n\n{member.mention} has been unmuted.\n\n**Moderator** {ctx.author.mention}"),
+            accent_color=0x2ecc71
+        ))
+        await ctx.reply(view=view)
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} unmuted {member}")
     except Exception as e:
         await ctx.error("An error occurred while trying to unmute the member.")
@@ -346,13 +340,12 @@ async def _do_softban(ctx: ModContext, ms, member: discord.Member, reason: str,
             await member.ban(reason=f"Softban: {reason} - By {ctx.author}",
                              delete_message_days=delete_days)
             await ctx.guild.unban(member, reason=f"Softban unban - By {ctx.author}")
-        embed = discord.Embed(title="Member Softbanned",
-            description=f"{member.mention} softbanned (messages deleted, can rejoin).",
-            color=0x992d22, timestamp=_now())
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        embed.add_field(name="Messages Deleted", value=f"{delete_days} days", inline=True)
-        inchat_msg_id = await ctx.reply(embed=embed)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# Member Softbanned\n\n{member.mention} softbanned (messages deleted, can rejoin).\n\n**Reason** {reason}\n**Moderator** {ctx.author.mention}\n**Messages Deleted** {delete_days} days"),
+            accent_color=0x992d22
+        ))
+        inchat_msg_id = await ctx.reply(view=view)
         el = get_event_logger(ctx.bot)
         botlog_msg_id = None
         if el:
@@ -392,24 +385,20 @@ async def _do_warn(ctx: ModContext, ms, member: discord.Member, reason: str, fak
         strike_count = (ms.get_strikes(member.id) + 1
                         if fake else ms.add_strike(member.id, reason))
         try:
-            dm = discord.Embed(
-                title="Warning",
-                description=f"You have been warned in **{ctx.guild.name}**",
-                color=0xf39c12, timestamp=_now())
-            dm.add_field(name="Reason",          value=reason,               inline=False)
-            dm.add_field(name="Moderator",        value=str(ctx.author),      inline=True)
-            dm.add_field(name="Total Warnings",   value=str(strike_count),    inline=True)
-            await member.send(embed=dm)
+            warn_dm = discord.ui.LayoutView(timeout=None)
+            warn_dm.add_item(discord.ui.Container(
+                discord.ui.TextDisplay(f"# Warning\n\nYou have been warned in **{ctx.guild.name}**\n\n**Reason** {reason}\n**Moderator** {ctx.author}\n**Total Warnings** {strike_count}"),
+                accent_color=0xf39c12
+            ))
+            await member.send(view=warn_dm)
         except discord.Forbidden:
             pass
-        embed = discord.Embed(
-            title="Member Warned",
-            description=f"{member.mention} has been warned.",
-            color=0xf39c12, timestamp=_now())
-        embed.add_field(name="Reason",        value=reason,             inline=False)
-        embed.add_field(name="Moderator",     value=ctx.author.mention, inline=True)
-        embed.add_field(name="Total Warnings", value=str(strike_count), inline=True)
-        await ctx.reply(embed=embed)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# Member Warned\n\n{member.mention} has been warned.\n\n**Reason** {reason}\n**Moderator** {ctx.author.mention}\n**Total Warnings** {strike_count}"),
+            accent_color=0xf39c12
+        ))
+        await ctx.reply(view=view)
         el = get_event_logger(ctx.bot)
         if el:
             await el.log_warn(
@@ -426,30 +415,31 @@ async def _do_warnings(ctx: ModContext, ms, member: discord.Member):
     strikes = ms.get_strike_details(member.id)
     if not strikes:
         return await ctx.reply(f"**{member}** has no warnings.", ephemeral=True)
-    embed = discord.Embed(
-        title=f"Warnings for {member}",
-        description=f"Total warnings: **{len(strikes)}**",
-        color=0xf39c12, timestamp=_now())
+    parts = [f"# Warnings for {member}", f"Total warnings: **{len(strikes)}**"]
     for i, s in enumerate(strikes[-10:], 1):
         ts = datetime.fromisoformat(s['timestamp']).strftime("%Y-%m-%d %H:%M UTC")
-        embed.add_field(
-            name=f"Warning {i}",
-            value=f"**Reason:** {s['reason']}\n**Date:** {ts}", inline=False)
+        parts.append(f"**Warning {i}**\n**Reason:** {s['reason']}\n**Date:** {ts}")
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(
+        discord.ui.TextDisplay("\n\n".join(parts)),
+        accent_color=0xf39c12
+    ))
     if len(strikes) > 10:
-        embed.set_footer(text=f"Showing last 10 of {len(strikes)} warnings")
-    await ctx.reply(embed=embed, ephemeral=True)
+        view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        view.add_item(discord.ui.TextDisplay(f"-# Showing last 10 of {len(strikes)} warnings"))
+    await ctx.reply(view=view, ephemeral=True)
 
 
 async def _do_clearwarnings(ctx: ModContext, ms, member: discord.Member):
     if not has_owner_role(ctx.author, ms.cfg):
         return await ctx.error(ERROR_NO_PERMISSION)
     if ms.clear_strikes(member.id):
-        embed = discord.Embed(
-            title="Warnings Cleared",
-            description=f"All warnings cleared for **{member}**.",
-            color=0x2ecc71, timestamp=_now())
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        await ctx.reply(embed=embed)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# Warnings Cleared\n\nAll warnings cleared for **{member}**.\n\n**Moderator** {ctx.author.mention}"),
+            accent_color=0x2ecc71
+        ))
+        await ctx.reply(view=view)
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} cleared warnings for {member}")
     else:
         await ctx.reply(f"**{member}** has no warnings to clear.", ephemeral=True)
@@ -475,14 +465,12 @@ async def _do_purge(ctx: ModContext, ms, amount: int, target: Optional[discord.M
 
         reason = f"Purged {len(deleted)} message(s)" + (
             f"from {target}" if target else "")
-        embed = discord.Embed(
-            title="Messages Purged",
-            description=f"Deleted **{len(deleted)}** messages"
-                        f"{f' from {target.mention}' if target else ''}.",
-            color=0x2ecc71, timestamp=_now())
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        embed.add_field(name="Channel",   value=ctx.channel.mention, inline=True)
-        inchat_msg_id = await ctx.followup(embed=embed)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# Messages Purged\n\nDeleted **{len(deleted)}** messages{f' from {target.mention}' if target else ''}.\n\n**Moderator** {ctx.author.mention}\n**Channel** {ctx.channel.mention}"),
+            accent_color=0x2ecc71
+        ))
+        inchat_msg_id = await ctx.followup(view=view)
         el = get_event_logger(ctx.bot)
         botlog_msg_id = None
         if el:
@@ -522,15 +510,18 @@ async def _do_slowmode(ctx: ModContext, ms, seconds: int,
         await target.edit(slowmode_delay=seconds,
                           reason=f"Slowmode set by {ctx.author}")
         if seconds == 0:
-            embed = discord.Embed(title="Slowmode Disabled",
-                                  description=f"Slowmode disabled in {target.mention}.",
-                                  color=0x2ecc71)
+            view = discord.ui.LayoutView(timeout=None)
+            view.add_item(discord.ui.Container(
+                discord.ui.TextDisplay(f"# Slowmode Disabled\n\nSlowmode disabled in {target.mention}.\n\n**Moderator** {ctx.author.mention}"),
+                accent_color=0x2ecc71
+            ))
         else:
-            embed = discord.Embed(title="Slowmode Enabled",
-                                  description=f"Slowmode set to **{seconds}s** in {target.mention}.",
-                                  color=0x3498db)
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        await ctx.reply(embed=embed)
+            view = discord.ui.LayoutView(timeout=None)
+            view.add_item(discord.ui.Container(
+                discord.ui.TextDisplay(f"# Slowmode Enabled\n\nSlowmode set to **{seconds}s** in {target.mention}.\n\n**Moderator** {ctx.author.mention}"),
+                accent_color=0x3498db
+            ))
+        await ctx.reply(view=view)
         ctx.bot.logger.log(
             MODULE_NAME, f"{ctx.author} set slowmode to {seconds}s in {target.name}")
     except Exception as e:
@@ -552,13 +543,12 @@ async def _do_lock(ctx: ModContext, ms, reason: str,
             await target.set_permissions(
                 ctx.guild.default_role, send_messages=False,
                 reason=f"{reason} - By {ctx.author}")
-        embed = discord.Embed(
-            title="Channel Locked",
-            description=f"{target.mention} has been locked.",
-            color=0xe74c3c, timestamp=_now())
-        embed.add_field(name="Reason",    value=reason,             inline=False)
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        inchat_msg_id = await ctx.reply(embed=embed)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# Channel Locked\n\n{target.mention} has been locked.\n\n**Reason** {reason}\n**Moderator** {ctx.author.mention}"),
+            accent_color=0xe74c3c
+        ))
+        inchat_msg_id = await ctx.reply(view=view)
         el = get_event_logger(ctx.bot)
         botlog_msg_id = None
         if el:
@@ -591,12 +581,12 @@ async def _do_unlock(ctx: ModContext, ms, channel: Optional[discord.TextChannel]
         await target.set_permissions(
             ctx.guild.default_role, send_messages=None,
             reason=f"Unlocked by {ctx.author}")
-        embed = discord.Embed(
-            title="Channel Unlocked",
-            description=f"{target.mention} has been unlocked.",
-            color=0x2ecc71, timestamp=_now())
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
-        await ctx.reply(embed=embed)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# Channel Unlocked\n\n{target.mention} has been unlocked.\n\n**Moderator** {ctx.author.mention}"),
+            accent_color=0x2ecc71
+        ))
+        await ctx.reply(view=view)
         ctx.bot.logger.log(MODULE_NAME, f"{ctx.author} unlocked {target.name}")
     except Exception as e:
         await ctx.error("An error occurred while trying to unlock the channel.")

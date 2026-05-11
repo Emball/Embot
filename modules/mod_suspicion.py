@@ -132,25 +132,19 @@ class SuspicionEngine:
         signals = json.loads(record.get("signals", "[]"))
         score   = record.get("score", 0)
 
-        embed = discord.Embed(
-            title=" Suspicious Account Flagged",
-            color=discord.Color.from_rgb(255, 160, 50),
-            timestamp=_now(),
-        )
-        embed.set_author(
-            name=str(member),
-            icon_url=member.display_avatar.url,
-        )
-        embed.add_field(name="User", value=member.mention, inline=True)
-        embed.add_field(name="Score", value=f"`{score}` / threshold `{SUSPICION_THRESHOLD}`", inline=True)
-        embed.add_field(name="Invite source", value=record.get('invite_source', 'custom'), inline=True)
-        embed.add_field(
-            name="Signals",
-            value="\n".join(f" - `{s}`  (+{SIGNAL_WEIGHTS.get(s, 0)})" for s in signals) or "none",
-            inline=False,
-        )
-        embed.set_footer(text=f"Use /fedcheck, /fedflag, or /fedclear to manage  -  ID: {member.id}")
-        await bot_logs.send(embed=embed)
+        signals_text = "\n".join(f" - `{s}`  (+{SIGNAL_WEIGHTS.get(s, 0)})" for s in signals) or "none"
+        ts = int(_now().timestamp())
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.Section(
+                discord.ui.TextDisplay(f"#  Suspicious Account Flagged\n**User** {member.mention}\n**Score** `{score}` / threshold `{SUSPICION_THRESHOLD}`\n**Invite source** {record.get('invite_source', 'custom')}\n\n**Signals**\n{signals_text}"),
+                accessory=discord.ui.Thumbnail(member.display_avatar.url)
+            ),
+            accent_color=discord.Color.from_rgb(255, 160, 50)
+        ))
+        view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        view.add_item(discord.ui.TextDisplay(f"-# Use /fedcheck, /fedflag, or /fedclear to manage  -  ID: {member.id}  •  <t:{ts}>"))
+        await bot_logs.send(view=view)
 
     def manual_flag(self, guild_id: str, user_id: str, note: str = "") -> None:
         now = _now().isoformat()
@@ -256,52 +250,37 @@ def _setup_suspicion(bot: commands.Bot, _mod, _cfg: "ModConfig"):
 
         record = engine.get_record(str(interaction.guild_id), str(member.id))
 
-        embed = discord.Embed(
-            title=f" Suspicion Report - {member}",
-            color=(discord.Color.red() if (record and record["flagged"] and not record["cleared"])
-                   else discord.Color.green() if (record and record["cleared"])
-                   else discord.Color.greyple()),
-            timestamp=_now(),
-        )
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.add_field(name="Status",
-                        value=("Flagged" if record and record["flagged"] and not record["cleared"]
-                               else "Cleared" if record and record["cleared"]
-                               else "Unscored"),
-                        inline=True)
-        embed.add_field(name="Score",
-                        value=f"`{record['score'] if record else '-'}` / `{SUSPICION_THRESHOLD}`",
-                        inline=True)
+        color = (discord.Color.red() if (record and record["flagged"] and not record["cleared"])
+                 else discord.Color.green() if (record and record["cleared"])
+                 else discord.Color.greyple())
+        ts = int(_now().timestamp())
+        parts = [f"#  Suspicion Report - {member}"]
+        parts.append(f"**Status** {'Flagged' if record and record['flagged'] and not record['cleared'] else 'Cleared' if record and record['cleared'] else 'Unscored'}")
+        parts.append(f"**Score** `{record['score'] if record else '-'}` / `{SUSPICION_THRESHOLD}`")
 
         if record:
             signals = json.loads(record.get("signals") or "[]")
-            embed.add_field(
-                name="Triggered signals",
-                value=("\n".join(f" - `{s}`  (+{SIGNAL_WEIGHTS.get(s, 0)})" for s in signals)
-                       or "none"),
-                inline=False,
-            )
-            embed.add_field(name="Invite source",
-                            value=record.get('invite_source', 'custom'),
-                            inline=True)
-            embed.add_field(name="Scored at",
-                            value=record.get("scored_at", "-")[:19].replace("T", ""),
-                            inline=True)
+            parts.append("**Triggered signals**\n" + ("\n".join(f" - `{s}`  (+{SIGNAL_WEIGHTS.get(s, 0)})" for s in signals) or "none"))
+            parts.append(f"**Invite source** {record.get('invite_source', 'custom')}")
+            parts.append(f"**Scored at** {record.get('scored_at', '-')[:19].replace('T', '')}")
             if record.get("cleared"):
-                embed.add_field(name="Cleared by",
-                                value=record.get("cleared_by", "unknown"),
-                                inline=True)
+                parts.append(f"**Cleared by** {record.get('cleared_by', 'unknown')}")
             if record.get("note"):
-                embed.add_field(name="Note", value=record["note"], inline=False)
+                parts.append(f"**Note** {record['note']}")
 
         acct_age = (_now() - member.created_at).days
-        join_age = ((_now() - member.joined_at).days
-                    if member.joined_at else "?")
-        embed.add_field(name="Account age",  value=f"{acct_age}d", inline=True)
-        embed.add_field(name="Server tenure", value=f"{join_age}d", inline=True)
-        embed.set_footer(text=f"ID: {member.id}")
+        join_age = ((_now() - member.joined_at).days if member.joined_at else "?")
+        parts.append(f"**Account age** {acct_age}d")
+        parts.append(f"**Server tenure** {join_age}d")
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n\n".join(parts)),
+            accent_color=color
+        ))
+        view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        view.add_item(discord.ui.TextDisplay(f"-# ID: {member.id}  •  <t:{ts}>"))
+        await interaction.response.send_message(view=view, ephemeral=True)
 
     @bot.tree.command(name="fedflag",
                       description="[Mod] Manually flag a member as suspicious")

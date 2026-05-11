@@ -522,23 +522,23 @@ class CommunitySystem:
     def cerr(self, msg: str, exc: Exception = None):
         self.bot.logger.error(MODULE_NAME, msg, exc)
 
-    async def _bot_log(self, guild: discord.Guild, embed: discord.Embed):
+    async def _bot_log(self, guild: discord.Guild, view: discord.ui.LayoutView):
         try:
             el = getattr(self.bot, "_logger_event_logger", None)
             if el:
                 ch = el.get_bot_logs_channel(guild)
                 if ch:
-                    await ch.send(embed=embed)
+                    await ch.send(view=view)
                     return
             ch = discord.utils.get(guild.text_channels, name="bot-logs")
             if ch:
-                await ch.send(embed=embed)
+                await ch.send(view=view)
         except Exception as e:
             self.cerr("Failed to send to bot-logs", e)
 
-    async def _dm_or_ping(self, user: discord.Member, embed: discord.Embed):
+    async def _dm_or_ping(self, user: discord.Member, view: discord.ui.LayoutView):
         try:
-            await user.send(embed=embed)
+            await user.send(view=view)
             return
         except (discord.Forbidden, discord.HTTPException):
             pass
@@ -546,7 +546,7 @@ class CommunitySystem:
             guild = user.guild
             ch = discord.utils.get(guild.text_channels, name=GENERAL_CHANNEL_NAME)
             if ch:
-                await ch.send(content=user.mention, embed=embed)
+                await ch.send(content=user.mention, view=view)
         except Exception as e:
             self.cerr("Failed to DM and failed to fallback to general", e)
 
@@ -588,20 +588,15 @@ class CommunitySystem:
             )
         return None
 
-    def _invalid_embed(self, reason: str, channel_name: str) -> discord.Embed:
-        e = discord.Embed(
-            title="Submission Not Accepted",
-            description=(
-                f"Your post in **#{channel_name}** was removed because it didn't meet "
-                "the submission requirements.\n\n"
-                f"**Reason:** {reason}\n\n"
-                "Please fix the issue and repost. Need help? Ask in the server!"
-            ),
-            color=0xf39c12,
-            timestamp=_now()
-        )
-        e.set_footer(text="Embot Community System")
-        return e
+    def _invalid_view(self, reason: str, channel_name: str) -> discord.ui.LayoutView:
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# Submission Not Accepted\n\nYour post in **#{channel_name}** was removed because it didn't meet the submission requirements.\n\n**Reason:** {reason}\n\nPlease fix the issue and repost. Need help? Ask in the server!"),
+            accent_color=0xf39c12
+        ))
+        view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        view.add_item(discord.ui.TextDisplay("-# Embot Community System"))
+        return view
 
     def _next_version(self, existing_row: sqlite3.Row, new_content: str
                       ) -> Tuple[str, int, int]:
@@ -626,8 +621,7 @@ class CommunitySystem:
                 await message.delete()
             except Exception:
                 pass
-            embed = self._invalid_embed(err, message.channel.name)
-            await self._dm_or_ping(message.author, embed)
+            await self._dm_or_ping(message.author, self._invalid_view(err, message.channel.name))
             self.clog(f"Rejected submission by {message.author} in #{message.channel.name}: {err}")
             return
 
@@ -661,17 +655,14 @@ class CommunitySystem:
                 guild = message.guild
                 owner_member = guild.get_member(owner["user_id"]) if guild else None
                 owner_name = owner_member.display_name if owner_member else f"another member"
-                embed = discord.Embed(
-                    title="Duplicate Submission Detected",
-                    description=(
-                        f"Your submission was removed because an attached file has already been "
-                        f"submitted by **{owner_name}**. Please only submit your own original work."
-                    ),
-                    color=0xe74c3c,
-                    timestamp=_now()
-                )
-                embed.set_footer(text="Embot Community System")
-                await self._dm_or_ping(message.author, embed)
+                view = discord.ui.LayoutView(timeout=None)
+                view.add_item(discord.ui.Container(
+                    discord.ui.TextDisplay(f"# Duplicate Submission Detected\n\nYour submission was removed because an attached file has already been submitted by **{owner_name}**. Please only submit your own original work."),
+                    accent_color=0xe74c3c
+                ))
+                view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+                view.add_item(discord.ui.TextDisplay("-# Embot Community System"))
+                await self._dm_or_ping(message.author, view)
                 self.clog(
                     f"Duplicate attachment from {message.author.display_name} "
                     f"— matches submission by {owner_name}."
@@ -688,17 +679,14 @@ class CommunitySystem:
                 guild = message.guild
                 owner_member = guild.get_member(owner_row["user_id"]) if guild else None
                 owner_name = owner_member.display_name if owner_member else "another member"
-                embed = discord.Embed(
-                    title="Duplicate Link Detected",
-                    description=(
-                        f"Your submission was removed because that link has already been "
-                        f"submitted by **{owner_name}**. Please only submit your own original work."
-                    ),
-                    color=0xe74c3c,
-                    timestamp=_now()
-                )
-                embed.set_footer(text="Embot Community System")
-                await self._dm_or_ping(message.author, embed)
+                view = discord.ui.LayoutView(timeout=None)
+                view.add_item(discord.ui.Container(
+                    discord.ui.TextDisplay(f"# Duplicate Link Detected\n\nYour submission was removed because that link has already been submitted by **{owner_name}**. Please only submit your own original work."),
+                    accent_color=0xe74c3c
+                ))
+                view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+                view.add_item(discord.ui.TextDisplay("-# Embot Community System"))
+                await self._dm_or_ping(message.author, view)
                 self.clog(f"Duplicate link from {message.author.display_name} — matches submission by {owner_name}.")
                 return
 
@@ -708,7 +696,7 @@ class CommunitySystem:
         version_str: str
         version_major: int
         version_minor: int
-        dm_version_embed: Optional[discord.Embed] = None
+        dm_version_view: Optional[discord.ui.LayoutView] = None
 
         if existing:
             created = datetime.fromisoformat(existing["created_at"])
@@ -724,17 +712,13 @@ class CommunitySystem:
                     self.db.update_submission(sub["id"], is_current=0)
 
             action = "re-entered the voting cycle as"if reenter_ok else "registered as"
-            dm_version_embed = discord.Embed(
-                title="New Version Detected",
-                description=(
-                    f"Your project **{title or 'Untitled'}** was {action} **{version_str}**.\n\n"
-                    "Your previous vote history has been carried over, and voters who already "
-                    "voted on an earlier version cannot vote again on this one."
-                ),
-                color=0x5865f2,
-                timestamp=_now()
-            )
-            dm_version_embed.set_footer(text="Embot Community System")
+            dm_version_view = discord.ui.LayoutView(timeout=None)
+            dm_version_view.add_item(discord.ui.Container(
+                discord.ui.TextDisplay(f"# New Version Detected\n\nYour project **{title or 'Untitled'}** was {action} **{version_str}**.\n\nYour previous vote history has been carried over, and voters who already voted on an earlier version cannot vote again on this one."),
+                accent_color=0x5865f2
+            ))
+            dm_version_view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+            dm_version_view.add_item(discord.ui.TextDisplay("-# Embot Community System"))
             self.clog(f"New version {version_str} for submission {group_id} by {message.author.display_name}")
         else:
             group_id     = _short_id()
@@ -803,24 +787,17 @@ class CommunitySystem:
             except Exception as e:
                 self.cerr(f"Failed to add reaction {emoji}", e)
 
-        if dm_version_embed:
-            await self._dm_or_ping(message.author, dm_version_embed)
+        if dm_version_view:
+            await self._dm_or_ping(message.author, dm_version_view)
 
-        log_embed = discord.Embed(
-            title="New Submission",
-            description=(
-                f"**Author:** {message.author.mention}\n"
-                f"**Channel:** {message.channel.mention}\n"
-                f"**Title:** {title or 'Untitled'}\n"
-                f"**Version:** {version_str}\n"
-                f"**Group ID:** `{group_id}`\n"
-                f"[Jump to Message]({message.jump_url})"
-            ),
-            color=0x2ecc71,
-            timestamp=_now()
-        )
-        log_embed.set_footer(text=f"Submission ID: {sub_id}")
-        await self._bot_log(guild, log_embed)
+        log_view = discord.ui.LayoutView(timeout=None)
+        log_view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# New Submission\n\n**Author:** {message.author.mention}\n**Channel:** {message.channel.mention}\n**Title:** {title or 'Untitled'}\n**Version:** {version_str}\n**Group ID:** `{group_id}`\n[Jump to Message]({message.jump_url})"),
+            accent_color=0x2ecc71
+        ))
+        log_view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        log_view.add_item(discord.ui.TextDisplay(f"-# Submission ID: {sub_id}"))
+        await self._bot_log(guild, log_view)
         self.clog(
             f"Submission registered: {title!r} by {message.author.display_name} "
             f"({version_str}, submission={group_id})"
@@ -873,10 +850,9 @@ class CommunitySystem:
             except Exception:
                 pass
             self.db.update_submission(sub["id"], is_deleted=1, last_checked_at=_now_str())
-            embed = self._invalid_embed(err, channel.name)
             member = guild.get_member(sub["user_id"])
             if member:
-                await self._dm_or_ping(member, embed)
+                await self._dm_or_ping(member, self._invalid_view(err, channel.name))
             self.clog(f"Edited submission {sub['id']} became invalid and was deleted.")
             return
 
@@ -905,19 +881,14 @@ class CommunitySystem:
             try:
                 member = guild.get_member(sub["user_id"])
                 if member:
-                    dm = discord.Embed(
-                        title="Version Tag Detected in Edit",
-                        description=(
-                            f"Your submission **{_extract_title(new_content) or 'Untitled'}** "
-                            f"has been updated to **v{maj}.{min_}** based on the version tag "
-                            f"you added in your edit.\n\n"
-                            "This version is now marked as the current one for your project group."
-                        ),
-                        color=0x5865f2,
-                        timestamp=_now()
-                    )
-                    dm.set_footer(text="Embot Community System")
-                    await self._dm_or_ping(member, dm)
+                    dm_view = discord.ui.LayoutView(timeout=None)
+                    dm_view.add_item(discord.ui.Container(
+                        discord.ui.TextDisplay(f"# Version Tag Detected in Edit\n\nYour submission **{_extract_title(new_content) or 'Untitled'}** has been updated to **v{maj}.{min_}** based on the version tag you added in your edit.\n\nThis version is now marked as the current one for your project group."),
+                        accent_color=0x5865f2
+                    ))
+                    dm_view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+                    dm_view.add_item(discord.ui.TextDisplay("-# Embot Community System"))
+                    await self._dm_or_ping(member, dm_view)
             except Exception as e:
                 self.cerr("Failed to DM version-edit notice", e)
             self.clog(
@@ -1359,12 +1330,12 @@ def setup(bot):
 
         cs._refresh_channel_ids(interaction.guild)
 
-        embed = discord.Embed(
-            title="Community Configuration Updated",
-            description="\n".join(changed) if changed else "No changes made.",
-            color=0x2ecc71
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# Community Configuration Updated\n\n" + ("\n".join(changed) if changed else "No changes made.")),
+            accent_color=0x2ecc71
+        ))
+        await interaction.response.send_message(view=view, ephemeral=True)
         cs.clog(f"Community config updated by {interaction.user}")
 
     @bot.tree.command(name="xp", description="Check your XP or another user's XP")
@@ -1372,14 +1343,15 @@ def setup(bot):
     async def xp_command(interaction: discord.Interaction, member: Optional[discord.Member] = None):
         target = member or interaction.user
         xp_val = cs.db.get_xp(target.id)
-        embed = discord.Embed(
-            title=f"⭐ XP — {target.display_name}",
-            description=f"**{xp_val:.1f} XP**",
-            color=0xf1c40f,
-            timestamp=_now()
-        )
-        embed.set_thumbnail(url=target.display_avatar.url)
-        await interaction.response.send_message(embed=embed)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.Section(
+                discord.ui.TextDisplay(f"# ⭐ XP — {target.display_name}\n\n**{xp_val:.1f} XP**"),
+                accessory=discord.ui.Thumbnail(target.display_avatar.url)
+            ),
+            accent_color=0xf1c40f
+        ))
+        await interaction.response.send_message(view=view)
 
     @bot.tree.command(name="leaderboard", description="Show the community XP leaderboard")
     async def leaderboard_command(interaction: discord.Interaction):
@@ -1388,11 +1360,6 @@ def setup(bot):
             await interaction.response.send_message("No XP data yet!", ephemeral=True)
             return
 
-        embed = discord.Embed(
-            title="Community XP Leaderboard",
-            color=0xf1c40f,
-            timestamp=_now()
-        )
         guild = interaction.guild
         lines = []
         medals = ["", "", ""]
@@ -1402,9 +1369,14 @@ def setup(bot):
             prefix = medals[i] if i < 3 else f"**{i+1}.**"
             lines.append(f"{prefix} {name} — **{float(row['xp']):.1f} XP**")
 
-        embed.description = "\n".join(lines)
-        embed.set_footer(text="Embot Community System")
-        await interaction.response.send_message(embed=embed)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# Community XP Leaderboard\n\n" + "\n".join(lines)),
+            accent_color=0xf1c40f
+        ))
+        view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        view.add_item(discord.ui.TextDisplay("-# Embot Community System"))
+        await interaction.response.send_message(view=view)
 
     @bot.tree.command(name="submission_info", description="Look up a submission by its Discord message link or ID")
     @app_commands.describe(message_id="The ID of the submission message")
@@ -1431,18 +1403,14 @@ def setup(bot):
             ).fetchone()
         total_xp = int(xp_row["total"]) if xp_row else 0
 
-        embed = discord.Embed(
-            title=f"Submission: {sub['title'] or 'Untitled'}",
-            color=0x5865f2,
-            timestamp=_now()
-        )
-        embed.add_field(name="Author",    value=member.mention if member else name, inline=True)
-        embed.add_field(name="Version",   value=sub["version"],                     inline=True)
-        embed.add_field(name="Group XP",  value=f"{total_xp} XP",                  inline=True)
-        embed.add_field(name="Versions",  value=str(len(versions)),                 inline=True)
-        embed.add_field(name="Group ID",  value=f"`{sub['group_id']}`",             inline=False)
-        embed.set_footer(text=f"Submission ID: {sub['id']}")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# Submission: {sub['title'] or 'Untitled'}\n\n**Author** {member.mention if member else name}\n**Version** {sub['version']}\n**Group XP** {total_xp} XP\n**Versions** {len(versions)}\n**Group ID** `{sub['group_id']}`"),
+            accent_color=0x5865f2
+        ))
+        view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        view.add_item(discord.ui.TextDisplay(f"-# Submission ID: {sub['id']}"))
+        await interaction.response.send_message(view=view, ephemeral=True)
 
     @bot.tree.command(name="spotlight_preview", description="[Owner only] Preview this week's Spotlight Friday winner")
     async def spotlight_preview(interaction: discord.Interaction):

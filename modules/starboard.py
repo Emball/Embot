@@ -129,37 +129,59 @@ def _star_label(count: int) -> str:
     else:
         return "⭐"
 
-def _build_content(count: int, source_channel: discord.TextChannel) -> str:
-    return f"{_star_label(count)} **{count}** | {source_channel.mention}"
+def _build_layout(message: discord.Message, count: int) -> discord.ui.LayoutView:
+    items = []
 
-def _build_embed(message: discord.Message, count: int) -> discord.Embed:
-    embed = discord.Embed(
-        description=message.content or "",
-        color=discord.Color.gold(),
-        timestamp=message.created_at,
-    )
-    embed.set_author(
-        name=message.author.display_name,
-        icon_url=message.author.display_avatar.url,
-    )
-    embed.add_field(name="Source", value=f"[Jump to message]({message.jump_url})", inline=False)
+    # Star count + channel
+    items.append(discord.ui.Container(
+        discord.ui.TextDisplay(f"{_star_label(count)} **{count}** | {message.channel.mention}")
+    ))
 
+    # Author section with avatar + message content
+    section_text = f"### {message.author.display_name}\n" + message.content if message.content else f"### {message.author.display_name}"
+    items.append(discord.ui.Container(
+        discord.ui.Section(
+            discord.ui.TextDisplay(section_text),
+            accessory=discord.ui.Thumbnail(message.author.display_avatar.url)
+        )
+    ))
+
+    # Source link
+    items.append(discord.ui.Container(
+        discord.ui.TextDisplay(f"[Jump to message]({message.jump_url})")
+    ))
+
+    # Image if any
+    image_url = None
     if message.attachments:
         first = message.attachments[0]
         if first.content_type and first.content_type.startswith("image/"):
-            embed.set_image(url=first.url)
-
-    if not embed.image and message.embeds:
+            image_url = first.url
+    if not image_url and message.embeds:
         for e in message.embeds:
             if e.image:
-                embed.set_image(url=e.image.url)
+                image_url = e.image.url
                 break
             if e.thumbnail:
-                embed.set_image(url=e.thumbnail.url)
+                image_url = e.thumbnail.url
                 break
 
-    embed.set_footer(text=f"#{message.channel.name}")
-    return embed
+    if image_url:
+        items.append(discord.ui.Container(
+            discord.ui.MediaGallery(
+                discord.ui.media_gallery.MediaGalleryItem(image_url)
+            )
+        ))
+
+    # Footer
+    ts = int(message.created_at.timestamp())
+    items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+    items.append(discord.ui.TextDisplay(f"-# #{message.channel.name} • <t:{ts}>"))
+
+    view = discord.ui.LayoutView(timeout=None)
+    for item in items:
+        view.add_item(item)
+    return view
 
 def _count_reactions(message: discord.Message, emoji: str) -> int:
     for reaction in message.reactions:
@@ -217,8 +239,7 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
                 _delete_entry(msg_key)
             return
 
-        content = _build_content(count, source_channel)
-        embed = _build_embed(message, count)
+        layout = _build_layout(message, count)
 
         if entry:
             if count == entry.get("current_stars") and entry.get("starboard_msg_id"):
@@ -226,9 +247,9 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
 
             try:
                 sb_msg = await starboard_channel.fetch_message(int(entry["starboard_msg_id"]))
-                await sb_msg.edit(content=content, embed=embed)
+                await sb_msg.edit(view=layout)
             except discord.NotFound:
-                sb_msg = await starboard_channel.send(content=content, embed=embed)
+                sb_msg = await starboard_channel.send(view=layout)
                 entry["starboard_msg_id"] = str(sb_msg.id)
             except discord.Forbidden:
                 bot.logger.log(MODULE_NAME, "Missing permissions to edit starboard message", "WARNING")
@@ -251,7 +272,7 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
                     pass
 
             try:
-                sb_msg = await starboard_channel.send(content=content, embed=embed)
+                sb_msg = await starboard_channel.send(view=layout)
             except discord.Forbidden:
                 bot.logger.log(MODULE_NAME, "Missing permissions to post to starboard channel", "WARNING")
                 return

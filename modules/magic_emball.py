@@ -118,15 +118,14 @@ def setup(bot):
                 response = random.choice(RESPONSES)
                 bot.logger.log(MODULE_NAME, "Using random response")
 
-            embed = discord.Embed(
-                title="Magic Emball",
-                color=discord.Color.purple()
-            )
-            embed.add_field(name="Question", value=question, inline=False)
-            embed.add_field(name="Answer", value=response, inline=False)
-            embed.set_footer(text="Ask wisely.")
-
-            await interaction.response.send_message(embed=embed)
+            view = discord.ui.LayoutView(timeout=None)
+            view.add_item(discord.ui.Container(
+                discord.ui.TextDisplay(f"## Magic Emball\n**Question**\n{question}\n\n**Answer**\n{response}"),
+                accent_color=discord.Color.purple()
+            ))
+            view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+            view.add_item(discord.ui.TextDisplay("-# Ask wisely."))
+            await interaction.response.send_message(view=view)
             bot.logger.log(MODULE_NAME, "Sent magic emball response")
 
         except Exception as e:

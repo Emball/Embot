@@ -503,30 +503,32 @@ def _ext_queue_eta(position: int) -> float:
     return position * _ext_avg_secs
 
 
-def _ext_status_embed(position: int, total: int, done: bool = False,
-                      transcript: str = None, error: str = None) -> discord.Embed:
+def _ext_status_layout(position: int, total: int, done: bool = False,
+                       transcript: str = None, error: str = None) -> discord.ui.LayoutView:
+    view = discord.ui.LayoutView(timeout=None)
     if error:
-        e = discord.Embed(color=0xe74c3c)
-        e.description = error
-        return e
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(error),
+            accent_color=0xe74c3c
+        ))
+        return view
     if done:
-        e = discord.Embed(color=0x2ecc71)
-        e.description = f"> {transcript}"
-        return e
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"> {transcript}"),
+            accent_color=0x2ecc71
+        ))
+        return view
     eta = _ext_queue_eta(position)
     eta_str = f"~{int(eta)}s" if eta < 60 else f"~{int(eta // 60)}m {int(eta % 60)}s"
-    e = discord.Embed(
-        title="Transcribing...",
-        color=0x3498db,
-    )
-    if position == 1:
-        e.description = "Processing now..."
-    else:
-        e.description = f"**Position {position}** of {total} in queue\nEstimated wait: {eta_str}"
-    return e
+    desc = "Processing now..." if position == 1 else f"**Position {position}** of {total} in queue\nEstimated wait: {eta_str}"
+    view.add_item(discord.ui.Container(
+        discord.ui.TextDisplay(f"# Transcribing...\n\n{desc}"),
+        accent_color=0x3498db
+    ))
+    return view
 
 
-def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
+def _build_stats_layout(manager: "VMSManager") -> discord.ui.LayoutView:
     rows = manager._db_all(
         """SELECT v.id, v.duration_secs, v.transcript, v.created_at,
                   v.discord_channel_id, v.filename,
@@ -539,12 +541,12 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
     )
 
     if not rows:
-        embed = discord.Embed(
-            title="VM Stats",
-            description="No transcribed voice messages in the active cache yet.",
-            color=0x5865f2,
-        )
-        return embed
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("No transcribed voice messages in the active cache yet."),
+            accent_color=0x5865f2
+        ))
+        return view
 
     total_vms = len(rows)
     durations = [r[1] for r in rows if r[1]]
@@ -614,52 +616,8 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
             return f"{secs / 3600:.1f} hours"
         return f"{secs / 86400:.1f} days"
 
-    embed = discord.Embed(
-        title="Voice Message Stats",
-        color=0x5865f2,
-        timestamp=_now(),
-    )
-
-    embed.add_field(
-        name="Overview",
-        value=(
-            f"**{total_vms:,}** voice messages transcribed\n"
-            f"**{fmt_big(total_secs)}** of total audio\n"
-            f"**{total_words:,}** words spoken in total"
-        ),
-        inline=False,
-    )
-
-    embed.add_field(
-        name="Duration",
-        value=(
-            f"Average: **{fmt_dur(avg_secs)}**\n"
-            f"Longest: **{fmt_dur(longest_secs)}**\n"
-            f"Shortest: **{fmt_dur(shortest_secs)}**"
-        ),
-        inline=True,
-    )
-
-    embed.add_field(
-        name="Words",
-        value=(
-            f"Avg per VM: **{avg_words:.0f}**\n"
-            f"Top words:\n"
-            + "\n".join(f"`{w}` x{c:,}" for w, c in top_words)
-        ),
-        inline=True,
-    )
-
-    embed.add_field(
-        name="Playback",
-        value=(
-            f"Total plays: **{total_plays:,}**\n"
-            + (f"Most played: VM **#{most_played_id}** ({most_played_count}x)" if most_played_id else "No plays yet")
-        ),
-        inline=True,
-    )
-
     peak_hour_fmt = datetime.strptime(str(peak_hour), "%H").strftime("%I %p").lstrip("0")
+
     facts = [
         f"Chattiest sender: **{top_user}** with {top_user_count} VMs" if top_user else None,
         f"Busiest channel: <#{top_channel_id}>" if top_channel_id else None,
@@ -667,14 +625,24 @@ def _build_stats_embed(manager: "VMSManager") -> discord.Embed:
         f"Avg rate: **{vms_per_day:.1f}** VMs/day over the last {span_days:,} days",
         f"That's roughly **{total_words / max(total_vms, 1):.0f}** words per VM on average",
     ]
-    embed.add_field(
-        name="Fun Facts",
-        value="\n".join(f for f in facts if f),
-        inline=False,
-    )
 
-    embed.set_footer(text="Active cache only - archived & deleted VMs excluded")
-    return embed
+    sections = [
+        f"# Voice Message Stats",
+        f"**Overview**\n**{total_vms:,}** voice messages transcribed\n**{fmt_big(total_secs)}** of total audio\n**{total_words:,}** words spoken in total",
+        f"**Duration**\nAverage: **{fmt_dur(avg_secs)}**\nLongest: **{fmt_dur(longest_secs)}**\nShortest: **{fmt_dur(shortest_secs)}**",
+        f"**Words**\nAvg per VM: **{avg_words:.0f}**\nTop words:\n" + "\n".join(f"`{w}` x{c:,}" for w, c in top_words),
+        f"**Playback**\nTotal plays: **{total_plays:,}**\n" + (f"Most played: VM **#{most_played_id}** ({most_played_count}x)" if most_played_id else "No plays yet"),
+        f"**Fun Facts**\n" + "\n".join(f for f in facts if f),
+    ]
+
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(
+        discord.ui.TextDisplay("\n\n".join(sections)),
+        accent_color=0x5865f2
+    ))
+    view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+    view.add_item(discord.ui.TextDisplay("-# Active cache only - archived & deleted VMs excluded"))
+    return view
 
 
 def setup(bot):
@@ -708,7 +676,7 @@ def setup(bot):
                 total = len(_ext_pending)
                 for i, entry in enumerate(_ext_pending, start=1):
                     try:
-                        await entry['msg'].edit(embed=_ext_status_embed(i, total))
+                        await entry['msg'].edit(view=_ext_status_layout(i, total))
                     except Exception:
                         pass
 
@@ -723,12 +691,12 @@ def setup(bot):
                         total = len(_ext_pending)
                         snapshot = [e for e in _ext_pending if e['msg'] != followup_msg]
                     try:
-                        await followup_msg.edit(embed=_ext_status_embed(1, total))
+                        await followup_msg.edit(view=_ext_status_layout(1, total))
                     except Exception:
                         pass
                     for i, entry in enumerate(snapshot, start=2):
                         try:
-                            await entry['msg'].edit(embed=_ext_status_embed(i, total))
+                        await entry['msg'].edit(view=_ext_status_layout(i, total))
                         except Exception:
                             pass
 
@@ -759,11 +727,11 @@ def setup(bot):
                     try:
                         if broken or not transcript:
                             await followup_msg.edit(
-                                embed=_ext_status_embed(0, 0, error="Could not transcribe that voice message.")
+                                view=_ext_status_layout(0, 0, error="Could not transcribe that voice message.")
                             )
                         else:
                             await followup_msg.edit(
-                                embed=_ext_status_embed(0, 0, done=True, transcript=transcript)
+                                view=_ext_status_layout(0, 0, done=True, transcript=transcript)
                             )
                     except Exception as exc:
                         bot.logger.log(MODULE_NAME, f"Ext worker: failed to edit result: {exc}", "WARNING")
@@ -963,8 +931,6 @@ def setup(bot):
         message: discord.Message,
         ephemeral: bool,
     ):
-        await interaction.response.defer(ephemeral=ephemeral, thinking=True)
-
         vm_att = None
         for att in message.attachments:
             if att.filename.lower() == "voice-message.ogg":
@@ -972,7 +938,7 @@ def setup(bot):
                 break
 
         if vm_att is None:
-            await interaction.followup.send(
+            await interaction.response.send_message(
                 "No voice message found on that message.", ephemeral=True
             )
             return
@@ -987,7 +953,7 @@ def setup(bot):
             user_id = str(interaction.user.id)
             remaining_cd = await _ext_cooldown_remaining(user_id)
             if remaining_cd > 0:
-                await interaction.followup.send(
+                await interaction.response.send_message(
                     f"You're on cooldown. Try again in **{int(remaining_cd) + 1}s**.",
                     ephemeral=True
                 )
@@ -1004,14 +970,17 @@ def setup(bot):
                 position = len(_ext_pending) + 1
             total = position
 
-            init_embed = _ext_status_embed(position, total)
-            followup_msg = await interaction.followup.send(embed=init_embed, ephemeral=True, wait=True)
+            init_view = _ext_status_layout(position, total)
+            await interaction.response.send_message(view=init_view, ephemeral=True)
+            followup_msg = await interaction.original_response()
 
             item = {'vm_att': vm_att, 'temp_path': temp_path, 'msg': followup_msg}
             async with _ext_pending_lock:
                 _ext_pending.append(item)
             await _ext_queue.put(item)
             return
+
+        await interaction.response.defer(ephemeral=ephemeral, thinking=True)
 
         try:
             existing = manager._db_one(
@@ -1149,13 +1118,25 @@ def setup(bot):
     )
     @discord.app_commands.guild_only()
     async def vm_stats(interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True)
+        loading = discord.ui.LayoutView(timeout=None)
+        loading.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("Loading VM stats...")
+        ))
+        await interaction.response.send_message(view=loading, ephemeral=False)
         try:
             loop = asyncio.get_running_loop()
-            embed = await loop.run_in_executor(manager._executor, _build_stats_embed, manager)
-            await interaction.followup.send(embed=embed)
+            layout = await loop.run_in_executor(manager._executor, _build_stats_layout, manager)
+            await interaction.edit_original_response(view=layout)
         except Exception as exc:
             bot.logger.error(MODULE_NAME, "vmstats command error", exc)
-            await interaction.followup.send("Failed to fetch stats.", ephemeral=True)
+            err_view = discord.ui.LayoutView(timeout=None)
+            err_view.add_item(discord.ui.Container(
+                discord.ui.TextDisplay("Failed to fetch stats."),
+                accent_color=0xe74c3c
+            ))
+            try:
+                await interaction.edit_original_response(view=err_view)
+            except Exception:
+                pass
 
     bot.logger.log(MODULE_NAME, "Registered slash command: /vmstats")

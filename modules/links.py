@@ -120,18 +120,19 @@ def setup(bot):
 
         link_manager.save_links()
 
-        embed = discord.Embed(
-            title=f"Link {'Created' if is_new else 'Updated'}",
-            description=f"Link command `?{name}` has been {'created' if is_new else 'updated'}",
-            color=0x2ecc71
-        )
-
-        embed.add_field(name="Command", value=f"`?{name}`", inline=True)
-        embed.add_field(name="URL", value=url, inline=False)
+        label = "created" if is_new else "updated"
+        parts = [f"# Link {label.title()}"]
+        parts.append(f"Link command `?{name}` has been {label}")
+        parts.append(f"**Command** `?{name}`")
+        parts.append(f"**URL** {url}")
         if description:
-            embed.add_field(name="Description", value=description, inline=False)
-
-        await interaction.response.send_message(embed=embed)
+            parts.append(f"**Description** {description}")
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n\n".join(parts)),
+            accent_color=0x2ecc71
+        ))
+        await interaction.response.send_message(view=view)
         bot.logger.log(MODULE_NAME, f"{interaction.user} {'created' if is_new else 'updated'} link: ?{name}")
 
     @bot.tree.command(name="linkremove", description="[Owner only] Remove a quick-link command")
@@ -152,13 +153,12 @@ def setup(bot):
         del link_manager.links[name]
         link_manager.save_links()
 
-        embed = discord.Embed(
-            title="Link Removed",
-            description=f"Link command `?{name}` has been removed",
-            color=0xe74c3c
-        )
-
-        await interaction.response.send_message(embed=embed)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# Link Removed\n\nLink command `?{name}` has been removed"),
+            accent_color=0xe74c3c
+        ))
+        await interaction.response.send_message(view=view)
         bot.logger.log(MODULE_NAME, f"{interaction.user} removed link: ?{name}")
 
     @bot.tree.command(name="linktoggle", description="[Owner only] Enable or disable a quick-link command")
@@ -182,13 +182,13 @@ def setup(bot):
 
         new_status = link_manager.links[name]["enabled"]
 
-        embed = discord.Embed(
-            title=f"{' Link Enabled' if new_status else ' Link Disabled'}",
-            description=f"Link command `?{name}` has been {'enabled' if new_status else 'disabled'}",
-            color=0x2ecc71 if new_status else 0xe74c3c
-        )
-
-        await interaction.response.send_message(embed=embed)
+        status = "enabled" if new_status else "disabled"
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"#  Link Enabled\n\nLink command `?{name}` has been {status}"),
+            accent_color=0x2ecc71 if new_status else 0xe74c3c
+        ))
+        await interaction.response.send_message(view=view)
         bot.logger.log(MODULE_NAME, f"{interaction.user} {'enabled' if new_status else 'disabled'} link: ?{name}")
 
     @bot.tree.command(name="linklist", description="List all available link commands")
@@ -196,12 +196,6 @@ def setup(bot):
         if not link_manager.links:
             await interaction.response.send_message("No link commands configured yet.", ephemeral=True)
             return
-
-        embed = discord.Embed(
-            title="Available Link Commands",
-            description=f"Use `?<command>` to access these links (e.g., `?tracker`)",
-            color=0x5865f2
-        )
 
         enabled_links = []
         disabled_links = []
@@ -221,38 +215,20 @@ def setup(bot):
             else:
                 disabled_links.append(link_info)
 
+        parts = ["# Available Link Commands", "Use `?<command>` to access these links (e.g., `?tracker`)"]
         if enabled_links:
-            enabled_text = "\n\n".join(enabled_links)
-            if len(enabled_text) > 1024:
-                chunks = []
-                current = []
-                current_len = 0
-                for entry in enabled_links:
-                    entry_len = len(entry) + 2  # +2 for "\n\n" separator
-                    if current and current_len + entry_len > 1024:
-                        chunks.append("\n\n".join(current))
-                        current = [entry]
-                        current_len = len(entry)
-                    else:
-                        current.append(entry)
-                        current_len += entry_len
-                if current:
-                    chunks.append("\n\n".join(current))
-                for i, chunk in enumerate(chunks):
-                    field_name = "Enabled Links" if i == 0 else f"Enabled Links (cont. {i+1})"
-                    embed.add_field(name=field_name, value=chunk, inline=False)
-            else:
-                embed.add_field(name="Enabled Links", value=enabled_text, inline=False)
-
+            parts.append("**Enabled Links**\n" + "\n\n".join(enabled_links))
         if disabled_links:
-            disabled_text = "\n\n".join(disabled_links)
-            if len(disabled_text) > 1024:
-                disabled_text = disabled_text[:1021] + "..."
-            embed.add_field(name="Disabled Links", value=disabled_text, inline=False)
+            parts.append("**Disabled Links**\n" + "\n\n".join(disabled_links))
 
-        embed.set_footer(text=f"Total: {len(link_manager.links)} link commands")
-
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n\n".join(parts)),
+            accent_color=0x5865f2
+        ))
+        view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        view.add_item(discord.ui.TextDisplay(f"-# Total: {len(link_manager.links)} link commands"))
+        await interaction.response.send_message(view=view, ephemeral=True)
 
     @bot.tree.command(name="linkinfo", description="Get detailed info about a specific link command")
     @app_commands.describe(name="Name of the link command (without ?)")
@@ -268,27 +244,19 @@ def setup(bot):
 
         data = link_manager.links[name]
 
-        embed = discord.Embed(
-            title=f"Link Info: ?{name}",
-            color=0x5865f2 if data.get("enabled", True) else 0x95a5a6
-        )
-
-        embed.add_field(name="Command", value=f"`?{name}`", inline=True)
-        embed.add_field(
-            name="Status",
-            value="Enabled"if data.get("enabled", True) else "Disabled",
-            inline=True
-        )
-
+        color = 0x5865f2 if data.get("enabled", True) else 0x95a5a6
+        parts = [f"# Link Info: ?{name}"]
+        parts.append(f"**Command** `?{name}`")
+        parts.append(f"**Status** {'Enabled' if data.get('enabled', True) else 'Disabled'}")
         if data.get("description"):
-            embed.add_field(name="Description", value=data["description"], inline=False)
-
-        if data.get("url"):
-            embed.add_field(name="URL", value=data["url"], inline=False)
-        else:
-            embed.add_field(name="URL", value="Not configured", inline=False)
-
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+            parts.append(f"**Description** {data['description']}")
+        parts.append(f"**URL** {data.get('url', 'Not configured')}")
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n\n".join(parts)),
+            accent_color=color
+        ))
+        await interaction.response.send_message(view=view, ephemeral=True)
 
     bot.logger.log(MODULE_NAME, "Links module setup complete")
     bot.logger.log(MODULE_NAME, f"Loaded {len(link_manager.links)} link commands")

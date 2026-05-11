@@ -42,27 +42,15 @@ class AppealVoteView(ui.View):
         self.add_item(yes_btn)
         self.add_item(no_btn)
 
-    def _updated_embed(self, message: discord.Message,
-                        votes_for: list, votes_against: list) -> discord.Embed:
-        old = message.embeds[0] if message.embeds else None
-        embed = discord.Embed(
-            title=old.title if old else "Ban Appeal",
-            description=old.description if old else "",
-            color=old.color if old else 0x9b59b6,
-            timestamp=old.timestamp if old else _now(),
-        )
-        for field in (old.fields if old else []):
-            if field.name == "Votes":
-                continue
-            embed.add_field(name=field.name, value=field.value, inline=field.inline)
-        embed.add_field(
-            name="Votes",
-            value=f"Yes: **{len(votes_for)}**  -   No: **{len(votes_against)}**",
-            inline=False,
-        )
-        if old and old.footer:
-            embed.set_footer(text=old.footer.text)
-        return embed
+    def _build_content(self, appeal_data: dict, votes_for: list, votes_against: list) -> str:
+        deadline_ts = int((_now() + __import__('datetime').timedelta(hours=24)).timestamp())
+        parts = [
+            f"**Ban Appeal**\n{appeal_data['appeal_text']}",
+            f"**User** <@{appeal_data['user_id']}> (`{appeal_data['user_id']}`)",
+            f"**Deadline** <t:{deadline_ts}:R>",
+            f"**Votes** Yes: **{len(votes_for)}**  -   No: **{len(votes_against)}**",
+        ]
+        return "\n\n".join(parts)
 
     async def _accept_callback(self, interaction: discord.Interaction):
         await self._vote_callback(interaction, is_yes=True)
@@ -98,8 +86,8 @@ class AppealVoteView(ui.View):
         target.append(uid)
 
         appeal_update_votes(self.moderation, self.appeal_id, votes_for, votes_against)
-        updated_embed = self._updated_embed(interaction.message, votes_for, votes_against)
-        await interaction.response.edit_message(embed=updated_embed, view=self)
+        content = self._build_content(appeal, votes_for, votes_against)
+        await interaction.response.edit_message(content=content, view=self)
 
 
 class BanAppealModal(ui.Modal, title="Ban Appeal"):
@@ -119,19 +107,12 @@ class BanAppealModal(ui.Modal, title="Ban Appeal"):
     async def on_submit(self, interaction: discord.Interaction):
         await appeal_submit(
             self.moderation, interaction.user.id, self.guild_id, self.appeal_text.value)
-        embed = discord.Embed(
-            title="Appeal Submitted",
-            description="Your ban appeal has been submitted and will be reviewed.",
-            color=0x2ecc71,
-            timestamp=_now(),
-        )
-        embed.add_field(
-            name="What happens next?",
-            value="Your appeal has been posted to the staff team. They will vote on it "
-                  "over the next 24 hours and you'll be notified of the outcome automatically.",
-            inline=False,
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("# Appeal Submitted\n\nYour ban appeal has been submitted and will be reviewed.\n\n**What happens next?**\nYour appeal has been posted to the staff team. They will vote on it over the next 24 hours and you'll be notified of the outcome automatically."),
+            accent_color=0x2ecc71
+        ))
+        await interaction.response.send_message(view=view, ephemeral=True)
 
 
 def _generate_appeal_id() -> str:
@@ -172,25 +153,16 @@ async def appeal_submit(ms, user_id: int, guild_id: int, appeal_text: str) -> st
             appeals_ch = discord.utils.get(guild.text_channels, name="mod-chat")
             if appeals_ch:
                 user = await ms.bot.fetch_user(user_id)
-                embed = discord.Embed(
-                    title="Ban Appeal",
-                    description=appeal_text,
-                    color=0x9b59b6, timestamp=_now())
-                embed.add_field(name="User",
-                                value=f"{user} (`{user_id}`)", inline=True)
-                embed.add_field(
-                    name="Deadline",
-                    value=f"<t:{int((_now() + timedelta(hours=24)).timestamp())}:R>",
-                    inline=True)
-                embed.add_field(
-                    name="Votes",
-                    value="Yes: **0**  -   No: **0**",
-                    inline=False)
-                embed.set_footer(
-                    text=f"Appeal ID: {appeal_id} - "
-                         f"Voting closes in 24 hours - Ties are denied")
+                deadline_ts = int((_now() + timedelta(hours=24)).timestamp())
+                content = (
+                    f"**Ban Appeal**\n{appeal_text}\n\n"
+                    f"**User** {user} (`{user_id}`)\n"
+                    f"**Deadline** <t:{deadline_ts}:R>\n"
+                    f"**Votes** Yes: **0**  -   No: **0**\n"
+                    f"-# Appeal ID: {appeal_id} - Voting closes in 24 hours - Ties are denied"
+                )
                 view = AppealVoteView(ms, appeal_id)
-                msg  = await appeals_ch.send(embed=embed, view=view)
+                msg  = await appeals_ch.send(content=content, view=view)
                 _db_exec(ms._db,
                     "UPDATE mod_appeals SET channel_message_id=? WHERE appeal_id=?",
                     (msg.id, appeal_id),
@@ -222,15 +194,14 @@ async def appeal_approve(ms, appeal_id: str) -> bool:
                 f"Appeal {appeal_id}: user {row['user_id']} was not banned - skipping unban")
         invite_link = await _create_ban_reversal_invite(ms, guild, row["user_id"])
         try:
-            embed = discord.Embed(
-                title="Ban Appeal Approved",
-                description=f"Your appeal for **{guild.name}** has been approved!",
-                color=0x2ecc71, timestamp=_now())
-            embed.add_field(
-                name="Rejoin Server",
-                value=f"You can rejoin using this invite:\n{invite_link}", inline=False)
-            embed.set_footer(text="Welcome back!")
-            await user.send(embed=embed)
+            view = discord.ui.LayoutView(timeout=None)
+            view.add_item(discord.ui.Container(
+                discord.ui.TextDisplay(f"# Ban Appeal Approved\n\nYour appeal for **{guild.name}** has been approved!\n\n**Rejoin Server**\nYou can rejoin using this invite:\n{invite_link}"),
+                accent_color=0x2ecc71
+            ))
+            view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+            view.add_item(discord.ui.TextDisplay("-# Welcome back!"))
+            await user.send(view=view)
         except discord.Forbidden:
             pass
         ch = None
@@ -245,13 +216,12 @@ async def appeal_approve(ms, appeal_id: str) -> bool:
             if logger:
                 ch = logger.get_bot_logs_channel(guild)
         if ch:
-            log_embed = discord.Embed(
-                title="Ban Appeal Approved",
-                description=f"**{user}** has been unbanned after appeal approval.",
-                color=0x2ecc71, timestamp=_now())
-            log_embed.add_field(name="Appeal Text",
-                                value=row["appeal_text"][:1024], inline=False)
-            await ch.send(embed=log_embed)
+            log_view = discord.ui.LayoutView(timeout=None)
+            log_view.add_item(discord.ui.Container(
+                discord.ui.TextDisplay(f"# Ban Appeal Approved\n\n**{user}** has been unbanned after appeal approval.\n\n**Appeal Text**\n{row['appeal_text'][:1024]}"),
+                accent_color=0x2ecc71
+            ))
+            await ch.send(view=log_view)
         return True
     except Exception as e:
         ms.bot.logger.error(MODULE_NAME, f"Failed to approve appeal {appeal_id}", e)
@@ -267,11 +237,12 @@ async def appeal_deny(ms, appeal_id: str) -> bool:
         user  = await ms.bot.fetch_user(row["user_id"])
         try:
             guild_name = guild.name if guild else f"server {row['guild_id']}"
-            embed = discord.Embed(
-                title="Ban Appeal Denied",
-                description=f"Your appeal for **{guild_name}** has been reviewed and denied.",
-                color=0xe74c3c, timestamp=_now())
-            await user.send(embed=embed)
+            view = discord.ui.LayoutView(timeout=None)
+            view.add_item(discord.ui.Container(
+                discord.ui.TextDisplay(f"# Ban Appeal Denied\n\nYour appeal for **{guild_name}** has been reviewed and denied."),
+                accent_color=0xe74c3c
+            ))
+            await user.send(view=view)
         except discord.Forbidden:
             pass
         _db_exec(ms._db, "DELETE FROM mod_appeals WHERE appeal_id=?", (appeal_id,))
@@ -308,21 +279,15 @@ async def resolve_expired_appeals_task(ms):
                         try:
                             msg    = await appeals_ch.fetch_message(
                                 row["channel_message_id"])
-                            result_color = 0x2ecc71 if accepted else 0xe74c3c
                             result_text  = (
                                 f"Accepted ({votes_for}-{votes_against})"
                                 if accepted else
                                 f"Denied ({votes_against}-{votes_for})")
-                            embed = msg.embeds[0] if msg.embeds else discord.Embed()
-                            embed.color = result_color
-                            embed.add_field(
-                                name="Result", value=result_text, inline=False)
-                            embed.set_footer(
-                                text=f"Appeal ID: {appeal_id} - Voting closed")
+                            new_content = msg.content + f"\n\n**Result** {result_text}\n-# Appeal ID: {appeal_id} - Voting closed"
                             disabled_view = AppealVoteView(ms, appeal_id)
                             for item in disabled_view.children:
                                 item.disabled = True
-                            await msg.edit(embed=embed, view=disabled_view)
+                            await msg.edit(content=new_content, view=disabled_view)
                         except Exception as e:
                             ms.bot.logger.error(
                                 MODULE_NAME, "Failed to update appeal message", e)

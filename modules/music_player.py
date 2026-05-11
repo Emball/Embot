@@ -173,19 +173,15 @@ class MusicPlayer:
 
         duration_str = str(timedelta(seconds=self.current.duration)) if self.current.duration > 0 else "Unknown"
 
-        embed = discord.Embed(
-            title="🎵 Now Playing",
-            description=f"**{self.current.title}**",
-            color=0x1abc9c
-        )
-        embed.add_field(name="Requested by", value=self.current.requested_by.mention, inline=True)
-        embed.add_field(name="Duration", value=duration_str, inline=True)
+        parts = [f"**{self.current.title}**"]
+        parts.append(f"**Requested by** {self.current.requested_by.mention}")
+        parts.append(f"**Duration** {duration_str}")
 
         metadata = getattr(self.current, 'metadata', {})
         if metadata.get('album'):
-            embed.add_field(name="Album", value=metadata['album'], inline=True)
+            parts.append(f"**Album** {metadata['album']}")
         if metadata.get('year'):
-            embed.add_field(name="Year", value=metadata['year'], inline=True)
+            parts.append(f"**Year** {metadata['year']}")
 
         if not self.queue.empty():
             queue_items: list = []
@@ -196,14 +192,21 @@ class MusicPlayer:
                     break
             if queue_items:
                 next_song = queue_items[0]
-                embed.add_field(name="Next Up", value=next_song.title, inline=False)
+                parts.append(f"**Next Up**\n{next_song.title}")
             for item in queue_items:
                 await self.queue.put(item)
 
-        embed.set_footer(text=f"Loop: {'🔁 ON' if self.loop else '⏹ OFF'} | Queue: {self.queue.qsize()}")
+        footer = f"Loop: {'🔁 ON' if self.loop else '⏹ OFF'} | Queue: {self.queue.qsize()}"
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n".join(parts)),
+            accent_color=0x1abc9c
+        ))
+        view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        view.add_item(discord.ui.TextDisplay(f"-# {footer}"))
 
         try:
-            self.now_playing_msg = await self.text_channel.send(embed=embed)
+            self.now_playing_msg = await self.text_channel.send(view=view)
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Failed to send now playing message", e)
 
@@ -566,18 +569,11 @@ def setup(bot):
             )
             return
 
-        embed = discord.Embed(
-            title="🎵 Music Queue",
-            color=0x3498db
-        )
+        parts = ["# 🎵 Music Queue"]
 
         if player.current:
             duration = str(timedelta(seconds=player.current.duration)) if player.current.duration > 0 else "Unknown"
-            embed.add_field(
-                name="Now Playing",
-                value=f"**{player.current.title}** ({duration})\nRequested by {player.current.requested_by.mention}",
-                inline=False
-            )
+            parts.append(f"**Now Playing**\n{player.current.title} ({duration})\nRequested by {player.current.requested_by.mention}")
 
         if not player.queue.empty():
             queue_items = []
@@ -595,17 +591,20 @@ def setup(bot):
                 for item in queue_items:
                     await player.queue.put(item)
 
-            embed.add_field(
-                name=f"Up Next ({len(queue_items)} songs)",
-                value="\n".join(lines),
-                inline=False
-            )
+            parts.append(f"**Up Next ({len(queue_items)} songs)**\n" + "\n".join(lines))
 
-            if len(queue_items) > 10:
-                embed.set_footer(text=f"Plus {len(queue_items) - 10} more songs...")
+        footer = f"Loop: {'🔁 ON' if player.loop else '⏹ OFF'}"
+        if len(queue_items) > 10:
+            footer = f"Plus {len(queue_items) - 10} more songs..."
 
-        embed.set_footer(text=f"Loop: {'🔁 ON' if player.loop else '⏹ OFF'}")
-        await interaction.response.send_message(embed=embed)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n\n".join(parts)),
+            accent_color=0x3498db
+        ))
+        view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        view.add_item(discord.ui.TextDisplay(f"-# {footer}"))
+        await interaction.response.send_message(view=view)
 
     @bot.tree.command(name="loop", description="Toggle loop mode for current song")
     async def toggle_loop(interaction: discord.Interaction):

@@ -467,13 +467,13 @@ class ModContext:
             self.bot     = source.bot
             self.message = source.message
 
-    async def reply(self, content=None, *, embed=None, ephemeral=False, delete_after=None):
+    async def reply(self, content=None, *, embed=None, view=None, ephemeral=False, delete_after=None):
         msg_obj = None
         if isinstance(self._source, discord.Interaction):
             if not self._replied:
                 self._replied = True
                 await self._source.response.send_message(
-                    content=content, embed=embed, ephemeral=ephemeral)
+                    content=content, embed=embed, view=view, ephemeral=ephemeral)
                 if not ephemeral:
                     try:
                         msg_obj = await self._source.original_response()
@@ -481,9 +481,9 @@ class ModContext:
                         pass
             else:
                 msg_obj = await self._source.followup.send(
-                    content=content, embed=embed, ephemeral=ephemeral)
+                    content=content, embed=embed, view=view, ephemeral=ephemeral)
         else:
-            msg_obj = await self._source.send(content=content, embed=embed)
+            msg_obj = await self._source.send(content=content, embed=embed, view=view)
             if delete_after and msg_obj:
                 await msg_obj.delete(delay=delete_after)
         return msg_obj.id if msg_obj else None
@@ -499,13 +499,13 @@ class ModContext:
             await self._source.response.defer()
         self._replied = True
 
-    async def followup(self, content=None, *, embed=None, ephemeral=False):
+    async def followup(self, content=None, *, embed=None, view=None, ephemeral=False):
         if isinstance(self._source, discord.Interaction):
             msg = await self._source.followup.send(
-                content=content, embed=embed, ephemeral=ephemeral)
+                content=content, embed=embed, view=view, ephemeral=ephemeral)
             return msg.id if msg else None
         else:
-            msg = await self._source.send(content=content, embed=embed)
+            msg = await self._source.send(content=content, embed=embed, view=view)
             return msg.id if msg else None
 
 
@@ -1161,23 +1161,22 @@ def setup(bot):
                         mod_system, message.id, deleter or message.guild.me, message.guild)
                 elif message.id in mod_system._deletion_warnings:
                     original_log_id = mod_system._deletion_warnings.pop(message.id)
-                    warning_embed = discord.Embed(
-                        title="Bot-Log Deletion Warning - REPOSTED",
-                        description=(
-                            f"A deletion warning for log `{original_log_id}` was itself deleted.\n"
-                            "This report will continue to reappear every time it is deleted."
-                        ),
-                        color=0xff0000, timestamp=discord.utils.utcnow())
-                    warning_embed.add_field(
-                        name="Original Log ID", value=original_log_id, inline=True)
-                    warning_embed.set_footer(
-                        text="Deleting this message will cause it to repost again.")
+                    warn_text = f"# Bot-Log Deletion Warning - REPOSTED\n\nA deletion warning for log `{original_log_id}` was itself deleted.\nThis report will continue to reappear every time it is deleted.\n\n**Original Log ID** {original_log_id}"
+                    warn_view = discord.ui.LayoutView(timeout=None)
+                    warn_view.add_item(discord.ui.Container(
+                        discord.ui.TextDisplay(warn_text),
+                        accent_color=0xff0000
+                    ))
+                    warn_view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+                    warn_view.add_item(discord.ui.TextDisplay("-# Deleting this message will cause it to repost again."))
                     try:
-                        new_warn_msg = await bot_logs_ch.send(embed=warning_embed)
+                        new_warn_msg = await bot_logs_ch.send(view=warn_view)
                         from mod_oversight import log_bot_register
                         log_bot_register(
                             mod_system, new_warn_msg.id, f"WARN-{original_log_id}",
-                            warning_embed, is_warning=True,
+                            warn_text, color=0xff0000,
+                            footer="Deleting this message will cause it to repost again.",
+                            is_warning=True,
                             warning_for_log_id=original_log_id)
                         mod_system._deletion_warnings[new_warn_msg.id] = original_log_id
                     except Exception as e:
@@ -1260,30 +1259,17 @@ def setup(bot):
 
         if not removed_files:
             if bot_logs_ch:
-                embed = discord.Embed(
-                    title="Attachment Removed from Message",
-                    color=discord.Color.yellow(),
-                    timestamp=_now())
-                embed.set_author(
-                    name=str(after.author),
-                    icon_url=after.author.display_avatar.url)
-                description = (f"**{after.author.mention} removed an attachment "
-                               f"in {after.channel.mention}**")
-                if after.content:
-                    description += f"\n{after.content}"
-                embed.description = description
                 removed_names = ", ".join(
                     att.filename for att in before.attachments if att.id in removed_ids)
-                embed.add_field(
-                    name="Removed File(s)", value=removed_names or "unknown", inline=False)
-                embed.add_field(
-                    name="Note",
-                    value="File was not in local cache; original URLs may be expired.",
-                    inline=False)
-                embed.set_footer(
-                    text=f"Author: {after.author.id} | Message ID: {after.id}")
+                text = f"# Attachment Removed from Message\n\n**{after.author.mention} removed an attachment in {after.channel.mention}**"
+                if after.content:
+                    text += f"\n{after.content}"
+                text += f"\n\n**Removed File(s)** {removed_names or 'unknown'}\n**Note** File was not in local cache; original URLs may be expired."
+                footer = f"Author: {after.author.id} | Message ID: {after.id}"
                 from mod_oversight import send_bot_log
-                await send_bot_log(mod_system, after.guild, embed)
+                await send_bot_log(mod_system, after.guild, text=text, title="",
+                                   color=discord.Color.yellow().value,
+                                   footer=footer)
             return
 
         image_files = [f for f in removed_files
@@ -1291,25 +1277,39 @@ def setup(bot):
         other_files  = [f for f in removed_files
                         if not f['filename'].lower().endswith(image_exts)]
 
-        embed = discord.Embed(color=discord.Color.yellow(), timestamp=_now())
-        embed.set_author(name=str(after.author),
-                         icon_url=after.author.display_avatar.url)
-        description = (f"**{after.author.mention} removed an attachment "
-                       f"in {after.channel.mention}**")
+        text = f"**{after.author.mention} removed an attachment in {after.channel.mention}**"
         if after.content:
-            description += f"\n{after.content}"
-        embed.description = description
-        embed.set_footer(text=f"Author: {after.author.id} | Message ID: {after.id}")
+            text += f"\n{after.content}"
+        footer = f"Author: {after.author.id} | Message ID: {after.id}"
 
         if image_files and not other_files:
-            embed.set_image(url=f"attachment://{image_files[0]['filename']}")
-            from mod_oversight import send_bot_log
-            await send_bot_log(mod_system, after.guild, embed, files_data=removed_files)
+            layout = discord.ui.LayoutView(timeout=None)
+            layout.add_item(discord.ui.Container(
+                discord.ui.Section(
+                    discord.ui.TextDisplay(text),
+                    accessory=discord.ui.Thumbnail(after.author.display_avatar.url)
+                ),
+                accent_color=discord.Color.yellow().value
+            ))
+            layout.add_item(discord.ui.Container(
+                discord.ui.MediaGallery(
+                    discord.ui.media_gallery.MediaGalleryItem(f"attachment://{image_files[0]['filename']}")
+                )
+            ))
+            layout.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+            layout.add_item(discord.ui.TextDisplay(f"-# {footer}"))
+            discord_files = [
+                discord.File(fp=io.BytesIO(f['data']), filename=f['filename'])
+                for f in removed_files
+            ]
+            await bot_logs_ch.send(view=layout, files=discord_files)
+            from mod_oversight import log_bot_register
+            log_bot_register(mod_system, 0, f"LOG-{int(_now().timestamp() * 1000)}",
+                             text, discord.Color.yellow().value, footer=footer,
+                             files_data=removed_files)
         elif other_files:
             has_audio = any(f['filename'].lower().endswith(audio_exts) for f in other_files)
-            label     = "audio" if has_audio else "file"
-            embed.add_field(name="Attachment",
-                            value=f"*{label} hosted above*", inline=False)
+            label = "audio" if has_audio else "file"
             if bot_logs_ch:
                 discord_files = [
                     discord.File(fp=io.BytesIO(f['data']), filename=f['filename'])
@@ -1317,10 +1317,33 @@ def setup(bot):
                 ]
                 await bot_logs_ch.send(files=discord_files)
             from mod_oversight import send_bot_log
-            await send_bot_log(mod_system, after.guild, embed)
+            await send_bot_log(mod_system, after.guild, text=text,
+                               color=discord.Color.yellow().value, footer=footer)
         else:
-            from mod_oversight import send_bot_log
-            await send_bot_log(mod_system, after.guild, embed, files_data=removed_files)
+            layout = discord.ui.LayoutView(timeout=None)
+            layout.add_item(discord.ui.Container(
+                discord.ui.Section(
+                    discord.ui.TextDisplay(text),
+                    accessory=discord.ui.Thumbnail(after.author.display_avatar.url)
+                ),
+                accent_color=discord.Color.yellow().value
+            ))
+            layout.add_item(discord.ui.Container(
+                discord.ui.MediaGallery(
+                    discord.ui.media_gallery.MediaGalleryItem(f"attachment://{image_files[0]['filename']}")
+                )
+            ))
+            layout.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+            layout.add_item(discord.ui.TextDisplay(f"-# {footer}"))
+            discord_files = [
+                discord.File(fp=io.BytesIO(f['data']), filename=f['filename'])
+                for f in removed_files
+            ]
+            await bot_logs_ch.send(view=layout, files=discord_files)
+            from mod_oversight import log_bot_register
+            log_bot_register(mod_system, 0, f"LOG-{int(_now().timestamp() * 1000)}",
+                             text, discord.Color.yellow().value, footer=footer,
+                             files_data=removed_files)
 
     @bot.listen()
     async def on_member_remove(member):
@@ -1478,17 +1501,25 @@ def setup(bot):
                 from mod_oversight import bot_logs_channel
                 ch = bot_logs_channel(bot._mod_system, guild)
                 if ch:
-                    embed = discord.Embed(title="Auto-mod blocked a voice message", color=0xED4245)
-                    embed.add_field(name="rule_name", value="Block Banned Words", inline=False)
-                    embed.add_field(name="channel_id", value=str(vm_message.channel.id), inline=True)
-                    embed.add_field(name="keyword", value=matched, inline=True)
-                    embed.add_field(name="keyword_matched_content", value=transcript[:256], inline=False)
-                    embed.add_field(name="flagged_message_id", value=str(vm_message.id), inline=True)
-                    embed.add_field(name="author", value=f"{vm_message.author.name} ({vm_message.author.id})", inline=True)
-                    embed.add_field(name="decision_outcome", value="blocked", inline=True)
-                    embed.set_footer(text=f"VM #{vm_id}")
+                    parts = [
+                        "# Auto-mod blocked a voice message",
+                        f"**rule_name** Block Banned Words",
+                        f"**channel_id** {vm_message.channel.id}",
+                        f"**keyword** {matched}",
+                        f"**keyword_matched_content** {transcript[:256]}",
+                        f"**flagged_message_id** {vm_message.id}",
+                        f"**author** {vm_message.author.name} ({vm_message.author.id})",
+                        f"**decision_outcome** blocked",
+                    ]
+                    view = discord.ui.LayoutView(timeout=None)
+                    view.add_item(discord.ui.Container(
+                        discord.ui.TextDisplay("\n\n".join(parts)),
+                        accent_color=0xED4245
+                    ))
+                    view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+                    view.add_item(discord.ui.TextDisplay(f"-# VM #{vm_id}"))
                     try:
-                        await ch.send(embed=embed)
+                        await ch.send(view=view)
                     except Exception:
                         pass
         except Exception as e:

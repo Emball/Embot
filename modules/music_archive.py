@@ -480,13 +480,15 @@ async def _log_delivery(bot, user, candidate: dict, source: str = "command"):
         if not channel:
             return
         md = candidate['metadata']
-        embed = discord.Embed(title="Archive Delivery", color=0x3498db, timestamp=_now())
-        embed.add_field(name="User", value=f"{user} ({user.id})", inline=False)
-        embed.add_field(name="Source", value=source, inline=True)
-        embed.add_field(name="Title", value=md.get('title', 'Unknown'), inline=True)
-        embed.add_field(name="Format", value=Path(candidate['path']).suffix.upper(), inline=True)
-        embed.add_field(name="File", value=f"`{Path(candidate['path']).name}`", inline=False)
-        await channel.send(embed=embed)
+        ts = int(_now().timestamp())
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# Archive Delivery\n**User**\n{user} ({user.id})\n\n**Source**\n{source}\n\n**Title**\n{md.get('title', 'Unknown')}\n\n**Format**\n{Path(candidate['path']).suffix.upper()}\n\n**File**\n`{Path(candidate['path']).name}`"),
+            accent_color=0x3498db
+        ))
+        view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        view.add_item(discord.ui.TextDisplay(f"-# <t:{ts}>"))
+        await channel.send(view=view)
     except Exception:
         pass
 
@@ -495,21 +497,26 @@ async def send_bot_log(bot, log_data):
         channel = discord.utils.get(bot.get_all_channels(), name="bot-logs")
         if not channel:
             return
-        embed = discord.Embed(
-            title="Command Execution Log",
-            color=0x3498db if log_data.get('success') else 0xe74c3c,
-            timestamp=_now(),
-        )
-        embed.add_field(name="User", value=f"{log_data['user']} ({log_data['user_id']})", inline=False)
+        ts = int(_now().timestamp())
+        parts = [f"# Command Execution Log"]
+        parts.append(f"**User**\n{log_data['user']} ({log_data['user_id']})")
         if 'action' in log_data:
-            embed.add_field(name="Command", value=log_data['action'], inline=False)
+            parts.append(f"**Command**\n{log_data['action']}")
         if 'params' in log_data:
-            params = "\n".join([f"- {k}: {v}"for k, v in log_data['params'].items()])
-            embed.add_field(name="Parameters", value=params, inline=False)
-        embed.add_field(name="Status", value="SUCCESS"if log_data['success'] else "FAILURE", inline=True)
+            params = "\n".join([f"- {k}: {v}" for k, v in log_data['params'].items()])
+            parts.append(f"**Parameters**\n{params}")
+        parts.append(f"**Status**\n{'SUCCESS' if log_data['success'] else 'FAILURE'}")
         if not log_data['success'] and log_data.get('error'):
-            embed.add_field(name="Error", value=f"```{log_data['error']}```", inline=False)
-        await channel.send(embed=embed)
+            parts.append(f"**Error**\n```{log_data['error']}```")
+        color = 0x3498db if log_data.get('success') else 0xe74c3c
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n\n".join(parts)),
+            accent_color=color
+        ))
+        view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        view.add_item(discord.ui.TextDisplay(f"-# <t:{ts}>"))
+        await channel.send(view=view)
     except Exception as e:
         bot.logger.error(MODULE_NAME, "Failed to send log", e)
 

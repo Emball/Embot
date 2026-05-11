@@ -127,7 +127,7 @@ class RemoteDebugServer:
         self._app.router.add_get("/config/{name}", self._handle_config)
         self._app.router.add_post("/update", self._handle_update)
         self._app.router.add_post("/restart", self._handle_restart)
-        self._app.router.add_post("/exec", self._handle_exec)
+        self._app.router.add_post("/shell", self._handle_shell)
 
     def _check_auth(self, request) -> bool:
         req_token = request.headers.get("X-Debug-Token", "")
@@ -357,7 +357,7 @@ class RemoteDebugServer:
         asyncio.create_task(self._delayed_restart())
         return web.json_response({"ok": True, "message": "Restarting..."})
 
-    async def _handle_exec(self, request):
+    async def _handle_shell(self, request):
         if not self._check_auth(request) or not self._check_ip(request):
             return self._fail()
         try:
@@ -618,7 +618,7 @@ class ClaudeBridgeListener:
             except Exception as e:
                 return f"write failed: {e}", {}
 
-        elif command == "exec":
+        elif command == "shell":
             cmd_str = " ".join(args) if args else ""
             if not cmd_str:
                 return "missing command", {}
@@ -892,7 +892,7 @@ def _cmd_exec(cfg, cmd, timeout=15):
         if not cmd:
             print("No command provided. Pass as argument or pipe to stdin.")
             sys.exit(1)
-    result = _client_request(cfg, "/exec", method="POST",
+    result = _client_request(cfg, "/shell", method="POST",
                              data=json.dumps({"cmd": cmd, "timeout": timeout}).encode())
     print(json.dumps(result, indent=2))
 
@@ -1092,7 +1092,7 @@ def main():
     config_w.add_argument("name", help="Config name (without .json)")
     config_w.add_argument("json_data", help="JSON string to write")
 
-    exec_p = sub.add_parser("exec", help="Run a shell command on the server")
+    exec_p = sub.add_parser("shell", help="Run a shell command on the server")
     exec_p.add_argument("cmd", nargs="?", default=None, help="Command to run (omit to read from stdin)")
     exec_p.add_argument("--timeout", type=int, default=15, help="Timeout in seconds")
 
@@ -1102,7 +1102,7 @@ def main():
     init_p = sub.add_parser("session-init", help="Store GitHub token for Claude bridge (run once per session)")
     init_p.add_argument("github_token", help="GitHub personal access token with EmbotDebug repo access")
     bridge_p = sub.add_parser("bridge", help="Send a command via Claude bridge and wait for result")
-    bridge_p.add_argument("bridge_command", help="Command to send (e.g. status, logs, exec)")
+    bridge_p.add_argument("bridge_command", help="Command to send (e.g. status, logs, shell)")
     bridge_p.add_argument("bridge_args", nargs=argparse.REMAINDER, help="Arguments for the command")
 
 
@@ -1127,7 +1127,7 @@ def main():
         _cmd_db_query(cfg, args.name, args.query)
     elif args.command == "config":
         _cmd_config(cfg, args.name)
-    elif args.command == "exec":
+    elif args.command == "shell":
         _cmd_exec(cfg, args.cmd, args.timeout)
     elif args.command == "update":
         _cmd_update(cfg)

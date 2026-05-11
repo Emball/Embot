@@ -124,7 +124,7 @@ GitHub-based command queue via private `Emball/EmbotDebug` repo.
 **How it works:** The bot side uses the GitHub API (faster) to poll and commit results. The Claude side uses plain git (clone/push) because GitHub API URLs are not whitelisted in Claude's environment.
 
 **Result routing:**
-- Direct output (ping, status, guilds, modules, exec, update, restart) → `result.json`
+- Direct output (ping, status, guilds, modules, shell, update, restart) → `result.json`
 - File artifacts (logs, logs-list, logs-search, config, db-query, db-download) → committed under `logs/`, `config/`, `db/`
 
 **Session checklist:** `session-init` → `bridge status` → work.
@@ -145,7 +145,7 @@ Once per session: `python modules/remote_debug.py session-init ghp_...`
 | `config-write <name> <json>` | ✓ | — | Write a config file atomically (no shell mangling) |
 | `db-query <name> "<SQL>"` | ✓ | ✓ | Read-only SQL query |
 | `db-download <name>` | ✓ | ✓ | Download .db to temp/ |
-| `exec <cmd>` | ✓ | ✓ | Shell command — use single quotes for inner strings (double quotes get mangled by the bridge shell) |
+| `shell <cmd>` | ✓ | ✓ | Shell command — use single quotes for inner strings (double quotes get mangled by the bridge shell) |
 | `script-exec <python>` | ✓ | — | Run a Python script passed as a string — avoids quote nesting issues in exec |
 | `update` | ✓ | ✓ | Git pull + restart |
 | `restart` | ✓ | ✓ | Restart bot |
@@ -164,7 +164,7 @@ Testing individual files is recommended, but do not try to run a Embot.py sessio
 
 Exec is useful for debugging when you need to do something in the live bot root that remote_debug doesn't satisfy. Try to avoid modifying the live bot files though, as it can create uncommitted changes that block `git pull --ff-only`. Code edits go through git: edit locally → commit → push → server pulls.
 
-In Exec, double quotes inside double quotes get mangled. Always use single quotes: `bridge exec "uv run python -c 'code here'"`
+In shell, double quotes inside double quotes get mangled. Always use single quotes: `bridge shell "uv run python -c 'code here'"`
 
 The raw, live bot log is a great source of truth. Check it first every time if something fails. The outputs are generally very verbose.
 
@@ -180,7 +180,7 @@ If that fails to identify the issue, you can expand to other avenues.
 
 If facing response issues, never use `sleep` to wait for a response. Poll with `bridge ping` instead, and until it responds.
 
-Fse `config-write` instead of `exec` for writing configs/data, it and handles special characters safely.
+Use `config-write` instead of `shell` for writing configs/data — handles special characters safely. Use `script-exec` instead of `shell` for Python snippets — avoids quote nesting.
 
 ## Components V2 (discord.py LayoutView)
 

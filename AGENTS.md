@@ -15,7 +15,7 @@ Michael (Emball/Embis). Vibe-coder with beginner Python knowledge. However, neve
 
 Codebase on GitHub at Emball/Embot. Discord bot for Eminem fan server (discord.py, single guild focus). The bot enforces single-guild operation and is not deployed in more than one server.
 
-**Read the actual source files** before making changes — don't rely solely on the descriptions below.
+**Read the actual source files** before making changes — don't rely solely on the descriptions below. The repo is cloned locally at the start of every session; always read code from the local clone, never via the bridge (`shell`, `script-exec`, etc.) — the bridge is slow and should be reserved for interacting with the live bot runtime.
 
 ### Top-Level
 

@@ -142,12 +142,12 @@ Once per session: `python modules/remote_debug.py session-init ghp_...`
 | `logs [--tail N] [--file F] [--session N] [--search P] [--max N]` | ✓ | ✓ | Fetch logs |
 | `logs-list` | — | ✓ | All log files |
 | `config <name>` | ✓ | ✓ | View config file |
-| `config-write <name> <json>` | ✓ | — | Write a config file atomically (no shell mangling) |
-| `config-patch <name> <json>` | ✓ | — | Atomic read-modify-write on a config file (merge patch) |
+| `config-write <name> <json>` | ✓ | — | Write a config file atomically — JSON payload routed via `payload.txt`, no mangling |
+| `config-patch <name> <json>` | ✓ | — | Atomic read-modify-write on a config file — JSON payload routed via `payload.txt`, no mangling |
 | `db-query <name> "<SQL>"` | ✓ | ✓ | Read-only SQL query |
 | `db-download <name>` | ✓ | ✓ | Download .db to temp/ |
 | `shell <cmd>` | ✓ | ✓ | Shell command — use single quotes for inner strings (double quotes get mangled by the bridge shell) |
-| `script-exec <python>` | ✓ | — | Run a Python script passed as a string — avoids quote nesting issues in exec |
+| `script-exec <python>` | ✓ | — | Run a Python script on the bot — payload routed via `payload.txt` in EmbotDebug repo, no shell mangling |
 | `update` | ✓ | ✓ | Git pull + restart |
 | `restart` | ✓ | ✓ | Restart bot |
 | `session-init <token>` | ✓ | — | Store GitHub token (once per session) |
@@ -156,6 +156,8 @@ Bridge: `python modules/remote_debug.py bridge <command> [args...]`
 LAN: `uv run python modules/remote_debug.py <command> [args...]`
 
 `restart`/`update` wait smartly for the bot to come back online.
+
+**Bridge resilience:** The poll loop uses exponential backoff on GitHub API errors (2s → 60s max). If the delay exceeds the 45s client timeout, the bot logs a WARNING that the bridge is temporarily deaf. It self-recovers and logs when polling resumes. If commands go missing, check the bot log for `[bridge] poll backoff` warnings.
 
 ## Debugging
 
@@ -181,16 +183,7 @@ If that fails to identify the issue, you can expand to other avenues.
 
 If facing response issues, never use `sleep` to wait for a response. Poll with `bridge ping` instead, and until it responds.
 
-Use `config-write` instead of `shell` for writing configs/data — handles special characters safely. Use `script-exec` instead of `shell` for Python snippets — avoids quote nesting.
-
-For large `config-write` payloads (e.g. full JSON configs), invoke via Python subprocess to avoid shell mangling:
-```python
-import json, subprocess
-result = subprocess.run(
-    ["python", "modules/remote_debug.py", "bridge", "config-write", "<name>", json.dumps(data)],
-    cwd="/home/claude/Embot", capture_output=True, text=True
-)
-```
+Use `config-write` instead of `shell` for writing configs/data. Use `script-exec` instead of `shell` for Python snippets. Both route their payload through `payload.txt` in the EmbotDebug repo — no shell mangling at any layer, regardless of quotes, newlines, or special characters. Pass payloads directly as the final argument; no subprocess workaround needed.
 
 ## Components V2 (discord.py LayoutView)
 

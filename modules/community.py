@@ -1173,8 +1173,12 @@ class CommunitySystem:
                         if att.content_type and att.content_type.startswith("image/"):
                             image_url = att.url
                             break
-                except Exception:
-                    pass
+                    if image_url:
+                        self.clog(f"Spotlight: image found: {image_url}")
+                    else:
+                        self.clog("Spotlight: no image attachment found on submission message.")
+                except Exception as e:
+                    self.clog(f"Spotlight: failed to fetch submission message for image: {e}", "WARNING")
 
         links = json.loads(top["links"]) if top["links"] else []
         jump_url = f"https://discord.com/channels/{guild.id}/{top['channel_id']}/{top['message_id']}"

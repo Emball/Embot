@@ -58,11 +58,11 @@ class RulesManager:
         title = data.get("title", "Server Rules")
         description = data.get("description", "")
         if title:
-            lines.append(f"# {title}")
+            lines.append(f"## {title}")
         if description:
             lines.append(description)
         for rule in data.get("rules", []):
-            lines.append(f"\n## Rule {rule['number']} — {rule['title']}\n{rule['description']}")
+            lines.append(f"### Rule {rule['number']} — {rule['title']}\n{rule['description']}")
         footer = data.get("footer", "")
         text = "\n".join(lines)
         view = discord.ui.LayoutView(timeout=None)

@@ -192,7 +192,11 @@ Prefer `config-write`/`config-patch` over `shell` for config changes. Prefer `sc
 - **`AGENTS.md` does not trigger restart** — it's in the `ignored` set in `_smart_update()` alongside `_version.py`.
 - **`mod_oversight.log_bot_register()`** — stores `text` string + `color` int instead of Embed fields. `handle_bot_log_deletion()` reconstructs LayoutView from stored text.
 - **Components V2 messages have no `.embeds`** — use recursive `getattr(c, 'content', None)` + `getattr(c, 'children', [])` to inspect text content in components.
-- **`script-exec` via bridge** — runs at module level, not in async context. Use `asyncio.ensure_future()` for async work; top-level `await` is a syntax error.
+- **`script-exec` via bridge runs as a subprocess** — not inside the bot process. `bot`, `discord`, and the event loop are not available. Use `asyncio.ensure_future()` inside a module's `setup()` for in-process async work. For one-shot bot-internal tasks, write a temporary module (e.g. `sb_migrate.py`), push it via git, auto-update pulls it, then `bridge reload <module>` triggers `setup()` which fires the async task. Module should `Path(__file__).unlink(missing_ok=True)` when done and be removed from the repo in the next commit.
+- **Starboard — do not mix `content=` with V2 edits** — editing an old embed-based starboard message with a LayoutView raises `400 Bad Request: content field cannot be used with IS_COMPONENTS_V2`. Treat as `NotFound` — delete and repost.
+- **Starboard — `allowed_mentions=discord.AllowedMentions.none()`** — always pass this on starboard send/edit. Raw message content may contain role mentions (`<@&...>`). Neutralise inline with a zero-width space after `<@` as a second layer.
+- **External/API bans** — `ModerationSystem._bot_initiated_bans` (set) tracks bot-initiated bans. `_do_ban` and `_do_softban` add the user ID just before the Discord ban call. `on_member_ban` in `mod_core.py` skips the appeal DM if the ID is present (bot-initiated), otherwise sends it (external/API ban).
+- **`CommandRegistrationError: ban already registered`** — appears in logs during `mod_core` reloads. Pre-existing quirk from the command registration order, not a bug introduced by recent changes. Bot recovers and continues cleanly.
 
 ## Components V2 (discord.py LayoutView)
 

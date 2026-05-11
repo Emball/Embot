@@ -351,46 +351,96 @@ def _ensure_git_for_update(bot, logger) -> bool:
         return False
 
 async def _check_for_update(bot) -> bool:
+    """Legacy shim: used by auto-update loop."""
+    result = await _smart_update(bot, caller="AUTO-UPDATE")
+    return result.get("status") == "restart"
+
+async def _smart_update(bot, caller="UPDATE") -> dict:
+    """
+    Fetch, pull, diff. Returns:
+      {"status": "up_to_date"}
+      {"status": "reloaded", "modules": [(name, ok, msg), ...]}
+      {"status": "restart"}
+      {"status": "error", "message": "..."}
+    Selective reload if only modules/ changed; full restart otherwise.
+    """
     git_env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GCM_INTERACTIVE': 'never'}
-    local_ver = _parse_version_tuple(bot.version if hasattr(bot, 'version') else load_version())
+    git = ['git', '-C', str(script_dir), '-c', 'credential.helper=']
+
     proc = await asyncio.create_subprocess_exec(
-        'git', '-C', str(script_dir), '-c', 'credential.helper=',
-        'fetch', 'origin', 'main',
+        *git, 'fetch', 'origin', 'main',
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=git_env
     )
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
-        bot.logger.log("AUTO-UPDATE", f"Fetch failed (rc={proc.returncode}): {stderr.decode()[:200]}", "WARNING")
-        return False
+        msg = f"Fetch failed: {stderr.decode()[:200]}"
+        bot.logger.log(caller, msg, "WARNING")
+        return {"status": "error", "message": msg}
+
     proc = await asyncio.create_subprocess_exec(
-        'git', '-C', str(script_dir), '-c', 'credential.helper=',
-        'show', 'FETCH_HEAD:_version.py',
+        *git, 'show', 'FETCH_HEAD:_version.py',
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=git_env
     )
-    stdout, stderr = await proc.communicate()
+    stdout, _ = await proc.communicate()
     if proc.returncode != 0:
-        bot.logger.log("AUTO-UPDATE",
-            f"Could not read remote _version.py (rc={proc.returncode}): {stderr.decode()[:200]}", "WARNING")
-        return False
+        return {"status": "error", "message": "Could not read remote _version.py"}
     match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', stdout.decode())
     if not match:
-        bot.logger.log("AUTO-UPDATE", "Remote _version.py has no version string", "WARNING")
-        return False
+        return {"status": "error", "message": "No version string in remote _version.py"}
     remote_ver = _parse_version_tuple(match.group(1))
+    local_ver = _parse_version_tuple(bot.version if hasattr(bot, 'version') else load_version())
     if remote_ver <= local_ver:
-        return False
-    bot.logger.log("AUTO-UPDATE", "Remote is newer — fast-forwarding...")
+        return {"status": "up_to_date"}
+
+    bot.logger.log(caller, f"Remote is newer ({match.group(1)}) — pulling...")
+
     proc = await asyncio.create_subprocess_exec(
-        'git', '-C', str(script_dir), '-c', 'credential.helper=',
-        'merge', '--ff-only', 'origin/main',
+        *git, 'merge', '--ff-only', 'origin/main',
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=git_env
     )
     _, stderr = await proc.communicate()
-    if proc.returncode == 0:
-        bot.logger.log("AUTO-UPDATE", "Fast-forwarded — restart required")
-        return True
-    bot.logger.log("AUTO-UPDATE", f"Merge failed: {stderr.decode()[:200]}", "WARNING")
-    return False
+    if proc.returncode != 0:
+        msg = f"Merge failed: {stderr.decode()[:200]}"
+        bot.logger.log(caller, msg, "WARNING")
+        return {"status": "error", "message": msg}
+
+    proc = await asyncio.create_subprocess_exec(
+        *git, 'diff', 'HEAD@{1}', 'HEAD', '--name-only',
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=git_env
+    )
+    stdout, _ = await proc.communicate()
+    changed = [f.strip() for f in stdout.decode().splitlines() if f.strip()]
+    bot.logger.log(caller, f"Changed files: {changed}")
+
+    bot.version = load_version()
+
+    needs_restart = any(
+        not f.startswith('modules/') or
+        f.startswith('modules/_') or
+        not f.endswith('.py')
+        for f in changed
+    )
+
+    if needs_restart:
+        bot.logger.log(caller, "Core files changed — full restart required")
+        return {"status": "restart"}
+
+    changed_modules = [
+        f[len('modules/'):-len('.py')]
+        for f in changed
+        if f.startswith('modules/') and f.endswith('.py') and not f.startswith('modules/_')
+    ]
+
+    if not changed_modules:
+        return {"status": "up_to_date"}
+
+    results = []
+    for name in changed_modules:
+        ok, msg = await reload_module(name)
+        results.append((name, ok, msg))
+        bot.logger.log(caller, msg, "INFO" if ok else "WARNING")
+
+    return {"status": "reloaded", "modules": results}
 
 async def _auto_update_loop(bot):
     interval = bot.config.get("network", {}).get("auto_update_interval_minutes", 5) * 60
@@ -410,7 +460,7 @@ async def _auto_update_loop(bot):
             bot.logger.log("AUTO-UPDATE", f"Check error: {e}", "WARNING")
         await asyncio.sleep(interval)
 
-@bot.tree.command(name="update", description="[Owner only] Pull latest changes from git and restart")
+@bot.tree.command(name="update", description="[Owner only] Pull latest changes and reload or restart as needed")
 async def update_cmd(interaction: discord.Interaction):
     if not _is_guild_owner(interaction):
         await interaction.response.send_message("Owner only.", ephemeral=True)
@@ -419,12 +469,20 @@ async def update_cmd(interaction: discord.Interaction):
     if not _ensure_git_for_update(bot, bot.logger):
         await interaction.edit_original_response(content="Git not available.")
         return
-    updated = await _check_for_update(bot)
-    if updated:
-        await interaction.edit_original_response(content="Update pulled. Restarting...")
-        await _restart_async(bot)
-    else:
+    result = await _smart_update(bot, caller="UPDATE")
+    status = result["status"]
+    if status == "up_to_date":
         await interaction.edit_original_response(content="Already up to date.")
+    elif status == "error":
+        await interaction.edit_original_response(content=f"Update failed: {result['message']}")
+    elif status == "restart":
+        await interaction.edit_original_response(content="Core files changed — restarting...")
+        await _restart_async(bot)
+    elif status == "reloaded":
+        names = [m[0] for m in result["modules"]]
+        failed = [m[0] for m in result["modules"] if not m[1]]
+        summary = f"Reloaded: {', '.join(names)}" + (f" | Failed: {', '.join(failed)}" if failed else "")
+        await interaction.edit_original_response(content=f"✅ {summary} (v{bot.version})")
 
 @bot.command(name="update")
 async def prefix_update(ctx):
@@ -435,13 +493,23 @@ async def prefix_update(ctx):
         await msg.edit(content="Git not available.")
         await msg.delete(delay=8)
         return
-    updated = await _check_for_update(bot)
-    if updated:
-        await msg.edit(content="Update pulled. Restarting...")
-        await _restart_async(bot)
-    else:
+    result = await _smart_update(bot, caller="UPDATE")
+    status = result["status"]
+    if status == "up_to_date":
         await msg.edit(content="Already up to date.")
         await msg.delete(delay=8)
+    elif status == "error":
+        await msg.edit(content=f"Update failed: {result['message']}")
+        await msg.delete(delay=8)
+    elif status == "restart":
+        await msg.edit(content="Core files changed — restarting...")
+        await _restart_async(bot)
+    elif status == "reloaded":
+        names = [m[0] for m in result["modules"]]
+        failed = [m[0] for m in result["modules"] if not m[1]]
+        summary = f"Reloaded: {', '.join(names)}" + (f" | Failed: {', '.join(failed)}" if failed else "")
+        await msg.edit(content=f"✅ {summary} (v{bot.version})")
+        await msg.delete(delay=12)
 
 def _is_guild_owner(interaction: discord.Interaction) -> bool:
     if not interaction.guild or interaction.guild.id != bot.home_guild_id:
@@ -935,12 +1003,19 @@ def setup_console_commands():
         if not _ensure_git_for_update(bot, bot.logger):
             print("Git not available.")
             return
-        updated = await _check_for_update(bot)
-        if updated:
-            print("Update pulled. Restarting...")
-            await _restart_async(bot)
-        else:
+        result = await _smart_update(bot, caller="UPDATE")
+        status = result["status"]
+        if status == "up_to_date":
             print("Already up to date.")
+        elif status == "error":
+            print(f"Update failed: {result['message']}")
+        elif status == "restart":
+            print("Core files changed — restarting...")
+            await _restart_async(bot)
+        elif status == "reloaded":
+            for name, ok, msg in result["modules"]:
+                print(f"  {'✅' if ok else '❌'} {msg}")
+            print(f"Done (v{bot.version})")
 
     async def handle_restart(args):
         print("Restarting...")

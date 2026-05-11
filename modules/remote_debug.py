@@ -716,17 +716,19 @@ class ClaudeBridgeListener:
                 tmp.unlink(missing_ok=True)
 
         elif command == "update":
-            proc = await asyncio.create_subprocess_exec(
-                "git", "-c", "credential.helper=", "pull", "--ff-only", "origin", "main",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                env={"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"},
-            )
-            stdout, stderr = await proc.communicate()
-            out = stdout.decode().strip() + "\n" + stderr.decode().strip()
-            if proc.returncode == 0 and "Already up to date" not in out:
+            import __main__
+            result = await __main__._smart_update(self.bot, caller="UPDATE")
+            status = result["status"]
+            if status == "up_to_date":
+                output = "already up to date"
+            elif status == "error":
+                output = f"update failed: {result['message']}"
+            elif status == "restart":
                 asyncio.create_task(self._delayed_restart_with_log())
-                return out + "\n[restarting — log will be committed after startup]", {}
-            output = out
+                return "core files changed — restarting (log committed after startup)", {}
+            elif status == "reloaded":
+                lines = [f"{'ok' if ok else 'FAIL'}: {msg}" for _, ok, msg in result["modules"]]
+                output = "\n".join(lines) + f"\nv{self.bot.version}"
 
         elif command == "restart":
             asyncio.create_task(self._delayed_restart_with_log())

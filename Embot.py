@@ -952,6 +952,18 @@ async def reload_module(name: str) -> tuple[bool, str]:
                 bot.tree.remove_command(cmd_name)
             del bot._module_commands[name]
 
+        # Remove old listeners registered by this module
+        if hasattr(bot, '_module_listeners') and name in bot._module_listeners:
+            for event, coro in bot._module_listeners[name]:
+                bot.remove_listener(coro, event)
+            del bot._module_listeners[name]
+
+        # Snapshot listeners before setup
+        listeners_before = {
+            event: list(coros)
+            for event, coros in bot._listeners.items()
+        }
+
         commands_before = {cmd.name for cmd in bot.tree.get_commands()}
 
         if name in sys.modules:
@@ -961,6 +973,17 @@ async def reload_module(name: str) -> tuple[bool, str]:
 
         if hasattr(module, 'setup'):
             module.setup(bot)
+
+        # Record newly added listeners for this module
+        new_listeners = []
+        for event, coros in bot._listeners.items():
+            before = listeners_before.get(event, [])
+            for coro in coros:
+                if coro not in before:
+                    new_listeners.append((event, coro))
+        if not hasattr(bot, '_module_listeners'):
+            bot._module_listeners = {}
+        bot._module_listeners[name] = new_listeners
 
         commands_after = {cmd.name for cmd in bot.tree.get_commands()}
         new_commands = commands_after - commands_before

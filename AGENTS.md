@@ -193,7 +193,7 @@ If other API details aren't properly covered here or you encounter errors, use y
 
 **Key classes** (all under `discord.ui`):
 - `LayoutView(timeout=None)` — top-level container, sent via `channel.send(view=layout)` or `message.edit(view=layout)`
-- `Container(*children, accent_color=None)` — card-like box; **do not pass `accent_color`** — despite being in the signature, it causes the component to silently fall back to a plain embed. Leave it out.
+- `Container(*children, accent_colour=None, accent_color=None, spoiler=False)` — card-like box; **do not pass `accent_colour`/`accent_color`** — despite being in the signature, it causes the component to silently fall back to a plain embed. Leave it out.
 - `TextDisplay(content)` — renders markdown text inside a Container or directly in the layout
 - `Separator(spacing=discord.SeparatorSpacing.small)` — vertical gap between items; `SeparatorSpacing.small` or `SeparatorSpacing.large`
 
@@ -231,9 +231,10 @@ await interaction.response.send_message(view=layout, ephemeral=True)
 **Important:** Never use `defer()` + `followup.send(view=layout)` for Components V2 — followup does not set the flag and renders as a plain message. Always use `interaction.response.send_message` directly.
 
 **Additional components** (all under `discord.ui`):
-- `Section(text, accessory=...)` — text on the left, optional `Button` or `Thumbnail` accessory on the right
-- `Thumbnail(url=...)` — small inline image, used as a `Section` accessory
-- `MediaGallery(*items)` — correct way to embed images in a layout; each item is `discord.ui.media_gallery.MediaGalleryItem(url)` where `url` is a **positional** arg (not `url=`). Do NOT use markdown `![]()` in TextDisplay for images.
+- `Section(*children, accessory)` — children are `TextDisplay` items or strings; `accessory` is a `Button` or `Thumbnail` on the right. `accessory` is required.
+- `Thumbnail(media, ...)` — small inline image used as a `Section` accessory; `media` is a **positional** URL string (not `url=`)
+- `MediaGallery(*items)` — correct way to embed images in a layout; each item is `discord.ui.media_gallery.MediaGalleryItem(media)` where `media` is a **positional** URL string (not `url=`). Do NOT use markdown `![]()` in TextDisplay for images.
+- `File(media, *, spoiler=False)` — embeds an uploaded file attachment inline; `media` is `'attachment://filename'`, pass the actual `discord.File` objects in `files=` on the send call. Not re-exported to `discord.ui` directly — use `discord.ui.file.File` or import from the module.
 - `ActionRow(*children)` — horizontal row of up to 5 `Button`s or 1 select menu; buttons/selects must live inside an ActionRow (or Section accessory)
 
 **Component limits:** max 40 total components per message, 4000 chars across all TextDisplays.

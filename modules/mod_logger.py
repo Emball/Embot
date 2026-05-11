@@ -80,7 +80,7 @@ class EventLogger:
         if not channel:
             return None
         try:
-            kwargs = {"view": view}
+            kwargs = {"view": view, "allowed_mentions": discord.AllowedMentions.none()}
             if files:
                 kwargs["files"] = files
             msg = await channel.send(**kwargs)
@@ -106,7 +106,7 @@ class EventLogger:
             return
 
         header = f"🗑️ **Message deleted** in {message.channel.mention}"
-        footer = f"-# {message.author} • ID: {message.author.id}"
+        footer = f"-# <@{message.author.id}>"
         body = message.content if message.content else "*[No text content]*"
         main_text = f"{header}\n\n{body}\n{footer}"
 
@@ -187,7 +187,7 @@ class EventLogger:
             f"✏️ **Message edited** in {after.channel.mention}\n\n"
             f"**Before**\n{before_content}\n\n"
             f"**After**\n{after_content}\n"
-            f"-# {after.author} • ID: {after.author.id} • [Jump]({after.jump_url})"
+            f"-# <@{after.author.id}> • [Jump]({after.jump_url})"
         )
 
         view = _layout(_section_with_avatar(text, after.author.display_avatar.url))
@@ -232,7 +232,7 @@ class EventLogger:
             f"✅ **Member Joined**\n"
             f"{member.mention} {member.name}\n\n"
             f"**Account Age:** {', '.join(age_parts)}\n"
-            f"-# ID: {member.id}"
+            f"-# <@{member.id}>"
         )
 
         view = _layout(_section_with_avatar(text, member.display_avatar.url))
@@ -249,7 +249,7 @@ class EventLogger:
         text = (
             f"👋 **Member Left**\n"
             f"{member.mention} {member.name}\n"
-            f"-# ID: {member.id}"
+            f"-# <@{member.id}>"
         )
 
         view = _layout(_section_with_avatar(text, member.display_avatar.url))
@@ -271,7 +271,7 @@ class EventLogger:
                     lines.append(f"\n**Added:** {', '.join(r.mention for r in added_roles)}")
                 if removed_roles:
                     lines.append(f"**Removed:** {', '.join(r.mention for r in removed_roles)}")
-                lines.append(f"\n-# {after} • ID: {after.id}")
+                lines.append(f"\n-# <@{after.id}>")
 
                 view = _layout(_section_with_avatar("\n".join(lines), after.display_avatar.url))
                 await self._send(channel, view)
@@ -284,7 +284,7 @@ class EventLogger:
                 f"📝 **Nickname changed** for {after.mention}\n\n"
                 f"**Before:** {before_nick}\n"
                 f"**After:** {after_nick}\n"
-                f"-# {after} • ID: {after.id}"
+                f"-# <@{after.id}>"
             )
 
             view = _layout(_section_with_avatar(text, after.display_avatar.url))
@@ -414,11 +414,11 @@ class EventLogger:
             return
 
         if before.channel is None and after.channel is not None:
-            text = f"🔊 **{member.mention} joined** {after.channel.mention}\n-# {member} • ID: {member.id}"
+            text = f"🔊 **{member.mention} joined** {after.channel.mention}\n-# <@{member.id}>"
         elif before.channel is not None and after.channel is None:
-            text = f"🔇 **{member.mention} left** {before.channel.mention}\n-# {member} • ID: {member.id}"
+            text = f"🔇 **{member.mention} left** {before.channel.mention}\n-# <@{member.id}>"
         elif before.channel != after.channel:
-            text = f"🔀 **{member.mention} moved** {before.channel.mention} → {after.channel.mention}\n-# {member} • ID: {member.id}"
+            text = f"🔀 **{member.mention} moved** {before.channel.mention} → {after.channel.mention}\n-# <@{member.id}>"
         else:
             return
 
@@ -442,7 +442,7 @@ class EventLogger:
         )
 
         if invite.inviter:
-            text += f"\n-# {invite.inviter} • ID: {invite.inviter.id} • Code: {invite.code}"
+            text += f"\n-# <@{invite.inviter.id}> • Code: {invite.code}"
             view = _layout(_section_with_avatar(text, invite.inviter.display_avatar.url))
         else:
             text += f"\n-# Code: {invite.code}"
@@ -473,7 +473,7 @@ class EventLogger:
             f"**Moderator:** {moderator.mention}\n"
             f"**Reason:** {reason}\n"
             f"**Messages Deleted:** {delete_days} day{'s' if delete_days != 1 else ''} • **Channel:** {action_channel.mention}\n"
-            f"-# {user} • ID: {user.id}"
+            f"-# <@{user.id}>"
         )
         view = _layout(_section_with_avatar(text, user.display_avatar.url))
         return await self._send(channel, view)
@@ -488,7 +488,7 @@ class EventLogger:
             f"**Moderator:** {moderator.mention}\n"
             f"**Reason:** {reason}\n"
             f"**Channel:** {action_channel.mention}\n"
-            f"-# {member} • ID: {member.id}"
+            f"-# <@{member.id}>"
         )
         view = _layout(_section_with_avatar(text, member.display_avatar.url))
         return await self._send(channel, view)
@@ -503,7 +503,7 @@ class EventLogger:
             f"**Moderator:** {moderator.mention}\n"
             f"**Reason:** {reason}\n"
             f"**Duration:** {duration_str} • **Channel:** {action_channel.mention}\n"
-            f"-# {member} • ID: {member.id}"
+            f"-# <@{member.id}>"
         )
         view = _layout(_section_with_avatar(text, member.display_avatar.url))
         return await self._send(channel, view)
@@ -518,7 +518,7 @@ class EventLogger:
             f"**Moderator:** {moderator.mention}\n"
             f"**Reason:** {reason}\n"
             f"**Duration:** {duration_str} • **Channel:** {action_channel.mention}\n"
-            f"-# {member} • ID: {member.id}"
+            f"-# <@{member.id}>"
         )
         view = _layout(_section_with_avatar(text, member.display_avatar.url))
         return await self._send(channel, view)
@@ -533,7 +533,7 @@ class EventLogger:
             f"**Moderator:** {moderator.mention}\n"
             f"**Reason:** {reason}\n"
             f"**Messages Deleted:** {delete_days} day{'s' if delete_days != 1 else ''} • **Channel:** {action_channel.mention}\n"
-            f"-# {member} • ID: {member.id}"
+            f"-# <@{member.id}>"
         )
         view = _layout(_section_with_avatar(text, member.display_avatar.url))
         return await self._send(channel, view)
@@ -565,7 +565,7 @@ class EventLogger:
             f"**Moderator:** {moderator.mention}\n"
             f"**Reason:** {reason}\n"
             f"**Total Warnings:** {strike_count} • **Channel:** {action_channel.mention}\n"
-            f"-# {member} • ID: {member.id}"
+            f"-# <@{member.id}>"
         )
         view = _layout(_section_with_avatar(text, member.display_avatar.url))
         return await self._send(channel, view)

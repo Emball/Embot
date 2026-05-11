@@ -114,6 +114,7 @@ Ensure there's no avenues in a module where an error could be silently swallowed
   - `300+` → MAJOR, `100+` → MINOR, `20+` → PATCH, `1+` → MICRO
 - Commit message = version number only.
 - Increment version, commit, and push after every edit. No permission needed. Always stage `_version.py` in the same commit as the code change — never commit code without it.
+- `_version.py` changes on every commit and is explicitly excluded from the restart trigger — it never causes a full restart on its own.
 - Keep `requirements.txt` synced. Keep `.gitignore` clean. Keep AGENTS.md current.
 - Temp/test code goes in `/temp` (gitignored).
 
@@ -124,7 +125,7 @@ GitHub-based command queue via private `Emball/EmbotDebug` repo.
 **How it works:** The bot side uses the GitHub API (faster) to poll and commit results. The Claude side uses plain git (clone/push) because GitHub API URLs are not whitelisted in Claude's environment.
 
 **Result routing:**
-- Direct output (ping, status, guilds, modules, shell, update, restart) → `result.json`
+- Direct output (ping, status, guilds, modules, shell, update, restart, reload) → `result.json`
 - File artifacts (logs, logs-list, logs-search, config, db-query, db-download) → committed under `logs/`, `config/`, `db/`
 
 **Session checklist:** `session-init` → `bridge status` → work.
@@ -148,20 +149,23 @@ Once per session: `python modules/remote_debug.py session-init ghp_...`
 | `db-download <name>` | ✓ | ✓ | Download .db to temp/ |
 | `shell <cmd>` | ✓ | ✓ | Shell command — use single quotes for inner strings (double quotes get mangled by the bridge shell) |
 | `script-exec <python>` | ✓ | — | Run a Python script on the bot — payload routed via `payload.txt` in EmbotDebug repo, no shell mangling |
-| `update` | ✓ | ✓ | Git pull + restart |
+| `reload <module>` | ✓ | — | Hot-reload a single module without restarting |
+| `update` | ✓ | ✓ | Smart update: reloads only changed modules if possible, full restart only if core files changed |
 | `restart` | ✓ | ✓ | Restart bot |
 | `session-init <token>` | ✓ | — | Store GitHub token (once per session) |
 
 Bridge: `python modules/remote_debug.py bridge <command> [args...]`
 LAN: `uv run python modules/remote_debug.py <command> [args...]`
 
-`restart`/`update` wait smartly for the bot to come back online.
+`restart` waits smartly for the bot to come back online. `update` only waits if a restart was triggered; if it hot-reloaded modules it returns immediately.
 
 **EmbotDebug history:** The bot force-pushes on every result commit, so EmbotDebug intentionally has a shallow/rewritten history. This is expected — don't try to recover or preserve old commits there. The only files that should ever be in EmbotDebug are: `cmd.json`, `result.json`, `status.json`, `payload.txt`, and transient artifacts under `logs/`, `config/`, `db/` written by bridge commands. Never commit anything else there. `config auth` is blocked at the bridge level.
 
 ## Debugging
 
-The bot auto-updates. After every push it polls git every ~1 minute, detects the version bump, pulls, and restarts. Use `bridge update` or `bridge restart` to trigger this immediately rather than waiting out the interval. Auto-update is a good fallback if the server is unreachable.
+The bot auto-updates. After every push it polls git every ~1 minute, detects the version bump, and pulls. **If only module files changed, the bot hot-reloads those modules in place — no restart, no disruption.** A full restart only triggers if `Embot.py`, config, or other core files changed. `_version.py` never triggers a restart on its own. Use `bridge update` to trigger this immediately rather than waiting out the interval. Use `bridge restart` only when a full restart is explicitly needed. Auto-update is a good fallback if the server is unreachable.
+
+For single-module changes during active development, prefer `bridge reload <module>` — it reloads immediately without touching any other module or waiting for a git pull cycle.
 
 Testing individual files is recommended, but do not try to run a Embot.py session locally. How the live bot responds to the latest code is the ideal source of truth on whether or not it's truly clean.
 

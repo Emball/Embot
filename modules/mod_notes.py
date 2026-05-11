@@ -143,17 +143,7 @@ async def _sync(bot, guild: discord.Guild, *, force: bool = False) -> bool:
 
     layout = _build_layout(cfg)
 
-    if existing_msg:
-        try:
-            await existing_msg.edit(view=layout)
-            state["config_hash"] = current_hash
-            _save_state(guild.id, state)
-            bot.logger.log(MODULE_NAME, "Mod notes message updated")
-            return True
-        except Exception as e:
-            bot.logger.log(MODULE_NAME, f"Failed to edit mod notes message: {e} — reposting", "WARNING")
-            # fall through to repost
-
+    # Always delete and resend — avoids Discord "(edited)" flag on Components V2 messages
     # Clear any stale bot messages in the channel then post fresh
     try:
         async for msg in channel.history(limit=50):

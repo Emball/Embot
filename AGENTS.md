@@ -146,6 +146,7 @@ Once per session: `python modules/remote_debug.py session-init ghp_...`
 | `db-query <name> "<SQL>"` | ✓ | ✓ | Read-only SQL query |
 | `db-download <name>` | ✓ | ✓ | Download .db to temp/ |
 | `exec <cmd>` | ✓ | ✓ | Shell command — use single quotes for inner strings (double quotes get mangled by the bridge shell) |
+| `script-exec <python>` | ✓ | — | Run a Python script passed as a string — avoids quote nesting issues in exec |
 | `update` | ✓ | ✓ | Git pull + restart |
 | `restart` | ✓ | ✓ | Restart bot |
 | `session-init <token>` | ✓ | — | Store GitHub token (once per session) |

@@ -47,6 +47,7 @@ Modules are listed in **dependency order** — this is also the required read or
 | `mod_appeals.py` | Ban appeal views, modal, voting, lifecycle |
 | `mod_oversight.py` | Action review, bot-log monitoring, daily integrity reports, embed tracking |
 | `mod_rules.py` | RulesManager — sync/display server rules |
+| `mod_notes.py` | Self-maintaining mod command reference — syncs to `config/mod_notes.json`, posts to mod-notes channel, same watcher pattern as info.py |
 | `info.py` | Self-maintaining info embed — syncs to `config/info.json`, auto-reposts if deleted, polls for config changes every 15s and verifies embed exists every 5min |
 | `mod_logger.py` | 17 Discord event types → join-logs/bot-logs |
 | `vms_core.py` | VMS core: transcription queue, commands/listeners, dispatches `vm_transcribed`. mod_core listens — VMS has no moderation knowledge |

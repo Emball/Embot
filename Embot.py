@@ -220,6 +220,7 @@ def load_modules():
         "mod_appeals",
         "mod_oversight",
         "mod_rules",
+        "mod_notes",
         "info",
         "mod_logger",
         "vms_core",

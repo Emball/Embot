@@ -13,8 +13,27 @@ DEFAULTS = {
     "channel_name": "mod-notes",
     "sections": [
         {
-            "title": "Moderation Commands",
-            "content": "**Warn a member**
+            "title": "Owner Commands",
+            "content": "**Logging**
+`/logconfig` — view or toggle log settings
+`/setbotlogs [channel]` — set mod log channel
+`/setjoinlogs [channel]` — set join/leave log channel
+
+**Server**
+`/updaterules` — reload rules from mod.json
+
+**Federation tools**
+`/fedcheck [user]` — check suspicion score
+`/fedflag [user] [reason]` — manually flag
+`/fedclear [user]` — clear flag
+`/fedscan` — scan all members
+`/fedinvites` — audit invite sources"
+        },
+        {
+            "title": "Mod Commands",
+            "content": "All commands work with both `/` and `?` prefixes.
+
+**Warn a member**
 `/warn [member] [reason]`
 
 **Timeout a member**
@@ -53,29 +72,9 @@ DEFAULTS = {
 `/slowmode [seconds]`"
         },
         {
-            "title": "Owner Commands",
-            "content": "**Logging**
-`/logconfig` — view or toggle log settings
-`/setbotlogs [channel]` — set mod log channel
-`/setjoinlogs [channel]` — set join/leave log channel
-
-**Server**
-`/updaterules` — reload rules from mod.json
-
-**Federation tools**
-`/fedcheck [user]` — check suspicion score
-`/fedflag [user] [reason]` — manually flag
-`/fedclear [user]` — clear flag
-`/fedscan` — scan all members
-`/fedinvites` — audit invite sources"
-        },
-        {
-            "title": "Useful Info",
-            "content": "**Member reports** go to mod-chat automatically via `/report [message link] [reason]`.
-
-**Appeals** — banned members receive a DM with appeal instructions automatically.
-
-**Strike thresholds** — configured in `mod.json`. Warnings trigger auto-actions at defined strike counts."
+            "title": "Enforcement Guide",
+            "content": "Offense-by-offense action reference for all mods.
+[Emball Moderator Enforcement Guide](https://docs.google.com/spreadsheets/d/1Gz65bq6f4AtdWwmUiJAMP_NEahM9bvDIlJLR51kBAuU/edit?usp=sharing)"
         }
     ]
 }

@@ -1463,9 +1463,30 @@ def setup(bot):
             mention = member.mention if member else name
             xp_total = int(top["total_xp"])
 
+            image_url = None
+            if top["message_id"]:
+                ch = interaction.guild.get_channel(top["channel_id"])
+                if ch:
+                    try:
+                        msg = await ch.fetch_message(top["message_id"])
+                        for att in msg.attachments:
+                            if att.content_type and att.content_type.startswith("image/"):
+                                image_url = att.url
+                                break
+                        if image_url:
+                            cs.clog(f"Spotlight preview: image found: {image_url}")
+                        else:
+                            cs.clog("Spotlight preview: no image attachment found on submission message.")
+                    except Exception as e:
+                        cs.clog(f"Spotlight preview: failed to fetch submission message for image: {e}", "WARNING")
+
             body = f"## 🌟 Spotlight Friday\nThis week's featured submission is **{top['title'] or 'Untitled'}** by {mention}!\n\n**Version** • {top['version']}\n**XP Score** • {xp_total} XP\n\n**Original Post**\n{link_line}"
 
-            items = [discord.ui.Container(discord.ui.TextDisplay(body))]
+            container_children = [discord.ui.TextDisplay(body)]
+            if image_url:
+                container_children.append(discord.ui.MediaGallery(discord.ui.MediaGalleryItem(url=image_url)))
+
+            items = [discord.ui.Container(*container_children)]
             items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
             items.append(discord.ui.TextDisplay(f"-# Embot Spotlight Friday • {_now().strftime('%m/%d/%Y %-I:%M %p')}"))
 

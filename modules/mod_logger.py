@@ -30,10 +30,12 @@ def _sep() -> discord.ui.Separator:
     return discord.ui.Separator(spacing=discord.SeparatorSpacing.small)
 
 
-def _section_with_avatar(text: str, avatar_url: str) -> discord.ui.Section:
-    return discord.ui.Section(
-        _text(text),
-        accessory=discord.ui.Thumbnail(avatar_url)
+def _section_with_avatar(text: str, avatar_url: str) -> discord.ui.Container:
+    return discord.ui.Container(
+        discord.ui.Section(
+            _text(text),
+            accessory=discord.ui.Thumbnail(avatar_url)
+        )
     )
 
 
@@ -127,14 +129,14 @@ class EventLogger:
 
             if img_names:
                 items.append(_sep())
-                items.append(discord.ui.MediaGallery(
+                items.append(_container(discord.ui.MediaGallery(
                     *[_mg.MediaGalleryItem(f"attachment://{name}") for name in img_names]
-                ))
+                )))
 
             if other_names:
                 items.append(_sep())
                 for name in other_names:
-                    items.append(discord.ui.File(f"attachment://{name}"))
+                    items.append(_container(discord.ui.File(f"attachment://{name}")))
 
             await self._send(channel, _layout(*items), files=discord_files)
         else:
@@ -144,9 +146,9 @@ class EventLogger:
                 img_atts = [a for a in message.attachments if a.filename.lower().endswith(image_exts)]
                 if img_atts:
                     items.append(_sep())
-                    items.append(discord.ui.MediaGallery(
+                    items.append(_container(discord.ui.MediaGallery(
                         *[_mg.MediaGalleryItem(a.url) for a in img_atts]
-                    ))
+                    )))
 
             await self._send(channel, _layout(*items))
 

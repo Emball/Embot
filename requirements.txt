@@ -1,5 +1,5 @@
 # Core Discord bot
-discord.py[voice]
+discord.py[voice]==2.7.1
 PyNaCl
 pytz
 

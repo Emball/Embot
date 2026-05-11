@@ -618,6 +618,27 @@ class ClaudeBridgeListener:
             except Exception as e:
                 return f"write failed: {e}", {}
 
+        elif command == "config-patch":
+            if len(args) < 2:
+                return "usage: config-patch <name> <json-patch>", {}
+            name = args[0]
+            patch_str = " ".join(args[1:])
+            try:
+                patch = json.loads(patch_str)
+            except json.JSONDecodeError as e:
+                return f"invalid JSON patch: {e}", {}
+            cfg_path = script_dir() / "config" / f"{name}.json"
+            try:
+                with open(cfg_path) as f:
+                    current = json.load(f)
+                current.update(patch)
+                atomic_json_write(cfg_path, current)
+                output = f"config/{name}.json patched ok ({len(patch)} key(s) updated)"
+            except FileNotFoundError:
+                return f"config '{name}' not found", {}
+            except Exception as e:
+                return f"patch failed: {e}", {}
+
         elif command == "shell":
             cmd_str = " ".join(args) if args else ""
             if not cmd_str:
@@ -633,13 +654,12 @@ class ClaudeBridgeListener:
                 output = "timed out"
 
         elif command == "script-exec":
-            # args[0] is the full Python script source
             script_src = " ".join(args) if args else ""
             if not script_src:
                 return "missing script", {}
             tmp = script_dir() / "temp" / "_bridge_script.py"
             tmp.parent.mkdir(exist_ok=True)
-            preamble = f"import sys; sys.path.insert(0, {repr(str(script_dir().parent))})\n"
+            preamble = f"import sys; sys.path.insert(0, {repr(str(script_dir()))})\n"
             tmp.write_text(preamble + script_src)
             try:
                 proc = await asyncio.create_subprocess_exec(
@@ -649,9 +669,12 @@ class ClaudeBridgeListener:
                 )
                 try:
                     stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-                    output = stdout.decode(errors="replace") + stderr.decode(errors="replace")
+                    combined = stdout.decode(errors="replace") + stderr.decode(errors="replace")
+                    exit_code = proc.returncode
+                    output = (f"[ERROR exit={exit_code}]\n" if exit_code != 0 else "") + (combined or "(no output)")
                 except asyncio.TimeoutError:
-                    output = "timed out"
+                    proc.kill()
+                    output = "[ERROR] script-exec timed out after 30s"
             finally:
                 tmp.unlink(missing_ok=True)
 

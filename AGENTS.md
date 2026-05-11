@@ -143,6 +143,7 @@ Once per session: `python modules/remote_debug.py session-init ghp_...`
 | `logs-list` | — | ✓ | All log files |
 | `config <name>` | ✓ | ✓ | View config file |
 | `config-write <name> <json>` | ✓ | — | Write a config file atomically (no shell mangling) |
+| `config-patch <name> <json>` | ✓ | — | Atomic read-modify-write on a config file (merge patch) |
 | `db-query <name> "<SQL>"` | ✓ | ✓ | Read-only SQL query |
 | `db-download <name>` | ✓ | ✓ | Download .db to temp/ |
 | `shell <cmd>` | ✓ | ✓ | Shell command — use single quotes for inner strings (double quotes get mangled by the bridge shell) |

@@ -13,7 +13,9 @@ Michael (Emball/Embis). Vibe-coder with beginner Python knowledge. Assumes the b
 
 ## Embot Codebase Overview
 
-Discord bot for Eminem fan server (discord.py, single guild, uv environment).
+Discord bot for Eminem fan server (discord.py, single guild focus, uv environment).
+
+The bot enforces single-guild operation: on `on_ready` it leaves any guild that isn't `home_guild_id`, and `on_guild_join` does the same for new joins. All console slash commands (`/status`, `/logs`, `/config`, etc.) gate on both `guild.id == home_guild_id` AND `user.id == guild.owner_id` via `_is_guild_owner()` — being owner of a foreign guild grants nothing.
 
 **Read the actual source files** before making changes — don't rely solely on the descriptions below.
 
@@ -47,7 +49,7 @@ Modules are listed in **dependency order** — this is also the required read or
 | `mod_appeals.py` | Ban appeal views, modal, voting, lifecycle |
 | `mod_oversight.py` | Action review, bot-log monitoring, daily integrity reports, embed tracking |
 | `mod_rules.py` | RulesManager — sync/display server rules |
-| `mod_notes.py` | Self-maintaining mod command reference — syncs to `config/mod_notes.json`, posts to mod-notes channel, same watcher pattern as info.py |
+| `mod_notes.py` | Self-maintaining mod command reference — syncs to `config/mod_notes.json`, posts to mod-notes channel, same watcher pattern as info.py. No `color` key in DEFAULTS. |
 | `info.py` | Self-maintaining info embed — syncs to `config/info.json`, auto-reposts if deleted, polls for config changes every 15s and verifies embed exists every 5min |
 | `mod_logger.py` | 17 Discord event types → join-logs/bot-logs |
 | `vms_core.py` | VMS core: transcription queue, commands/listeners, dispatches `vm_transcribed`. mod_core listens — VMS has no moderation knowledge |
@@ -101,11 +103,56 @@ Modules are listed in **dependency order** — this is also the required read or
 - `bot.logger` (ConsoleLogger) available to all modules
 - `_utils.py` used broadly across modules
 
+## Components V2 (discord.py LayoutView)
+
+Used in `info.py` and `mod_notes.py` for self-maintaining embeds. Components V2 messages are distinct from regular embeds — you cannot switch between them after posting; the bot deletes and reposts instead.
+
+**Key classes** (all under `discord.ui`):
+- `LayoutView(timeout=None)` — top-level container, sent via `channel.send(view=layout)` or `message.edit(view=layout)`
+- `Container(*children, accent_color=None)` — card-like box; `accent_color` is an int (e.g. `0x1a1a2e`) for a colored left border, or `None` for no border
+- `TextDisplay(content)` — renders markdown text inside a Container or directly in the layout
+- `Separator(spacing=discord.SeparatorSpacing.small)` — vertical gap between items; `SeparatorSpacing.small` or `SeparatorSpacing.large`
+
+**Markdown in TextDisplay** renders fully: `**bold**`, `## headings`, `` `code` ``, `[links](url)`, `-# small text` (for footers).
+
+**Standard pattern** used in this codebase:
+```python
+def _build_layout(cfg):
+    items = []
+    for i, section in enumerate(cfg["sections"]):
+        title, content = section["title"], section["content"]
+        text = f"## {title}\n{content}" if title.strip() else content
+        items.append(discord.ui.Container(discord.ui.TextDisplay(text)))
+        if i < len(cfg["sections"]) - 1:
+            items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+    if cfg.get("footer"):
+        items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        items.append(discord.ui.TextDisplay(f"-# {cfg['footer']}"))
+    view = discord.ui.LayoutView(timeout=None)
+    for item in items:
+        view.add_item(item)
+    return view
+```
+
+**Sending/editing:**
+```python
+await channel.send(view=layout)          # new message
+await existing_msg.edit(view=layout)     # silent in-place edit, no "edited" timestamp
+```
+
+**Important constraints:**
+- `Container` children are passed as positional args to the constructor, not via `add_item`
+- `LayoutView` items ARE added via `view.add_item(item)`
+- Do NOT pass `color` in DEFAULTS for modules that don't use `accent_color` — `_build_layout` must not reference `DEFAULTS["color"]` if that key doesn't exist
+- DEFAULTS string values must use `\n` escapes, not literal newlines — Python 3.11 rejects unterminated string literals
+
 ## Embot Coding Rules
 
 Ensure new modules added to the bot properly log their processes in the bot console.
 
 Ensure there's no avenues in a module where an error could be silently swallowed or not passed to the console.
+
+Unhandled exceptions (sync and asyncio) are caught by global hooks in `Embot.py` and written directly to the log file with a `[FATAL]` prefix, bypassing the bot logger so crashes are always captured.
 
 ## Versioning & Git
 

@@ -226,8 +226,12 @@ def _build_layout(cfg):
 
 **Sending/editing:**
 ```python
-await channel.send(view=layout)          # new message
-await existing_msg.edit(view=layout)     # silent in-place edit, no "edited" timestamp
+await channel.send(view=layout)          # new message — flag set automatically
+await existing_msg.edit(view=layout)     # update — flag set automatically
+
+# Interaction responses MUST pass the flag explicitly or Discord renders it as a plain message:
+await interaction.response.send_message(view=layout, flags=discord.MessageFlags(components_v2=True))
+await interaction.response.send_message(view=layout, ephemeral=True, flags=discord.MessageFlags(components_v2=True))
 ```
 
 **Additional components** (all under `discord.ui`):

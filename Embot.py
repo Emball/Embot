@@ -1107,6 +1107,36 @@ def run_bot(token):
         bot.logger.log("MAIN", f"Starting Embot v{load_version()} — PRODUCTION MODE")
         bot.logger.log("MAIN", f"Log files: {data_dir}")
 
+        def _log_crash(msg):
+            try:
+                if hasattr(bot, 'logger') and bot.logger.log_file:
+                    with open(bot.logger.log_file, 'a', encoding='utf-8') as f:
+                        f.write(msg + '\n')
+            except Exception:
+                pass
+            print(msg, file=sys.stderr)
+
+        def _excepthook(exc_type, exc_value, exc_tb):
+            import traceback as _tb
+            text = "".join(_tb.format_exception(exc_type, exc_value, exc_tb))
+            _log_crash(f"[FATAL] Unhandled exception:\n{text}")
+        sys.excepthook = _excepthook
+
+        def _asyncio_exception_handler(loop, context):
+            exc = context.get("exception")
+            import traceback as _tb
+            if exc:
+                text = "".join(_tb.format_exception(type(exc), exc, exc.__traceback__))
+            else:
+                text = context.get("message", "Unknown asyncio error")
+            _log_crash(f"[FATAL] Asyncio unhandled exception: {context.get('message', '')}\n{text}")
+        import asyncio as _asyncio
+        try:
+            loop = _asyncio.get_event_loop()
+            loop.set_exception_handler(_asyncio_exception_handler)
+        except Exception:
+            pass
+
         bot.run(token)
     except Exception as e:
         bot.logger.error("MAIN", "Failed to start bot", e)

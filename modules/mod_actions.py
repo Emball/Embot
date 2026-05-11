@@ -59,6 +59,7 @@ async def _do_ban(ctx: ModContext, ms, user: discord.User, reason: str = None,
                 await user.send(content=dm_text, view=BanAppealView(ctx.guild.id))
             except discord.Forbidden:
                 pass
+            ms._bot_initiated_bans.add(user.id)
             await ctx.guild.ban(user, reason=f"{reason} - By {ctx.author}",
                                  delete_message_days=delete_days)
 
@@ -337,6 +338,7 @@ async def _do_softban(ctx: ModContext, ms, member: discord.Member, reason: str,
     delete_days = max(0, min(7, delete_days))
     try:
         if not fake:
+            ms._bot_initiated_bans.add(member.id)
             await member.ban(reason=f"Softban: {reason} - By {ctx.author}",
                              delete_message_days=delete_days)
             await ctx.guild.unban(member, reason=f"Softban unban - By {ctx.author}")

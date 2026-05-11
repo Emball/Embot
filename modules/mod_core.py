@@ -524,6 +524,7 @@ class ModerationSystem:
         self._bot_log_cache_size             = 500
         self._deletion_warnings: Dict[int, str] = {}
         self.tracked_embeds = {}
+        self._bot_initiated_bans: set = set()
 
         _db_exec(self._db,
                  "INSERT INTO mod_startup_log (startup_time) VALUES (?)",
@@ -1352,6 +1353,24 @@ def setup(bot):
     @bot.listen()
     async def on_member_join(member):
         await mod_system.restore_member_roles(member)
+
+    @bot.listen()
+    async def on_member_ban(guild, user):
+        if user.id in mod_system._bot_initiated_bans:
+            mod_system._bot_initiated_bans.discard(user.id)
+            return
+        from mod_appeals import BanAppealView
+        dm_text = (
+            f"You have been banned from **{guild.name}**.\n\n"
+            "If you believe this was a mistake, you can submit a ban appeal using the button below."
+        )
+        try:
+            await user.send(content=dm_text, view=BanAppealView(guild.id))
+            bot.logger.log(MODULE_NAME, f"Sent ban appeal DM to {user} (external ban)")
+        except discord.Forbidden:
+            bot.logger.log(MODULE_NAME, f"Could not DM {user} (external ban) — DMs closed")
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, f"Failed to DM {user} on external ban", e)
 
     rules_manager    = RulesManager(bot, mod_system._db, mod_system.cfg)
     bot.rules_manager = rules_manager

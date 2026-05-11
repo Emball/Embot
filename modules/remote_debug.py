@@ -639,7 +639,8 @@ class ClaudeBridgeListener:
                 return "missing script", {}
             tmp = script_dir() / "temp" / "_bridge_script.py"
             tmp.parent.mkdir(exist_ok=True)
-            tmp.write_text(script_src)
+            preamble = f"import sys; sys.path.insert(0, {repr(str(script_dir()))}\n"
+            tmp.write_text(preamble + script_src)
             try:
                 proc = await asyncio.create_subprocess_exec(
                     "uv", "run", "python", str(tmp),

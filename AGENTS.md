@@ -233,7 +233,7 @@ await interaction.response.send_message(view=layout, ephemeral=True)
 **Additional components** (all under `discord.ui`):
 - `Section(text, accessory=...)` — text on the left, optional `Button` or `Thumbnail` accessory on the right
 - `Thumbnail(url=...)` — small inline image, used as a `Section` accessory
-- `MediaGallery(*items)` — correct way to embed images in a layout; each item is a `MediaGalleryItem(url=...)`. Do NOT use markdown `![]()` in TextDisplay for images.
+- `MediaGallery(*items)` — correct way to embed images in a layout; each item is `discord.ui.media_gallery.MediaGalleryItem(url)` where `url` is a **positional** arg (not `url=`). Do NOT use markdown `![]()` in TextDisplay for images.
 - `ActionRow(*children)` — horizontal row of up to 5 `Button`s or 1 select menu; buttons/selects must live inside an ActionRow (or Section accessory)
 
 **Component limits:** max 40 total components per message, 4000 chars across all TextDisplays.

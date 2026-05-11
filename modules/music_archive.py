@@ -659,12 +659,6 @@ class ARCHIVEManager:
             f"(max {max_bytes // 1024 // 1024}MB per message)")
 
         if not pending:
-            view = discord.ui.LayoutView(timeout=None)
-            view.add_item(discord.ui.Container(
-                discord.ui.TextDisplay("## 📦 Cache Backfill\n▓▓▓▓▓▓▓▓▓▓▓▓ **100.0%**\nAll files already cached. Nothing to do."),
-                accent_color=0x2ecc71,
-            ))
-            await chan.send(view=view)
             return
 
         uploaded = 0

@@ -58,7 +58,7 @@ Private `_*.py` files are skipped by the loader. Module load order is enforced v
 | `mod_suspicion.py` | Scores members on join using signals to detect suspicious users. Provides `is_flagged()` |
 | `mod_actions.py` | ban, kick, mute, warn, purge, lock, slowmode |
 | `mod_appeals.py` | Ban appeal flow — modal submission, mod voting, lifecycle management |
-| `mod_oversight.py` | Pending action review with approve/revert, daily integrity reports, embed tracking |
+| `mod_oversight.py` | Pending action review with approve/revert, daily integrity reports, deletion log tracking |
 | `mod_rules.py` | Syncs and displays server rules in #rules channel |
 | `mod_notes.py` | Self-maintaining mod command reference posted to #mod-notes |
 | `info.py` | Self-maintaining info docs synced to #info. Polls config every 15s, verifies embed every 5min |
@@ -190,6 +190,7 @@ Prefer `config-write`/`config-patch` over `shell` for config changes. Prefer `sc
 - **`mod_logger.py` mentions** — footers use `<@{id}>` format (renders as clickable, no ping). `_send()` always passes `allowed_mentions=discord.AllowedMentions.none()`.
 - **Hot-reload listener stacking** — `reload_module()` in `Embot.py` tracks and removes `bot.listen()` handlers before re-running `setup()`. Automatically handled for all modules.
 - **`AGENTS.md` does not trigger restart** — it's in the `ignored` set in `_smart_update()` alongside `_version.py`.
+- **`mod_oversight.log_bot_register()`** — stores `text` string + `color` int instead of Embed fields. `handle_bot_log_deletion()` reconstructs LayoutView from stored text.
 - **Components V2 messages have no `.embeds`** — use recursive `getattr(c, 'content', None)` + `getattr(c, 'children', [])` to inspect text content in components.
 - **`script-exec` via bridge** — runs at module level, not in async context. Use `asyncio.ensure_future()` for async work; top-level `await` is a syntax error.
 
@@ -243,9 +244,26 @@ await existing_msg.edit(view=layout)
 await interaction.response.send_message(view=layout, ephemeral=True)
 ```
 
-Do not use `defer()` + `followup.send(view=layout)` — followup doesn't set the V2 flag.
+Do not use `defer()` + `followup.send(view=layout)` — followup doesn't set the V2 flag. Instead, send the layout directly in `response.send_message()` and use `original_response()` if you need to edit it later.
 
 Markdown renders fully in TextDisplay: `**bold**`, `## headings`, `` `code` ``, `[links](url)`, `-# small text`.
+
+### `ModContext.reply()` / `followup()`
+
+Both accept `view=` alongside `embed=` and `content=`. The `view` kwarg is passed through to the underlying discord.py send method.
+
+### `mod_oversight.send_bot_log()`
+
+Signature changed to keyword-only: `send_bot_log(ms, guild, *, text, title=None, color=0, footer=None, files_data=None, log_id=None)`. Builds a LayoutView internally. No longer accepts an `Embed` object.
+
+### Exceptions — still uses V1 `ui.View` with `content=`
+
+Three message types still use V1 Views for interactive buttons and cannot use pure LayoutView (V2 `ActionRow` buttons don't support callbacks):
+- **`mod_actions.py` ban DM** — `BanAppealView` with submit button
+- **`mod_appeals.py` appeal messages** — `AppealVoteView` with Yes/No buttons
+- **`mod_oversight.py` action review** — `ActionReviewView` with Approve/Revert/View Chat buttons
+
+These send buttons as V1 `ui.View` and put the text in `content=` (not an embed). Everything else in the bot uses pure V2 LayoutView.
 
 ## Session Start Acknowledgement
 

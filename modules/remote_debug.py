@@ -435,10 +435,11 @@ class ClaudeBridgeListener:
         from concurrent.futures import ThreadPoolExecutor
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="bridge")
 
-    def _gh_request(self, path, method="GET", body=None):
+    def _gh_api(self, path, method="GET", body=None):
         import time as _time
+        import ssl as _ssl
         bust = f"?t={int(_time.time()*1000)}" if method == "GET" else ""
-        url = f"https://api.github.com/repos/{self._repo}/contents/{path}{bust}"
+        url = f"https://api.github.com/repos/{self._repo}/{path}{bust}"
         req = urllib.request.Request(url, method=method)
         req.add_header("Authorization", f"token {self._token}")
         req.add_header("Accept", "application/vnd.github.v3+json")
@@ -446,47 +447,53 @@ class ClaudeBridgeListener:
         if body:
             req.add_header("Content-Type", "application/json")
             req.data = json.dumps(body).encode()
-        import ssl as _ssl
         ctx = _ssl._create_unverified_context()
-        with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+        with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
             return json.loads(r.read())
 
     def _gh_get_file(self, path):
         import base64
-        data = self._gh_request(path)
+        data = self._gh_api(f"contents/{path}")
         content = json.loads(base64.b64decode(data["content"]).decode())
         return content, data["sha"]
 
-    def _gh_put_file(self, path, content, sha, message):
+    def _gh_force_push(self, files: dict, message: str):
+        """Write all files in one commit and force-update HEAD, keeping repo at constant commit count."""
         import base64
-        if isinstance(content, (dict, list)):
-            raw = json.dumps(content, indent=2) + "\n"
-        else:
-            raw = str(content)
-        body = {
-            "message": message,
-            "content": base64.b64encode(raw.encode()).decode(),
-        }
-        if sha:
-            body["sha"] = sha
-        self._gh_request(path, method="PUT", body=body)
 
-    def _gh_put_binary(self, path, data: bytes, sha, message):
-        import base64
-        body = {
-            "message": message,
-            "content": base64.b64encode(data).decode(),
-        }
-        if sha:
-            body["sha"] = sha
-        self._gh_request(path, method="PUT", body=body)
+        ref_data = self._gh_api("git/refs/heads/main")
+        head_sha = ref_data["object"]["sha"]
+        commit_data = self._gh_api(f"git/commits/{head_sha}")
+        base_tree_sha = commit_data["tree"]["sha"]
 
-    def _gh_get_sha(self, path):
-        try:
-            data = self._gh_request(path)
-            return data["sha"]
-        except Exception:
-            return None
+        tree_items = []
+        for fpath, content in files.items():
+            if isinstance(content, bytes):
+                blob = self._gh_api("git/blobs", method="POST", body={
+                    "content": base64.b64encode(content).decode(),
+                    "encoding": "base64",
+                })
+            else:
+                raw = json.dumps(content, indent=2) + "\n" if isinstance(content, (dict, list)) else str(content)
+                blob = self._gh_api("git/blobs", method="POST", body={
+                    "content": raw,
+                    "encoding": "utf-8",
+                })
+            tree_items.append({"path": fpath, "mode": "100644", "type": "blob", "sha": blob["sha"]})
+
+        new_tree = self._gh_api("git/trees", method="POST", body={
+            "base_tree": base_tree_sha,
+            "tree": tree_items,
+        })
+        new_commit = self._gh_api("git/commits", method="POST", body={
+            "message": message,
+            "tree": new_tree["sha"],
+            "parents": [head_sha],
+        })
+        self._gh_api("git/refs/heads/main", method="PATCH", body={
+            "sha": new_commit["sha"],
+            "force": True,
+        })
 
     async def _poll(self):
         backoff = self._interval
@@ -511,7 +518,7 @@ class ClaudeBridgeListener:
                         try:
                             import base64 as _b64
                             raw = await asyncio.get_event_loop().run_in_executor(
-                                self._executor, self._gh_request, "payload.txt"
+                                self._executor, self._gh_api, "contents/payload.txt"
                             )
                             payload = _b64.b64decode(raw["content"]).decode("utf-8")
                         except Exception as _pe:
@@ -737,16 +744,9 @@ class ClaudeBridgeListener:
     async def _write_results(self, seq, command, output, artifacts):
         def _commit():
             try:
-                # Write artifacts first, then result.json last so the client
-                # sees result.json only after all artifacts are committed and readable.
-                for path, content in artifacts.items():
-                    sha = self._gh_get_sha(path)
-                    if isinstance(content, bytes):
-                        self._gh_put_binary(path, content, sha or "", str(seq))
-                    else:
-                        self._gh_put_file(path, content, sha or "", str(seq))
-                result_sha = self._gh_get_sha("result.json")
-                self._gh_put_file("result.json", {"seq": seq, "command": command, "output": output}, result_sha or "", str(seq))
+                files = dict(artifacts)
+                files["result.json"] = {"seq": seq, "command": command, "output": output}
+                self._gh_force_push(files, str(seq))
                 return None
             except Exception as e:
                 import traceback as _tb
@@ -765,13 +765,12 @@ class ClaudeBridgeListener:
         self.bot.logger.log(MODULE_NAME, f"[bridge] Claude bridge active — polling {self._repo}")
 
     def _zero_on_start(self):
-        status_sha = self._gh_get_sha("status.json")
         version = getattr(self.bot, "version", "unknown")
-        self._gh_put_file("status.json", {
+        self._gh_force_push({"status.json": {
             "online": True,
             "version": version,
             "started_at": datetime.now().isoformat(),
-        }, status_sha or "", "online")
+        }}, "online")
 
     async def stop(self):
         if self._task:

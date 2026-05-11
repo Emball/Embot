@@ -978,6 +978,13 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
     """Send a command via Claude bridge using plain git. Fresh clone to send, pull to poll."""
     import shutil, subprocess
 
+    if command == "session-init":
+        if not args:
+            print("Error: session-init requires a GitHub token argument", file=sys.stderr)
+            sys.exit(1)
+        _cmd_session_init(args[0])
+        return
+
     repo = bridge_cfg.get("repo", "Emball/EmbotDebug")
     token = bridge_cfg.get("token", "")
     if not token:

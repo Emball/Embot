@@ -632,11 +632,25 @@ class ARCHIVEManager:
                 if msg.author != self.bot.user:
                     await msg.delete()
                     continue
+                # Components V2 messages have no .embeds — check raw component content
+                is_backfill = False
                 if msg.embeds:
                     for e in msg.embeds:
                         if e.title and "Cache Backfill" in e.title:
-                            await msg.delete()
+                            is_backfill = True
                             break
+                if not is_backfill:
+                    def _has_backfill_text(comps):
+                        for c in comps:
+                            if getattr(c, 'content', None) and "Cache Backfill" in c.content:
+                                return True
+                            if _has_backfill_text(getattr(c, 'children', []) or []):
+                                return True
+                        return False
+                    if _has_backfill_text(msg.components):
+                        is_backfill = True
+                if is_backfill:
+                    await msg.delete()
         except Exception:
             pass
 

@@ -131,22 +131,9 @@ def _star_label(count: int) -> str:
         return "⭐"
 
 def _build_layout(message: discord.Message, count: int) -> discord.ui.LayoutView:
-    items = []
-
-    # Star count + channel
-    items.append(discord.ui.Container(
-        discord.ui.TextDisplay(f"{_star_label(count)} **{count}** | {message.channel.mention}")
-    ))
-
-    # Author section with avatar + message content (neutralise mentions to avoid pings)
+    # Neutralise mentions to avoid pings
     safe_content = re.sub(r'<@[!&]?\d+>', lambda m: m.group(0).replace('<@', '<​@'), message.content or '')
     section_text = f"### {message.author.display_name}\n{safe_content}" if safe_content else f"### {message.author.display_name}"
-    items.append(discord.ui.Container(
-        discord.ui.Section(
-            discord.ui.TextDisplay(section_text),
-            accessory=discord.ui.Thumbnail(message.author.display_avatar.url)
-        )
-    ))
 
     # Image if any
     image_url = None
@@ -163,26 +150,24 @@ def _build_layout(message: discord.Message, count: int) -> discord.ui.LayoutView
                 image_url = e.thumbnail.url
                 break
 
-    if image_url:
-        items.append(discord.ui.Container(
-            discord.ui.MediaGallery(
-                discord.ui.media_gallery.MediaGalleryItem(image_url)
-            )
-        ))
-
-    # Source link (after image)
-    items.append(discord.ui.Container(
-        discord.ui.TextDisplay(f"[Jump to message]({message.jump_url})")
-    ))
-
-    # Footer
     ts = int(message.created_at.timestamp())
-    items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
-    items.append(discord.ui.TextDisplay(f"-# #{message.channel.name} • <t:{ts}>"))
+    footer_text = f"-# {_star_label(count)} **{count}** | {message.channel.mention} • <t:{ts}> | [Jump to message]({message.jump_url})"
+
+    children = [
+        discord.ui.Section(
+            discord.ui.TextDisplay(section_text),
+            accessory=discord.ui.Thumbnail(message.author.display_avatar.url)
+        ),
+    ]
+    if image_url:
+        children.append(discord.ui.MediaGallery(
+            discord.ui.media_gallery.MediaGalleryItem(image_url)
+        ))
+    children.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+    children.append(discord.ui.TextDisplay(footer_text))
 
     view = discord.ui.LayoutView(timeout=None)
-    for item in items:
-        view.add_item(item)
+    view.add_item(discord.ui.Container(*children))
     return view
 
 def _count_reactions(message: discord.Message, emoji: str) -> int:

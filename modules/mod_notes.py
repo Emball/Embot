@@ -14,19 +14,71 @@ DEFAULTS = {
     "sections": [
         {
             "title": "Moderation Commands",
-            "content": "**Warn a member**\n`/warn [member] [reason]`\n\n**Timeout a member**\n`/timeout [member] [duration] [reason]`\n\n**Mute a member**\n`/mute [member] [duration] [reason]`\n\n**Kick a member**\n`/kick [member] [reason]`\n\n**Ban a member**\n`/ban [member] [reason] [delete_days]`\n\n**Softban** *(ban + immediate unban to purge messages)*\n`/softban [member] [reason]`\n\n**Ban multiple members at once**\n`/multiban [user_ids] [reason]`\n\n**Unban a member**\n`/unban [user_id] [reason]`\n\n**View warnings for a member**\n`/warnings [member]`\n\n**Purge messages**\n`/purge [count]`\n\n**Lock a channel**\n`/lock [channel] [reason]`\n\n**Unlock a channel**\n`/unlock [channel]`\n\n**Set slowmode**\n`/slowmode [seconds]`"
+            "content": "**Warn a member**
+`/warn [member] [reason]`
+
+**Timeout a member**
+`/timeout [member] [duration] [reason]`
+
+**Mute a member**
+`/mute [member] [duration] [reason]`
+
+**Kick a member**
+`/kick [member] [reason]`
+
+**Ban a member**
+`/ban [member] [reason] [delete_days]`
+
+**Softban** *(ban + immediate unban to purge messages)*
+`/softban [member] [reason]`
+
+**Ban multiple members at once**
+`/multiban [user_ids] [reason]`
+
+**Unban a member**
+`/unban [user_id] [reason]`
+
+**View or clear warnings**
+`/warnings [member]`
+`/clearwarnings [member]`
+
+**Purge messages**
+`/purge [count]`
+
+**Lock / unlock a channel**
+`/lock [channel] [reason]`
+`/unlock [channel]`
+
+**Set slowmode**
+`/slowmode [seconds]`"
         },
         {
             "title": "Owner Commands",
-            "content": "**Clear all warnings for a member**\n`/clearwarnings [member]`\n\n**View or toggle logging settings**\n`/logconfig`\n\n**Set moderation log channel**\n`/setbotlogs [channel]`\n\n**Set join/leave log channel**\n`/setjoinlogs [channel]`\n\n**Update server rules** *(reloads from mod.json)*\n`/updaterules`\n\n**Federation tools**\n`/fedcheck [user]` — check suspicion score\n`/fedflag [user] [reason]` — manually flag\n`/fedclear [user]` — clear flag\n`/fedscan` — scan all members\n`/fedinvites` — audit invite sources"
+            "content": "**Logging**
+`/logconfig` — view or toggle log settings
+`/setbotlogs [channel]` — set mod log channel
+`/setjoinlogs [channel]` — set join/leave log channel
+
+**Server**
+`/updaterules` — reload rules from mod.json
+
+**Federation tools**
+`/fedcheck [user]` — check suspicion score
+`/fedflag [user] [reason]` — manually flag
+`/fedclear [user]` — clear flag
+`/fedscan` — scan all members
+`/fedinvites` — audit invite sources"
         },
         {
             "title": "Useful Info",
-            "content": "**Report command** *(available to all members)*\n`/report [message link] [reason]` — sends to mod-chat\n\n**Appeal process** — banned members receive a DM with appeal instructions automatically.\n\n**Strike thresholds** — configured in `mod.json`. Warnings trigger auto-actions at defined strike counts."
+            "content": "**Member reports** go to mod-chat automatically via `/report [message link] [reason]`.
+
+**Appeals** — banned members receive a DM with appeal instructions automatically.
+
+**Strike thresholds** — configured in `mod.json`. Warnings trigger auto-actions at defined strike counts."
         }
     ]
 }
-
 
 def _load_config() -> dict:
     if CONFIG_PATH.exists():
@@ -42,18 +94,27 @@ def _load_config() -> dict:
     return dict(DEFAULTS)
 
 
-def _load_state() -> dict:
+def _load_state(guild_id: int) -> dict:
     if STATE_PATH.exists():
         try:
             with open(STATE_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+            return data.get(str(guild_id), {})
         except Exception:
             pass
     return {}
 
 
-def _save_state(state: dict):
-    atomic_json_write(STATE_PATH, state)
+def _save_state(guild_id: int, state: dict):
+    all_states = {}
+    if STATE_PATH.exists():
+        try:
+            with open(STATE_PATH, "r", encoding="utf-8") as f:
+                all_states = json.load(f)
+        except Exception:
+            pass
+    all_states[str(guild_id)] = state
+    atomic_json_write(STATE_PATH, all_states)
 
 
 def _hash_config(cfg: dict) -> str:
@@ -63,18 +124,44 @@ def _hash_config(cfg: dict) -> str:
 
 
 def _build_layout(cfg: dict) -> discord.ui.LayoutView:
+    """Build a Components V2 LayoutView from config sections.
+
+    Each section becomes:
+      - A Container with accent_color (first section only gets the color border)
+      - A ## heading (section title) via TextDisplay
+      - The section content via TextDisplay
+      - A Separator between sections
+    """
+    color = cfg.get("color", DEFAULTS["color"])
     sections = cfg.get("sections", [])
-    items: list = []
+    footer = cfg.get("footer", "")
+
+    items: list[discord.ui.Item] = []
 
     for i, section in enumerate(sections):
         title   = section.get("title", "")
         content = section.get("content", "")
-        text = f"## {title}\n{content}" if title and title.strip() else content
 
-        items.append(discord.ui.Container(discord.ui.TextDisplay(text)))
+        # Build the text for this section:
+        # - zero-width-space titles are spacer sections (no heading, just content)
+        # - normal titles get a ## heading
+        if title and title.strip() and title.strip() != "\u200b":
+            text = f"## {title}\n{content}"
+        else:
+            text = content
 
+        container = discord.ui.Container(
+            discord.ui.TextDisplay(text),
+        )
+        items.append(container)
+
+        # Separator between sections (not after the last one)
         if i < len(sections) - 1:
             items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+    if footer:
+        items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        items.append(discord.ui.TextDisplay(f"-# {footer}"))
 
     view = discord.ui.LayoutView(timeout=None)
     for item in items:
@@ -84,7 +171,7 @@ def _build_layout(cfg: dict) -> discord.ui.LayoutView:
 
 async def _sync(bot, guild: discord.Guild, *, force: bool = False) -> bool:
     cfg          = _load_config()
-    state        = _load_state()
+    state        = _load_state(guild.id)
     current_hash = _hash_config(cfg)
 
     channel = discord.utils.get(guild.text_channels, name=cfg["channel_name"])
@@ -95,6 +182,7 @@ async def _sync(bot, guild: discord.Guild, *, force: bool = False) -> bool:
     msg_id      = state.get("message_id")
     posted_hash = state.get("config_hash")
 
+    # Check if the existing message is still alive
     existing_msg = None
     if msg_id:
         try:
@@ -105,7 +193,7 @@ async def _sync(bot, guild: discord.Guild, *, force: bool = False) -> bool:
             bot.logger.log(MODULE_NAME, f"Could not fetch mod notes message: {e}", "WARNING")
 
     if existing_msg and not force and current_hash == posted_hash:
-        return False
+        return False  # up to date, nothing to do
 
     layout = _build_layout(cfg)
 
@@ -113,12 +201,14 @@ async def _sync(bot, guild: discord.Guild, *, force: bool = False) -> bool:
         try:
             await existing_msg.edit(view=layout)
             state["config_hash"] = current_hash
-            _save_state(state)
+            _save_state(guild.id, state)
             bot.logger.log(MODULE_NAME, "Mod notes message updated")
             return True
         except Exception as e:
             bot.logger.log(MODULE_NAME, f"Failed to edit mod notes message: {e} — reposting", "WARNING")
+            # fall through to repost
 
+    # Clear any stale bot messages in the channel then post fresh
     try:
         async for msg in channel.history(limit=50):
             if msg.author == guild.me:
@@ -130,7 +220,7 @@ async def _sync(bot, guild: discord.Guild, *, force: bool = False) -> bool:
         new_msg = await channel.send(view=layout)
         state["message_id"]  = new_msg.id
         state["config_hash"] = current_hash
-        _save_state(state)
+        _save_state(guild.id, state)
         bot.logger.log(MODULE_NAME, f"Mod notes message posted (id {new_msg.id})")
         return True
     except Exception as e:
@@ -138,48 +228,51 @@ async def _sync(bot, guild: discord.Guild, *, force: bool = False) -> bool:
         return False
 
 
-async def _watch_loop(bot):
+async def _watcher(bot):
+    """Single loop: checks config hash every 15s, verifies message exists every 5min."""
     await bot.wait_until_ready()
-    last_hash = _load_state().get("config_hash")
+    # Seed last_hash from whichever guild has a saved state
+    last_hash = None
+    for guild in bot.guilds:
+        h = _load_state(guild.id).get("config_hash")
+        if h:
+            last_hash = h
+            break
+    tick = 0
     while not bot.is_closed():
         await asyncio.sleep(15)
+        tick += 1
         try:
             cfg          = _load_config()
             current_hash = _hash_config(cfg)
-            state        = _load_state()
-            msg_id       = state.get("message_id")
+            config_changed = current_hash != last_hash
 
-            if current_hash != last_hash or not msg_id:
-                if current_hash != last_hash:
-                    bot.logger.log(MODULE_NAME, "Config change detected — syncing")
+            if config_changed:
+                bot.logger.log(MODULE_NAME, "Config change detected — syncing")
+
+            # Every 20 ticks (~5 min) do a full verify even if hash unchanged
+            full_verify = (tick % 20 == 0)
+
+            if config_changed or full_verify:
                 for guild in bot.guilds:
-                    await _sync(bot, guild, force=(current_hash != last_hash))
-                last_hash = current_hash
+                    msg_id = _load_state(guild.id).get("message_id")
+                    if config_changed or full_verify or not msg_id:
+                        await _sync(bot, guild, force=config_changed)
+                if config_changed:
+                    last_hash = current_hash
         except Exception as e:
             bot.logger.log(MODULE_NAME, f"Watcher error: {e}", "WARNING")
 
 
-async def _periodic_verify(bot):
-    """Every 5 minutes, confirm the message still exists even if config hasn't changed."""
-    await bot.wait_until_ready()
-    while not bot.is_closed():
-        await asyncio.sleep(300)
-        try:
-            for guild in bot.guilds:
-                await _sync(bot, guild)
-        except Exception as e:
-            bot.logger.log(MODULE_NAME, f"Periodic verify error: {e}", "WARNING")
-
-
 def setup(bot):
-    _load_config()
+    _load_config()  # ensure config exists on disk
 
     if bot.is_ready():
+        # Module loaded after on_ready already fired — run directly, skip listener
         async def _late_start():
             for guild in bot.guilds:
                 await _sync(bot, guild)
-            asyncio.create_task(_watch_loop(bot))
-            asyncio.create_task(_periodic_verify(bot))
+            asyncio.create_task(_watcher(bot))
             bot.logger.log(MODULE_NAME, "Mod notes module ready (late start)")
         asyncio.ensure_future(_late_start())
     else:
@@ -187,8 +280,7 @@ def setup(bot):
         async def _mod_notes_on_ready():
             for guild in bot.guilds:
                 await _sync(bot, guild)
-            asyncio.create_task(_watch_loop(bot))
-            asyncio.create_task(_periodic_verify(bot))
+            asyncio.create_task(_watcher(bot))
             bot.logger.log(MODULE_NAME, "Mod notes module ready")
 
     bot.logger.log(MODULE_NAME, "Mod notes module loaded")

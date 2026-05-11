@@ -2,7 +2,7 @@ import asyncio
 import discord
 import hashlib
 import json
-from _utils import script_dir, atomic_json_write, _now
+from _utils import script_dir, atomic_json_write
 
 MODULE_NAME = "INFO"
 
@@ -44,18 +44,27 @@ def _load_config() -> dict:
     return dict(DEFAULTS)
 
 
-def _load_state() -> dict:
+def _load_state(guild_id: int) -> dict:
     if STATE_PATH.exists():
         try:
             with open(STATE_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+            return data.get(str(guild_id), {})
         except Exception:
             pass
     return {}
 
 
-def _save_state(state: dict):
-    atomic_json_write(STATE_PATH, state)
+def _save_state(guild_id: int, state: dict):
+    all_states = {}
+    if STATE_PATH.exists():
+        try:
+            with open(STATE_PATH, "r", encoding="utf-8") as f:
+                all_states = json.load(f)
+        except Exception:
+            pass
+    all_states[str(guild_id)] = state
+    atomic_json_write(STATE_PATH, all_states)
 
 
 def _hash_config(cfg: dict) -> str:
@@ -112,7 +121,7 @@ def _build_layout(cfg: dict) -> discord.ui.LayoutView:
 
 async def _sync(bot, guild: discord.Guild, *, force: bool = False) -> bool:
     cfg          = _load_config()
-    state        = _load_state()
+    state        = _load_state(guild.id)
     current_hash = _hash_config(cfg)
 
     channel = discord.utils.get(guild.text_channels, name=cfg["channel_name"])
@@ -142,7 +151,7 @@ async def _sync(bot, guild: discord.Guild, *, force: bool = False) -> bool:
         try:
             await existing_msg.edit(view=layout)
             state["config_hash"] = current_hash
-            _save_state(state)
+            _save_state(guild.id, state)
             bot.logger.log(MODULE_NAME, "Info message updated")
             return True
         except Exception as e:
@@ -161,7 +170,7 @@ async def _sync(bot, guild: discord.Guild, *, force: bool = False) -> bool:
         new_msg = await channel.send(view=layout)
         state["message_id"]  = new_msg.id
         state["config_hash"] = current_hash
-        _save_state(state)
+        _save_state(guild.id, state)
         bot.logger.log(MODULE_NAME, f"Info message posted (id {new_msg.id})")
         return True
     except Exception as e:
@@ -169,37 +178,40 @@ async def _sync(bot, guild: discord.Guild, *, force: bool = False) -> bool:
         return False
 
 
-async def _watch_loop(bot):
+async def _watcher(bot):
+    """Single loop: checks config hash every 15s, verifies message exists every 5min."""
     await bot.wait_until_ready()
-    last_hash = _load_state().get("config_hash")
+    # Seed last_hash from whichever guild has a saved state
+    last_hash = None
+    for guild in bot.guilds:
+        h = _load_state(guild.id).get("config_hash")
+        if h:
+            last_hash = h
+            break
+    tick = 0
     while not bot.is_closed():
         await asyncio.sleep(15)
+        tick += 1
         try:
             cfg          = _load_config()
             current_hash = _hash_config(cfg)
-            state        = _load_state()
-            msg_id       = state.get("message_id")
+            config_changed = current_hash != last_hash
 
-            if current_hash != last_hash or not msg_id:
-                if current_hash != last_hash:
-                    bot.logger.log(MODULE_NAME, "Config change detected — syncing")
+            if config_changed:
+                bot.logger.log(MODULE_NAME, "Config change detected — syncing")
+
+            # Every 20 ticks (~5 min) do a full verify even if hash unchanged
+            full_verify = (tick % 20 == 0)
+
+            if config_changed or full_verify:
                 for guild in bot.guilds:
-                    await _sync(bot, guild, force=(current_hash != last_hash))
-                last_hash = current_hash
+                    msg_id = _load_state(guild.id).get("message_id")
+                    if config_changed or full_verify or not msg_id:
+                        await _sync(bot, guild, force=config_changed)
+                if config_changed:
+                    last_hash = current_hash
         except Exception as e:
             bot.logger.log(MODULE_NAME, f"Watcher error: {e}", "WARNING")
-
-
-async def _periodic_verify(bot):
-    """Every 5 minutes, confirm the message still exists even if config hasn't changed."""
-    await bot.wait_until_ready()
-    while not bot.is_closed():
-        await asyncio.sleep(300)
-        try:
-            for guild in bot.guilds:
-                await _sync(bot, guild)
-        except Exception as e:
-            bot.logger.log(MODULE_NAME, f"Periodic verify error: {e}", "WARNING")
 
 
 def setup(bot):
@@ -210,8 +222,7 @@ def setup(bot):
         async def _late_start():
             for guild in bot.guilds:
                 await _sync(bot, guild)
-            asyncio.create_task(_watch_loop(bot))
-            asyncio.create_task(_periodic_verify(bot))
+            asyncio.create_task(_watcher(bot))
             bot.logger.log(MODULE_NAME, "Info module ready (late start)")
         asyncio.ensure_future(_late_start())
     else:
@@ -219,8 +230,7 @@ def setup(bot):
         async def _info_on_ready():
             for guild in bot.guilds:
                 await _sync(bot, guild)
-            asyncio.create_task(_watch_loop(bot))
-            asyncio.create_task(_periodic_verify(bot))
+            asyncio.create_task(_watcher(bot))
             bot.logger.log(MODULE_NAME, "Info module ready")
 
     bot.logger.log(MODULE_NAME, "Info module loaded")

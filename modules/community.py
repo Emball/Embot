@@ -1184,10 +1184,10 @@ class CommunitySystem:
         mention = member.mention if member else name
 
         body = f"## 🌟 Spotlight Friday\nThis week's featured submission is **{top['title'] or 'Untitled'}** by {mention}!\n\n**Version** • {top['version']}\n**XP Score** • {xp_total} XP\n\n**Original Post**\n{link_line}"
+        if image_url:
+            body += f"\n\n![]({image_url})"
 
         items = [discord.ui.Container(discord.ui.TextDisplay(body), accent_color=0xf1c40f)]
-        if image_url:
-            items.append(discord.ui.MediaGallery(discord.ui.MediaGalleryItem(url=image_url)))
 
         items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
         items.append(discord.ui.TextDisplay(f"-# Embot Spotlight Friday • {_now().strftime('%m/%d/%Y %-I:%M %p')}"))
@@ -1443,50 +1443,51 @@ def setup(bot):
         if not is_owner(interaction.user):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return
-        exclude = cs.db.get_config("spotlight_exclude_user_id")
-        top = cs.db.top_submission_this_week(exclude_user=exclude)
-        if not top:
-            await interaction.response.send_message(
-                "No qualifying submission this week (all scores are zero or negative).",
-                ephemeral=True
-            )
-            return
-        member = interaction.guild.get_member(top["user_id"])
-        name   = member.display_name if member else f"User {top['user_id']}"
+        await interaction.response.defer(ephemeral=True)
+        try:
+            exclude = cs.db.get_config("spotlight_exclude_user_id")
+            top = cs.db.top_submission_this_week(exclude_user=exclude)
+            if not top:
+                await interaction.followup.send("No qualifying submission this week (all scores are zero or negative).", ephemeral=True)
+                return
+            member = interaction.guild.get_member(top["user_id"])
+            name   = member.display_name if member else f"User {top['user_id']}"
 
-        image_url = None
-        if top["message_id"]:
-            ch = interaction.guild.get_channel(top["channel_id"])
-            if ch:
-                try:
-                    msg = await ch.fetch_message(top["message_id"])
-                    for att in msg.attachments:
-                        if att.content_type and att.content_type.startswith("image/"):
-                            image_url = att.url
-                            break
-                except Exception:
-                    pass
+            image_url = None
+            if top["message_id"]:
+                ch = interaction.guild.get_channel(top["channel_id"])
+                if ch:
+                    try:
+                        msg = await ch.fetch_message(top["message_id"])
+                        for att in msg.attachments:
+                            if att.content_type and att.content_type.startswith("image/"):
+                                image_url = att.url
+                                break
+                    except Exception:
+                        pass
 
-        links = json.loads(top["links"]) if top.get("links") else []
-        jump_url = f"https://discord.com/channels/{interaction.guild.id}/{top['channel_id']}/{top['message_id']}"
-        link_line = f"[Download Link]({links[0]})" if links else f"[Jump to Submission]({jump_url})"
-        mention = member.mention if member else name
-        xp_total = int(top["total_xp"])
+            links = json.loads(top["links"]) if top.get("links") else []
+            jump_url = f"https://discord.com/channels/{interaction.guild.id}/{top['channel_id']}/{top['message_id']}"
+            link_line = f"[Download Link]({links[0]})" if links else f"[Jump to Submission]({jump_url})"
+            mention = member.mention if member else name
+            xp_total = int(top["total_xp"])
 
-        body = f"## 🌟 Spotlight Friday\nThis week's featured submission is **{top['title'] or 'Untitled'}** by {mention}!\n\n**Version** • {top['version']}\n**XP Score** • {xp_total} XP\n\n**Original Post**\n{link_line}"
+            body = f"## 🌟 Spotlight Friday\nThis week's featured submission is **{top['title'] or 'Untitled'}** by {mention}!\n\n**Version** • {top['version']}\n**XP Score** • {xp_total} XP\n\n**Original Post**\n{link_line}"
+            if image_url:
+                body += f"\n\n![]({image_url})"
 
-        items = [discord.ui.Container(discord.ui.TextDisplay(body), accent_color=0xf1c40f)]
-        if image_url:
-            items.append(discord.ui.MediaGallery(discord.ui.MediaGalleryItem(url=image_url)))
+            items = [discord.ui.Container(discord.ui.TextDisplay(body), accent_color=0xf1c40f)]
+            items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+            items.append(discord.ui.TextDisplay(f"-# Embot Spotlight Friday • {_now().strftime('%m/%d/%Y %-I:%M %p')}"))
 
-        items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
-        items.append(discord.ui.TextDisplay(f"-# Embot Spotlight Friday • {_now().strftime('%m/%d/%Y %-I:%M %p')}"))
+            layout = discord.ui.LayoutView(timeout=None)
+            for item in items:
+                layout.add_item(item)
 
-        layout = discord.ui.LayoutView(timeout=None)
-        for item in items:
-            layout.add_item(item)
-
-        await interaction.response.send_message(view=layout, ephemeral=True)
+            await interaction.followup.send(view=layout, ephemeral=True)
+        except Exception as e:
+            cs.cerr("spotlight_preview error", e)
+            await interaction.followup.send(f"Error: {e}", ephemeral=True)
 
     @bot.tree.command(name="spotlight_run", description="[Owner only] Force-run Spotlight Friday now")
     async def spotlight_run(interaction: discord.Interaction):

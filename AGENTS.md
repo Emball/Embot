@@ -184,6 +184,15 @@ Don't `sleep` waiting for bridge responses — poll with `bridge ping`.
 
 Prefer `config-write`/`config-patch` over `shell` for config changes. Prefer `script-exec` over `shell` for Python snippets. Both avoid shell quote mangling.
 
+## Known Quirks
+
+- **`mod_logger.py` footers** — all `-#` footer lines must be the last line in the text string passed to `_section_with_avatar()`. The helper splits on the first `\n-#` and places everything after it outside the Section as a pinned footer.
+- **`mod_logger.py` mentions** — footers use `<@{id}>` format (renders as clickable, no ping). `_send()` always passes `allowed_mentions=discord.AllowedMentions.none()`.
+- **Hot-reload listener stacking** — `reload_module()` in `Embot.py` tracks and removes `bot.listen()` handlers before re-running `setup()`. Automatically handled for all modules.
+- **`AGENTS.md` does not trigger restart** — it's in the `ignored` set in `_smart_update()` alongside `_version.py`.
+- **Components V2 messages have no `.embeds`** — use recursive `getattr(c, 'content', None)` + `getattr(c, 'children', [])` to inspect text content in components.
+- **`script-exec` via bridge** — runs at module level, not in async context. Use `asyncio.ensure_future()` for async work; top-level `await` is a syntax error.
+
 ## Components V2 (discord.py LayoutView)
 
 Supported in discord.py 2.6+. If API details aren't covered here, use web search.

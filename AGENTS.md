@@ -230,9 +230,18 @@ await channel.send(view=layout)          # new message
 await existing_msg.edit(view=layout)     # silent in-place edit, no "edited" timestamp
 ```
 
+**Additional components** (all under `discord.ui`):
+- `Section(text, accessory=...)` — text on the left, optional `Button` or `Thumbnail` accessory on the right
+- `Thumbnail(url=...)` — small inline image, used as a `Section` accessory
+- `MediaGallery(*items)` — correct way to embed images in a layout; each item is a `MediaGalleryItem(url=...)`. Do NOT use markdown `![]()` in TextDisplay for images.
+- `ActionRow(*children)` — horizontal row of up to 5 `Button`s or 1 select menu; buttons/selects must live inside an ActionRow (or Section accessory)
+
+**Component limits:** max 40 total components per message, 4000 chars across all TextDisplays.
+
 **Important constraints:**
 - `Container` children are passed as positional args to the constructor, not via `add_item`
 - `LayoutView` items ARE added via `view.add_item(item)`
+- Do NOT mix `content=` or `embed=` with a LayoutView — Discord rejects it; all text goes in `TextDisplay`
 - Do NOT pass `color` in DEFAULTS for modules that don't use `accent_color` — `_build_layout` must not reference `DEFAULTS["color"]` if that key doesn't exist
 - DEFAULTS string values must use `\n` escapes, not literal newlines — Python 3.11 rejects unterminated string literals
 

@@ -1467,7 +1467,7 @@ def setup(bot):
             for item in items:
                 layout.add_item(item)
 
-            await interaction.response.send_message(view=layout, ephemeral=True)
+            await interaction.response.send_message(view=layout, ephemeral=True, flags=discord.MessageFlags(components_v2=True))
         except Exception as e:
             cs.cerr("spotlight_preview error", e)
             try:

@@ -229,8 +229,9 @@ def _build_layout(cfg):
 await channel.send(view=layout)          # new message
 await existing_msg.edit(view=layout)     # update
 
-# Interaction responses work the same — LayoutView sets the Components V2 flag automatically:
+# Interaction responses work the same — discord.py detects LayoutView and sets the flag automatically:
 await interaction.response.send_message(view=layout, ephemeral=True)
+# Do NOT pass flags= manually — send_message() does not accept a flags kwarg and will error
 ```
 
 **Important:** Never use `defer()` + `followup.send(view=layout)` for Components V2 — followup does not set the flag and renders as a plain message. Always use `interaction.response.send_message` directly.

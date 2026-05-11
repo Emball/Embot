@@ -1,21 +1,31 @@
 # AGENTS.md
 
-**Read this entire file before doing anything else.** If the architecture or module layout changes significantly, update this file to match before committing anything.
+**Read this entire file before doing anything else.** Update it in the same commit as any change that affects the architecture, workflow, or anything documented here.
+
+## AGENTS.md Etiquette
+
+- **One place per fact.** Duplication guarantees drift.
+- **State only, no backstory.** Document what the current state is, not why it got there or what happened in a past session.
+- **Don't document the obvious.** If it's readable from the code, it doesn't belong here.
+- **No unverified constraints.** Don't add "do NOT do X" unless it's been confirmed to actually fail.
+- **Cut before adding.** If something new makes something else redundant, remove the old one.
+- **No session discoveries as permanent rules.** A one-off observation isn't a policy.
 
 ## Code Style
 
 - Brief comments only. Good code explains itself.
 - No section headers, block comments, or reasoning inside code.
+- All modules must log their processes to the bot console. No errors silently swallowed.
 
 ## User
 
-Michael (Emball/Embis). Vibe-coder with beginner Python knowledge. However, never assume he is clueless or naive. If he raises an error or flags something, he will likely have already gone through the obvious (restarting the code, ensuring it's up to date, etc)
+Michael (Emball/Embis). Vibe-coder with beginner Python knowledge — don't assume he's clueless. If he flags an error he's already tried the obvious.
 
-## Embot Codebase Overview
+## Codebase Overview
 
-Codebase on GitHub at Emball/Embot. Discord bot for Eminem fan server (discord.py, single guild focus). The bot enforces single-guild operation and is not deployed in more than one server.
+GitHub: `Emball/Embot`. Discord bot for an Eminem fan server (discord.py, single guild).
 
-**Read the actual source files** before making changes — don't rely solely on the descriptions below. The repo is cloned locally at the start of every session; always read code from the local clone, never via the bridge (`shell`, `script-exec`, etc.) — the bridge is slow and should be reserved for interacting with the live bot runtime.
+**Always read the actual source files before making changes.** The repo is cloned locally at session start — read from there, not via the bridge.
 
 ### Top-Level
 
@@ -33,9 +43,7 @@ Codebase on GitHub at Emball/Embot. Discord bot for Eminem fan server (discord.p
 
 ### Modules
 
-Private `_*.py` files are skipped by the loader.
-
-Module order is enforced at runtime via `_MODULE_ORDER` in `Embot.py`; if you add a new module, add it to that list in the correct position. 
+Private `_*.py` files are skipped by the loader. Module load order is enforced via `_MODULE_ORDER` in `Embot.py` — add new modules there.
 
 | Module | Description |
 |---|---|
@@ -47,8 +55,8 @@ Module order is enforced at runtime via `_MODULE_ORDER` in `Embot.py`; if you ad
 | `mod_appeals.py` | Ban appeal flow — modal submission, mod voting, lifecycle management |
 | `mod_oversight.py` | Pending action review with approve/revert, daily integrity reports, embed tracking |
 | `mod_rules.py` | Syncs and displays server rules in #rules channel |
-| `mod_notes.py` | Self-maintaining mod command reference posted to the #mod-notes channel |
-| `info.py` | Self-maintaining info docs synced to #info. Polls for config changes every 15s, verifies embed every 5min |
+| `mod_notes.py` | Self-maintaining mod command reference posted to #mod-notes |
+| `info.py` | Self-maintaining info docs synced to #info. Polls config every 15s, verifies embed every 5min |
 | `mod_logger.py` | 17 Discord event types → join-logs/bot-logs |
 | `vms_core.py` | VMS core — transcription queue, commands, dispatches `vm_transcribed`. mod_core listens |
 | `vms_transcribe.py` | Whisper-based transcription, waveform generation, bulk batch processing |
@@ -67,14 +75,16 @@ Module order is enforced at runtime via `_MODULE_ORDER` in `Embot.py`; if you ad
 
 ### Config Files (`config/`)
 
-| File | Owner | Notes |
+All configs are gitignored. mod_core, starboard, youtube, and remote_debug sync their in-memory config from disk every 30 seconds. `vms.json` and `music.json` contain path configs resolved at boot — changes require a restart.
+
+| File | Owner | Keys |
 |---|---|---|
 | `embot.json` | Embot.py | Core bot config, auto-created with defaults if missing |
 | `auth.json` | Embot.py | Bot token |
 | `mod.json` | mod_core | roles, channel IDs, log toggles, strike thresholds, rules, invite labels |
-| `vms.json` | vms_core | `cache_dir` (changing triggers auto-migration) |
+| `vms.json` | vms_core | `cache_dir` |
 | `music.json` | music_archive | `eminem_root` (SMB path) |
-| `links.json` | links | name→value map |
+| `links.json` | links | name→value map (read per-call, always live) |
 | `starboard.json` | starboard | channel_id, threshold, emoji, self_star, ignore_before |
 | `youtube.json` | youtube | channel_id, announce_channel_id, poll_interval, cookies_txt |
 | `remote_debug.json` | remote_debug | server, host, port, token, allowed_ips, claude_bridge |
@@ -92,120 +102,94 @@ Module order is enforced at runtime via `_MODULE_ORDER` in `Embot.py`; if you ad
 
 ### Cross-Module Dependencies
 
-- `_messages.py` — shared state, no bot dependency, imported directly by mod_core and vms_playback
 - `mod_core.py` — provides `is_owner()` (lazy-imported by music_archive, community, links, mod_logger)
 - `mod_suspicion.py` — provides `is_flagged()` (lazy-imported by music_archive)
-- `mod_core.setup()` — central hub, creates ModerationSystem, wires all mod modules
-- `vms_core.py` dispatches `vm_transcribed`; mod_core listens — VMS has no moderation knowledge
-- Modules attach to `bot` via attributes: `bot.ARCHIVE_manager`, `bot._mod_system`, `bot._community_system`, `bot.remote_debug_server`, `bot.vms_manager`
+- `mod_actions`, `mod_appeals`, `mod_oversight` — top-level imports from `mod_core`; reloading `mod_core` alone leaves these stale. Non-issue in practice since mod_core changes always come with submodule changes and auto-update reloads all changed files together.
+- `vms_core.py` dispatches `vm_transcribed`; mod_core listens
+- `community.py` stores config in SQLite — always live
+- Modules attach to `bot` via: `bot.ARCHIVE_manager`, `bot._mod_system`, `bot._community_system`, `bot.remote_debug_server`, `bot.vms_manager`
 - `bot.logger` (ConsoleLogger) available to all modules
-- `_utils.py` used broadly across modules
-
-## Embot Coding Rules
-
-Ensure new modules added to the bot properly log their processes in the bot console.
-
-Ensure there's no avenues in a module where an error could be silently swallowed or not passed to the console.
 
 ## Versioning & Git
 
-- Version format: `MAJOR.MINOR.PATCH.MICRO`
-- Bump thresholds (lines changed):
-  - `300+` → MAJOR, `100+` → MINOR, `20+` → PATCH, `1+` → MICRO
+- Format: `MAJOR.MINOR.PATCH.MICRO`
+- Bump thresholds (lines changed): `300+` → MAJOR, `100+` → MINOR, `20+` → PATCH, `1+` → MICRO
 - Commit message = version number only.
-- Increment version, commit, and push after every edit. No permission needed. Always stage `_version.py` in the same commit as the code change — never commit code without it.
-- `_version.py` changes on every commit and is explicitly excluded from the restart trigger — it never causes a full restart on its own.
-- Keep `requirements.txt` synced. Keep `.gitignore` clean. Keep AGENTS.md current.
-- Temp/test code goes in `/temp` (gitignored).
+- Always stage `_version.py` in the same commit as the code change.
+- `_version.py` never triggers a bot restart.
+- Keep `requirements.txt` synced. Temp/test code goes in `/temp` (gitignored).
 
 ## Claude Bridge
 
-GitHub-based command queue via private `Emball/EmbotDebug` repo.
+GitHub-based command queue via private `Emball/EmbotDebug` repo. Bot polls and commits results via GitHub API; Claude side uses plain git.
 
-**How it works:** The bot side uses the GitHub API (faster) to poll and commit results. The Claude side uses plain git (clone/push) because GitHub API URLs are not whitelisted in Claude's environment.
+**Session start:** `python modules/remote_debug.py session-init <token>` → `bridge status`
+
+The GitHub token is in Claude's user preferences (`GitHub Access Token: ghp_...`) and is used for both session-init and git operations.
 
 **Result routing:**
 - Direct output (ping, status, guilds, modules, shell, update, restart, reload) → `result.json`
-- File artifacts (logs, logs-list, logs-search, config, db-query, db-download) → committed under `logs/`, `config/`, `db/`
+- File artifacts (logs, config, db) → committed under `logs/`, `config/`, `db/`
 
-**Session checklist:** `session-init` → `bridge status` → work.
-
-The GitHub token is in Claude's user preferences as `GitHub Access Token: ghp_...`. Same token is used to authenticate Git processes on Claude.
-
-Once per session: `python modules/remote_debug.py session-init ghp_...`
-
-| Command | Bridge (Claude) | LAN (Michael) | Purpose |
+| Command | Bridge | LAN | Purpose |
 |---|---|---|---|
 | `ping` | ✓ | ✓ | Test connectivity |
 | `status` | ✓ | ✓ | Bot vitals |
 | `modules` | ✓ | ✓ | Loaded modules |
 | `guilds` | — | ✓ | Guild list |
-| `logs [--tail N] [--file F] [--session N] [--search P] [--max N]` | ✓ | ✓ | Fetch logs |
+| `logs [--tail N] [--file F] [--session N] [--search P]` | ✓ | ✓ | Fetch logs |
 | `logs-list` | — | ✓ | All log files |
-| `config <name>` | ✓ | ✓ | View config file — `auth` is blocked and will return an error |
-| `config-write <name> <json>` | ✓ | — | Write a config file atomically — JSON payload routed via `payload.txt`, no mangling |
-| `config-patch <name> <json>` | ✓ | — | Atomic read-modify-write on a config file — JSON payload routed via `payload.txt`, no mangling |
+| `config <name>` | ✓ | ✓ | View config file |
+| `config-write <name> <json>` | ✓ | — | Write config atomically |
+| `config-patch <name> <json>` | ✓ | — | Atomic read-modify-write on config |
 | `db-query <name> "<SQL>"` | ✓ | ✓ | Read-only SQL query |
 | `db-download <name>` | ✓ | ✓ | Download .db to temp/ |
-| `shell <cmd>` | ✓ | ✓ | Shell command — use single quotes for inner strings (double quotes get mangled by the bridge shell) |
-| `script-exec <python>` | ✓ | — | Run a Python script on the bot — payload routed via `payload.txt` in EmbotDebug repo, no shell mangling |
-| `reload <module>` | ✓ | — | Hot-reload a single module without restarting |
-| `update` | ✓ | ✓ | Smart update: reloads only changed modules if possible, full restart only if core files changed |
-| `restart` | ✓ | ✓ | Restart bot |
-| `session-init <token>` | ✓ | — | Store GitHub token (once per session) |
+| `shell <cmd>` | ✓ | ✓ | Shell command — inner strings use single quotes |
+| `script-exec <python>` | ✓ | — | Run Python on the bot |
+| `reload <module>` | ✓ | — | Hot-reload a single module |
+| `update` | ✓ | ✓ | Smart update — reloads changed modules or full restart if core files changed |
+| `restart` | ✓ | ✓ | Full restart |
+| `session-init <token>` | ✓ | — | Store GitHub token (also works as `bridge session-init <token>`) |
 
 Bridge: `python modules/remote_debug.py bridge <command> [args...]`
 LAN: `uv run python modules/remote_debug.py <command> [args...]`
 
-`restart` waits smartly for the bot to come back online. `update` only waits if a restart was triggered; if it hot-reloaded modules it returns immediately.
-
-**EmbotDebug history:** The bot force-pushes on every result commit, so EmbotDebug intentionally has a shallow/rewritten history. This is expected — don't try to recover or preserve old commits there. The only files that should ever be in EmbotDebug are: `cmd.json`, `result.json`, `status.json`, `payload.txt`, and transient artifacts under `logs/`, `config/`, `db/` written by bridge commands. Never commit anything else there. `config auth` is blocked at the bridge level.
+EmbotDebug has intentionally rewritten history (bot force-pushes on every result). Only valid files: `cmd.json`, `result.json`, `status.json`, `payload.txt`, and artifacts under `logs/`, `config/`, `db/`.
 
 ## Debugging
 
-**Update hierarchy — three tiers, use the lowest one that fits:**
+**Update hierarchy — use the lowest tier that fits:**
 
-1. **Auto-update (default, no action needed)** — the bot polls git every ~1 minute after every push. If only module files changed, it hot-reloads exactly those modules in place, no restart, no disruption. This handles the normal coding workflow automatically. `_version.py` never triggers a restart on its own.
-2. **`bridge update` (trigger immediately)** — runs the same smart diff logic right now instead of waiting the poll interval. Use when you want the bot to pick up a push immediately. Only causes a full restart if `Embot.py` or other non-module files in git changed; module-only changes hot-reload as usual. Note: config files (`config/*.json`) are gitignored so the auto-update system never sees them — config changes take effect on the next module reload or restart, not automatically (exception: `info.py` polls its config every 15s and is live).
-3. **`bridge reload <module>` (manual override)** — directly hot-reloads a single named module right now, bypassing git entirely. Use when iterating fast on one module mid-session and you don't want to go through a commit/push/pull cycle. The module must already be committed if you want the change to survive a future pull. Note: `mod_actions`, `mod_appeals`, and `mod_oversight` have top-level imports from `mod_core` — manually reloading `mod_core` alone would leave those three holding stale references. In practice this never matters since any `mod_core` change will have accompanying submodule changes, so auto-update reloads them all together.
+1. **Auto-update (default)** — bot polls git every ~1 min. Module-only changes hot-reload in place; full restart only if `Embot.py` or other non-module tracked files changed. `_version.py` never triggers a restart.
+2. **`bridge update`** — triggers the same logic immediately instead of waiting the poll interval.
+3. **`bridge reload <module>`** — hot-reloads a single module right now, bypassing git. Use when iterating fast on one module without a commit/push/pull cycle.
 
-Use `bridge restart` only when a full restart is explicitly needed. Auto-update is a reliable fallback if the server is unreachable.
+`bridge restart` — only when a full restart is explicitly needed.
 
-Testing individual files is recommended, but do not try to run a Embot.py session locally. How the live bot responds to the latest code is the ideal source of truth on whether or not it's truly clean.
+**Don't run Embot.py locally.** The live bot is the source of truth.
 
-Exec is useful for debugging when you need to do something in the live bot root that remote_debug doesn't satisfy. Try to avoid modifying the live bot files though, as it can create uncommitted changes that block `git pull --ff-only`. Code edits go through git: edit locally → commit → push → server pulls.
+**Logs first.** Before drawing conclusions about a failure, pull a large chunk of the log.
 
-In shell, double quotes inside double quotes get mangled. Always use single quotes: `bridge shell "uv run python -c 'code here'"`
+Log workflow:
+1. `date` in bash → cross-reference against log timestamps to isolate the current session
+2. `bridge logs --tail 500` (or `--tail 1000`) — read raw output
+3. `--search` only once you know what you're looking for
 
-The raw, live bot log is a great source of truth. Check it first every time if something fails. The outputs are generally very verbose.
+Don't `sleep` waiting for bridge responses — poll with `bridge ping`.
 
-Before drawing any conclusions about why something broke, fetch a large chunk of the log. Searching for specific strings is useful but can miss context.
-
-Log Workflow:
-1. Run `date` in the bash tool to get current UTC time, then cross-reference against log timestamps to identify the current session and ignore stale entries
-2. `logs --tail 500` (or `--tail 1000` for harder problems) — read the raw output
-3. Only use `--search` once you know what you're looking for
-4. If the log doesn't show the error, go wider or pull the entire log file if necessary
-
-If that fails to identify the issue, you can expand to other avenues.
-
-If facing response issues, never use `sleep` to wait for a response. Poll with `bridge ping` instead, and until it responds.
-
-Use `config-write` instead of `shell` for writing configs/data. Use `script-exec` instead of `shell` for Python snippets. Both route their payload through `payload.txt` in the EmbotDebug repo — no shell mangling at any layer, regardless of quotes, newlines, or special characters. Pass payloads directly as the final argument; no subprocess workaround needed.
+Prefer `config-write`/`config-patch` over `shell` for config changes. Prefer `script-exec` over `shell` for Python snippets. Both avoid shell quote mangling.
 
 ## Components V2 (discord.py LayoutView)
 
-As of 2026, Components V2 is properly supported in discord.py 2.6+. Signatures below are sourced directly from the installed library via `inspect` — treat them as ground truth.
+Supported in discord.py 2.6+. If API details aren't covered here, use web search.
 
-If other API details aren't covered here or you encounter errors, use your search tool.
-
-**All components are top-level only** — every component can only be used directly on `LayoutView` (or inside `Container`/`Section` where noted). They are NOT nestable arbitrarily.
+Components are not arbitrarily nestable — each has a fixed valid parent.
 
 ### Signatures
 
 ```
 LayoutView(*, timeout=None)
-Container(*children, accent_colour=None, accent_color=None, spoiler=False, id=None)
+Container(*children, accent_color=None, spoiler=False, id=None)
 TextDisplay(content, *, id=None)
 Separator(*, visible=True, spacing=SeparatorSpacing.small, id=None)
 Section(*children, accessory, id=None)
@@ -220,61 +204,35 @@ Button(*, style=ButtonStyle.secondary, label=None, disabled=False, custom_id=Non
 `SeparatorSpacing`: `small=1`, `large=2`
 `ButtonStyle`: `primary=1`, `secondary=2`, `success=3`, `danger=4`, `link=5`, `premium=6`
 
-### What goes where
+### Layout rules
 
-- `LayoutView` — add items via `view.add_item(item)`
-- `Container(*children)` — children passed as positional args to constructor. Can contain: `ActionRow`, `TextDisplay`, `Section`, `MediaGallery`, `File`, `Separator`
-- `Section(*children, accessory)` — children are `TextDisplay` items or strings (up to 3); `accessory` is required, must be `Button` or `Thumbnail`
-- `MediaGallery(*items)` — up to 10 `MediaGalleryItem`s; `media` is positional URL or `attachment://filename`
-- `File(media)` — `media` is `attachment://filename`; pass actual `discord.File` objects in `files=` on the send call
-- `Thumbnail(media)` — `media` is positional URL or `attachment://filename`; Section accessory only
-- `ActionRow(*children)` — up to 5 `Button`s or 1 select menu
-
-**Important:** `MediaGalleryItem` is NOT re-exported to `discord.ui` — always use `discord.ui.media_gallery.MediaGalleryItem`.
+- `LayoutView` — `view.add_item(item)`
+- `Container(*children)` — accepts `ActionRow`, `TextDisplay`, `Section`, `MediaGallery`, `File`, `Separator`
+- `Section(*children, accessory)` — up to 3 `TextDisplay` children; accessory must be `Button` or `Thumbnail`
+- `MediaGallery(*items)` — up to 10 `MediaGalleryItem`s
+- `MediaGalleryItem` is not re-exported to `discord.ui` — import from `discord.ui.media_gallery`
+- `ActionRow` — up to 5 Buttons or 1 select menu
 
 ### Constraints
 
-- `accent_color` on `Container` works in most cases but has been observed to silently cause Discord to downgrade the message to v1 rendering in some conditions. If a Container suddenly renders as a plain embed, try removing `accent_color` first.
-- Do NOT mix `content=` or `embed=` with a LayoutView — Discord rejects it; all text goes in `TextDisplay`
-- Do NOT use markdown `![]()` in TextDisplay for images — use `MediaGallery` or `File`
-- Component limit: max 40 total components per message, 4000 chars across all TextDisplays
-- DEFAULTS string values must use `\n` escapes, not literal newlines — Python 3.11 rejects unterminated string literals
+- Do not mix `content=` or `embed=` with a LayoutView
+- Do not use `![]()` markdown in TextDisplay for images — use `MediaGallery` or `File`
+- Max 40 components per message, 4000 chars across all TextDisplays
+- String values in defaults must use `\n` escapes, not literal newlines
 
-### Sending/editing
+### Sending
 
 ```python
-await channel.send(view=layout)             # new message
-await channel.send(view=layout, files=[...])  # with file attachments
-await existing_msg.edit(view=layout)        # update
-
-# discord.py sets the IS_COMPONENTS_V2 flag automatically — do NOT pass flags= manually
+await channel.send(view=layout)
+await channel.send(view=layout, files=[...])
+await existing_msg.edit(view=layout)
 await interaction.response.send_message(view=layout, ephemeral=True)
 ```
 
-**Never** use `defer()` + `followup.send(view=layout)` — followup doesn't set the flag and renders as a plain message. Always use `interaction.response.send_message` directly.
+Do not use `defer()` + `followup.send(view=layout)` — followup doesn't set the V2 flag.
 
-**Markdown in TextDisplay** renders fully: `**bold**`, `## headings`, `` `code` ``, `[links](url)`, `-# small text` (for footers).
-
-### Standard pattern used in this codebase
-
-```python
-def _build_layout(cfg):
-    items = []
-    for i, section in enumerate(cfg["sections"]):
-        title, content = section["title"], section["content"]
-        text = f"## {title}\n{content}" if title.strip() else content
-        items.append(discord.ui.Container(discord.ui.TextDisplay(text)))
-        if i < len(cfg["sections"]) - 1:
-            items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
-    if cfg.get("footer"):
-        items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
-        items.append(discord.ui.TextDisplay(f"-# {cfg['footer']}"))
-    view = discord.ui.LayoutView(timeout=None)
-    for item in items:
-        view.add_item(item)
-    return view
-```
+Markdown renders fully in TextDisplay: `**bold**`, `## headings`, `` `code` ``, `[links](url)`, `-# small text`.
 
 ## Session Start Acknowledgement
 
-After reading this file, respond with: "I've read AGENTs.md! [quick summary of your understanding of the workflows and codebase]. What are we working on today, Michael?"
+After reading this file, respond with: "I've read AGENTS.md! [quick summary of your understanding of the workflows and codebase]. What are we working on today, Michael?"

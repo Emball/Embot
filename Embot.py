@@ -412,7 +412,7 @@ async def _auto_update_loop(bot):
 
 @bot.tree.command(name="update", description="[Owner only] Pull latest changes from git and restart")
 async def update_cmd(interaction: discord.Interaction):
-    if not interaction.guild or interaction.user.id != interaction.guild.owner_id:
+    if not _is_guild_owner(interaction):
         await interaction.response.send_message("Owner only.", ephemeral=True)
         return
     await interaction.response.send_message("Checking for updates...", ephemeral=True)
@@ -428,7 +428,7 @@ async def update_cmd(interaction: discord.Interaction):
 
 @bot.command(name="update")
 async def prefix_update(ctx):
-    if ctx.author.id != ctx.guild.owner_id:
+    if not ctx.guild or ctx.guild.id != bot.home_guild_id or ctx.author.id != ctx.guild.owner_id:
         return await ctx.message.delete()
     msg = await ctx.send("Checking for updates...")
     if not _ensure_git_for_update(bot, bot.logger):
@@ -444,6 +444,8 @@ async def prefix_update(ctx):
         await msg.delete(delay=8)
 
 def _is_guild_owner(interaction: discord.Interaction) -> bool:
+    if not interaction.guild or interaction.guild.id != bot.home_guild_id:
+        return False
     return interaction.user.id == interaction.guild.owner_id
 
 async def _deny_owner(interaction: discord.Interaction):
@@ -1057,6 +1059,17 @@ def handle_signal(signum, frame):
     loop.create_task(shutdown_bot(signame))
 
 def _register_events():
+    @bot.event
+    async def on_ready():
+        for guild in list(bot.guilds):
+            if guild.id != bot.home_guild_id:
+                bot.logger.log("MAIN", f"Already in unauthorized guild '{guild.name}' ({guild.id}) — leaving.", "WARNING")
+                try:
+                    await guild.leave()
+                    bot.logger.log("MAIN", f"Left unauthorized guild {guild.id}.")
+                except Exception as e:
+                    bot.logger.error("MAIN", f"Failed to leave unauthorized guild {guild.id}", e)
+
     @bot.event
     async def on_guild_join(guild: discord.Guild):
         if guild.id != bot.home_guild_id:

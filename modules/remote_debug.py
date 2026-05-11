@@ -663,13 +663,15 @@ class ClaudeBridgeListener:
     async def _write_results(self, seq, command, output, artifacts):
         def _commit():
             try:
-                result_sha = self._gh_get_sha("result.json")
+                # Write artifacts first, then result.json last so the client
+                # sees result.json only after all artifacts are committed and readable.
                 for path, content in artifacts.items():
                     sha = self._gh_get_sha(path)
                     if isinstance(content, bytes):
                         self._gh_put_binary(path, content, sha or "", str(seq))
                     else:
                         self._gh_put_file(path, content, sha or "", str(seq))
+                result_sha = self._gh_get_sha("result.json")
                 self._gh_put_file("result.json", {"seq": seq, "command": command, "output": output}, result_sha or "", str(seq))
                 return None
             except Exception as e:
@@ -982,7 +984,7 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
                 print("[bridge] timed out waiting for bot restart", file=sys.stderr)
                 sys.exit(1)
         else:
-            time.sleep(1)
+            time.sleep(3)
 
         # poll using fast pull on the same clone — no stale state since we just pushed clean
         deadline = time.time() + timeout
@@ -1021,7 +1023,7 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
                 if error:
                     print(f"Error: {error}", file=sys.stderr)
                 return
-            time.sleep(1 if (deadline - time.time()) > (timeout - 10) else 2)
+            time.sleep(1)
         sys.exit(1)
 
     finally:

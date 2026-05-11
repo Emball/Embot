@@ -47,7 +47,7 @@ Module order is enforced at runtime via `_MODULE_ORDER` in `Embot.py`; if you ad
 | `mod_appeals.py` | Ban appeal flow — modal submission, mod voting, lifecycle management |
 | `mod_oversight.py` | Pending action review with approve/revert, daily integrity reports, embed tracking |
 | `mod_rules.py` | Syncs and displays server rules |
-| `mod_notes.py` | No `color` key in DEFAULTS. |
+| `mod_notes.py` | Self-maintaining mod command reference posted to the mod-notes channel |
 | `info.py` | Auto-reposts if deleted, polls for config changes every 15s, verifies embed exists every 5min |
 | `mod_logger.py` | 17 Discord event types → join-logs/bot-logs |
 | `vms_core.py` | VMS core — transcription queue, commands, dispatches `vm_transcribed`. mod_core listens; VMS has no moderation knowledge |

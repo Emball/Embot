@@ -93,7 +93,6 @@ def _build_layout(cfg: dict) -> discord.ui.LayoutView:
 
         container = discord.ui.Container(
             discord.ui.TextDisplay(text),
-            accent_color=color,
         )
         items.append(container)
 

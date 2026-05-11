@@ -414,8 +414,9 @@ async def _smart_update(bot, caller="UPDATE") -> dict:
 
     bot.version = load_version()
 
+    ignored = {'_version.py', 'AGENTS.md'}
     needs_restart = any(
-        f != '_version.py' and (
+        f not in ignored and (
             not f.startswith('modules/') or
             f.startswith('modules/_') or
             not f.endswith('.py')

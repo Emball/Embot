@@ -42,24 +42,24 @@ Module order is enforced at runtime via `_MODULE_ORDER` in `Embot.py`; if you ad
 | `_utils.py` | `atomic_json_write()`, `migrate_config()`, `script_dir()`, `_now()` — imported by nearly everything |
 | `_messages.py` | Message + media cache. No bot dependency; imported directly by mod_core and vms_playback |
 | `mod_core.py` | Moderation core. Provides `is_owner()`. Owns media cache TTL loop and `on_vm_transcribed` automod listener |
-| `mod_suspicion.py` | Scores members on join using signals (account age, avatar, username patterns, invite source) to detect suspicious users. Provides `is_flagged()` |
+| `mod_suspicion.py` | Scores members on join using signals to detect suspicious users. Provides `is_flagged()` |
 | `mod_actions.py` | ban, kick, mute, warn, purge, lock, slowmode |
 | `mod_appeals.py` | Ban appeal flow — modal submission, mod voting, lifecycle management |
 | `mod_oversight.py` | Pending action review with approve/revert, daily integrity reports, embed tracking |
-| `mod_rules.py` | Syncs and displays server rules |
-| `mod_notes.py` | Self-maintaining mod command reference posted to the mod-notes channel |
-| `info.py` | Auto-reposts if deleted, polls for config changes every 15s, verifies embed exists every 5min |
+| `mod_rules.py` | Syncs and displays server rules in #rules channel |
+| `mod_notes.py` | Self-maintaining mod command reference posted to the #mod-notes channel |
+| `info.py` | Self-maintaining info docs synced to #info. Polls for config changes every 15s, verifies embed every 5min |
 | `mod_logger.py` | 17 Discord event types → join-logs/bot-logs |
-| `vms_core.py` | VMS core — transcription queue, commands, dispatches `vm_transcribed`. mod_core listens; VMS has no moderation knowledge |
+| `vms_core.py` | VMS core — transcription queue, commands, dispatches `vm_transcribed`. mod_core listens |
 | `vms_transcribe.py` | Whisper-based transcription, waveform generation, bulk batch processing |
 | `vms_storage.py` | VM file conforming, archival after 150 days, deletion after 365, backfill |
 | `vms_playback.py` | Context-aware VM selection, CDN upload, play counters, ping cooldown |
-| `remote_debug.py` | HTTP debug API + Claude bridge |
-| `music_archive.py` | SMB-compatible Eminem music archive — FLAC/MP3 scan, SQLite index, CDN cache |
-| `music_player.py` | Voice playback — queue, FFmpeg, YouTube/SoundCloud, vote-skip |
-| `community.py` | Project/artwork submission tracking with emoji voting (🔥/😐/🗑️) and Spotlight Friday |
+| `remote_debug.py` | LAN HTTP debug API + Claude bridge |
+| `music_archive.py` | SMB-compatible Eminem music archive. FLAC/MP3 scan, SQLite index, in-server CDN cache |
+| `music_player.py` | VC playback for archive files and YouTube/SoundCloud |
+| `community.py` | Project/artwork submission tracking with emoji voting and Spotlight Friday |
 | `starboard.py` | Dyno-style starboard, config-driven |
-| `youtube.py` | Polls a YouTube channel for new uploads, extracts audio, announces to Discord |
+| `youtube.py` | Polls a YouTube channel for new uploads, extracts .OGG audio, announces to Discord |
 | `links.py` | `?name` quick-link triggers, JSON-backed |
 | `icons.py` | Holiday icon rotation — server icon + bot avatar |
 | `artwork.py` | Apple Music artwork fetcher |

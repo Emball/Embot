@@ -54,7 +54,7 @@ Module order is enforced at runtime via `_MODULE_ORDER` in `Embot.py`; if you ad
 | `vms_transcribe.py` | Whisper-based transcription, waveform generation, bulk batch processing |
 | `vms_storage.py` | VM file conforming, archival after 150 days, deletion after 365, backfill |
 | `vms_playback.py` | Context-aware VM selection, CDN upload, play counters, ping cooldown |
-| `remote_debug.py` | Bridge timeout 45s. Artifacts committed before `result.json`. Calls shared logic in `Embot.py` via `import __main__` |
+| `remote_debug.py` | HTTP debug API + Claude bridge |
 | `music_archive.py` | SMB-compatible Eminem music archive — FLAC/MP3 scan, SQLite index, CDN cache |
 | `music_player.py` | Voice playback — queue, FFmpeg, YouTube/SoundCloud, vote-skip |
 | `community.py` | Project/artwork submission tracking with emoji voting (🔥/😐/🗑️) and Spotlight Friday |

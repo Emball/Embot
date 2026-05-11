@@ -251,6 +251,17 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
             except discord.NotFound:
                 sb_msg = await starboard_channel.send(view=layout)
                 entry["starboard_msg_id"] = str(sb_msg.id)
+            except discord.HTTPException as e:
+                if e.code == 50035:
+                    try:
+                        old = await starboard_channel.fetch_message(int(entry["starboard_msg_id"]))
+                        await old.delete()
+                    except (discord.NotFound, discord.Forbidden):
+                        pass
+                    sb_msg = await starboard_channel.send(view=layout)
+                    entry["starboard_msg_id"] = str(sb_msg.id)
+                else:
+                    raise
             except discord.Forbidden:
                 bot.logger.log(MODULE_NAME, "Missing permissions to edit starboard message", "WARNING")
                 return

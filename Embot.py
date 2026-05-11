@@ -576,6 +576,15 @@ async def on_ready():
         mode = "PRODUCTION MODE"
         bot.logger.log("MAIN", f"Embot online as {bot.user} - {mode} - v{bot.version}")
 
+        for guild in list(bot.guilds):
+            if guild.id != bot.home_guild_id:
+                bot.logger.log("MAIN", f"Already in unauthorized guild '{guild.name}' ({guild.id}) — leaving.", "WARNING")
+                try:
+                    await guild.leave()
+                    bot.logger.log("MAIN", f"Left unauthorized guild {guild.id}.")
+                except Exception as e:
+                    bot.logger.error("MAIN", f"Failed to leave unauthorized guild {guild.id}", e)
+
         start_console_thread()
 
         bot.heartbeat_monitor = bot.loop.create_task(monitor_heartbeat())
@@ -1058,17 +1067,6 @@ def handle_signal(signum, frame):
     loop.create_task(shutdown_bot(signame))
 
 def _register_events():
-    @bot.event
-    async def on_ready():
-        for guild in list(bot.guilds):
-            if guild.id != bot.home_guild_id:
-                bot.logger.log("MAIN", f"Already in unauthorized guild '{guild.name}' ({guild.id}) — leaving.", "WARNING")
-                try:
-                    await guild.leave()
-                    bot.logger.log("MAIN", f"Left unauthorized guild {guild.id}.")
-                except Exception as e:
-                    bot.logger.error("MAIN", f"Failed to leave unauthorized guild {guild.id}", e)
-
     @bot.event
     async def on_guild_join(guild: discord.Guild):
         if guild.id != bot.home_guild_id:

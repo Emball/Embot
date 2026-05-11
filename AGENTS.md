@@ -234,7 +234,7 @@ Button(*, style=ButtonStyle.secondary, label=None, disabled=False, custom_id=Non
 
 ### Constraints
 
-- Do NOT pass `accent_colour`/`accent_color` to `Container` — silently falls back to plain embed
+- `accent_color` on `Container` works in most cases but has been observed to silently cause Discord to downgrade the message to v1 rendering in some conditions. If a Container suddenly renders as a plain embed, try removing `accent_color` first.
 - Do NOT mix `content=` or `embed=` with a LayoutView — Discord rejects it; all text goes in `TextDisplay`
 - Do NOT use markdown `![]()` in TextDisplay for images — use `MediaGallery` or `File`
 - Component limit: max 40 total components per message, 4000 chars across all TextDisplays

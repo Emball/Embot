@@ -226,13 +226,14 @@ def _build_layout(cfg):
 
 **Sending/editing:**
 ```python
-await channel.send(view=layout)          # new message — flag set automatically
-await existing_msg.edit(view=layout)     # update — flag set automatically
+await channel.send(view=layout)          # new message
+await existing_msg.edit(view=layout)     # update
 
-# Interaction responses MUST pass the flag explicitly or Discord renders it as a plain message:
-await interaction.response.send_message(view=layout, flags=discord.MessageFlags(components_v2=True))
-await interaction.response.send_message(view=layout, ephemeral=True, flags=discord.MessageFlags(components_v2=True))
+# Interaction responses work the same — LayoutView sets the Components V2 flag automatically:
+await interaction.response.send_message(view=layout, ephemeral=True)
 ```
+
+**Important:** Never use `defer()` + `followup.send(view=layout)` for Components V2 — followup does not set the flag and renders as a plain message. Always use `interaction.response.send_message` directly.
 
 **Additional components** (all under `discord.ui`):
 - `Section(text, accessory=...)` — text on the left, optional `Button` or `Thumbnail` accessory on the right

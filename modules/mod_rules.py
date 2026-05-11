@@ -109,15 +109,6 @@ class RulesManager:
 
         layout = self._build_layout(data)
 
-        if existing_msg:
-            try:
-                await existing_msg.edit(view=layout)
-                self._save_state(guild.id, existing_msg.id, current_hash)
-                self.bot.logger.log("RULES", "Rules message updated")
-                return True
-            except Exception as e:
-                self.bot.logger.log("RULES", f"Failed to edit rules message: {e}", "WARNING")
-
         # clear stale bot messages and repost
         try:
             async for msg in channel.history(limit=50):

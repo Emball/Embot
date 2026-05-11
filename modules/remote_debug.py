@@ -606,6 +606,8 @@ class ClaudeBridgeListener:
 
         elif command == "config":
             name = args[0] if args else ""
+            if name in {"auth"}:
+                return f"config '{name}' is blocked from bridge access", {}
             import __main__
             cfg_data, err = __main__.get_config_data(name)
             if err:

@@ -141,7 +141,7 @@ Once per session: `python modules/remote_debug.py session-init ghp_...`
 | `guilds` | — | ✓ | Guild list |
 | `logs [--tail N] [--file F] [--session N] [--search P] [--max N]` | ✓ | ✓ | Fetch logs |
 | `logs-list` | — | ✓ | All log files |
-| `config <name>` | ✓ | ✓ | View config file |
+| `config <name>` | ✓ | ✓ | View config file — `auth` is blocked and will return an error |
 | `config-write <name> <json>` | ✓ | — | Write a config file atomically — JSON payload routed via `payload.txt`, no mangling |
 | `config-patch <name> <json>` | ✓ | — | Atomic read-modify-write on a config file — JSON payload routed via `payload.txt`, no mangling |
 | `db-query <name> "<SQL>"` | ✓ | ✓ | Read-only SQL query |

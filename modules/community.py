@@ -1191,7 +1191,7 @@ class CommunitySystem:
 
         container_children = [discord.ui.TextDisplay(body)]
         if image_url:
-            container_children.append(discord.ui.MediaGallery(discord.ui.MediaGalleryItem(url=image_url)))
+            container_children.append(discord.ui.MediaGallery(discord.ui.media_gallery.MediaGalleryItem(url=image_url)))
 
         items = [discord.ui.Container(*container_children)]
 
@@ -1484,7 +1484,7 @@ def setup(bot):
 
             container_children = [discord.ui.TextDisplay(body)]
             if image_url:
-                container_children.append(discord.ui.MediaGallery(discord.ui.MediaGalleryItem(url=image_url)))
+                container_children.append(discord.ui.MediaGallery(discord.ui.media_gallery.MediaGalleryItem(url=image_url)))
 
             items = [discord.ui.Container(*container_children)]
             items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))

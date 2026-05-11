@@ -157,7 +157,7 @@ LAN: `uv run python modules/remote_debug.py <command> [args...]`
 
 `restart`/`update` wait smartly for the bot to come back online.
 
-**Bridge resilience:** The poll loop uses exponential backoff on GitHub API errors (2s → 60s max). If the delay exceeds the 45s client timeout, the bot logs a WARNING that the bridge is temporarily deaf. It self-recovers and logs when polling resumes. If commands go missing, check the bot log for `[bridge] poll backoff` warnings.
+**EmbotDebug history:** The bot force-pushes on every result commit, so EmbotDebug intentionally has a shallow/rewritten history. This is expected — don't try to recover or preserve old commits there. The only files that should ever be in EmbotDebug are: `cmd.json`, `result.json`, `status.json`, `payload.txt`, and transient artifacts under `logs/`, `config/`, `db/` written by bridge commands. Never commit anything else there. `config auth` is blocked at the bridge level.
 
 ## Debugging
 

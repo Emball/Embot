@@ -732,7 +732,7 @@ def get_modules_data():
                 failed.append(m.group(1))
     return {'loaded': loaded, 'failed': failed}
 
-_SENSITIVE_KEYS = {'token', 'secret', 'password', 'api_key', 'webhook', 'client_secret'}
+_SENSITIVE_KEYS = {'token', 'secret', 'password', 'api_key', 'webhook', 'client_secret', 'bot_token', 'github_token'}
 
 def _redact(obj):
     """Recursively redact sensitive keys from a config dict."""

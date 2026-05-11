@@ -338,8 +338,8 @@ def setup(bot):
             # Resolve stream URL and metadata via yt-dlp
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    'yt-dlp', '-f', 'bestaudio', '--get-url', '--get-title', '--get-duration',
-                    '--no-playlist', song_name,
+                    'yt-dlp', '-f', 'bestaudio/best', '--get-url', '--get-title', '--get-duration',
+                    '--no-playlist', '--no-warnings', song_name,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )

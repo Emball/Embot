@@ -1176,7 +1176,7 @@ class CommunitySystem:
                 except Exception:
                     pass
 
-        links = json.loads(top["links"]) if top.get("links") else []
+        links = json.loads(top["links"]) if top["links"] else []
         jump_url = f"https://discord.com/channels/{guild.id}/{top['channel_id']}/{top['message_id']}"
         link_line = f"[Download Link]({links[0]})" if links else f"[Jump to Submission]({jump_url})"
 
@@ -1466,7 +1466,7 @@ def setup(bot):
                     except Exception:
                         pass
 
-            links = json.loads(top["links"]) if top.get("links") else []
+            links = json.loads(top["links"]) if top["links"] else []
             jump_url = f"https://discord.com/channels/{interaction.guild.id}/{top['channel_id']}/{top['message_id']}"
             link_line = f"[Download Link]({links[0]})" if links else f"[Jump to Submission]({jump_url})"
             mention = member.mention if member else name

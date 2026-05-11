@@ -1,5 +1,6 @@
 
 import discord
+import re
 from discord.ext import commands, tasks
 from pathlib import Path
 from datetime import datetime, timezone
@@ -137,18 +138,14 @@ def _build_layout(message: discord.Message, count: int) -> discord.ui.LayoutView
         discord.ui.TextDisplay(f"{_star_label(count)} **{count}** | {message.channel.mention}")
     ))
 
-    # Author section with avatar + message content
-    section_text = f"### {message.author.display_name}\n" + message.content if message.content else f"### {message.author.display_name}"
+    # Author section with avatar + message content (neutralise mentions to avoid pings)
+    safe_content = re.sub(r'<@[!&]?\d+>', lambda m: m.group(0).replace('<@', '<​@'), message.content or '')
+    section_text = f"### {message.author.display_name}\n{safe_content}" if safe_content else f"### {message.author.display_name}"
     items.append(discord.ui.Container(
         discord.ui.Section(
             discord.ui.TextDisplay(section_text),
             accessory=discord.ui.Thumbnail(message.author.display_avatar.url)
         )
-    ))
-
-    # Source link
-    items.append(discord.ui.Container(
-        discord.ui.TextDisplay(f"[Jump to message]({message.jump_url})")
     ))
 
     # Image if any
@@ -172,6 +169,11 @@ def _build_layout(message: discord.Message, count: int) -> discord.ui.LayoutView
                 discord.ui.media_gallery.MediaGalleryItem(image_url)
             )
         ))
+
+    # Source link (after image)
+    items.append(discord.ui.Container(
+        discord.ui.TextDisplay(f"[Jump to message]({message.jump_url})")
+    ))
 
     # Footer
     ts = int(message.created_at.timestamp())
@@ -247,9 +249,9 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
 
             try:
                 sb_msg = await starboard_channel.fetch_message(int(entry["starboard_msg_id"]))
-                await sb_msg.edit(view=layout)
+                await sb_msg.edit(view=layout, allowed_mentions=discord.AllowedMentions.none())
             except discord.NotFound:
-                sb_msg = await starboard_channel.send(view=layout)
+                sb_msg = await starboard_channel.send(view=layout, allowed_mentions=discord.AllowedMentions.none())
                 entry["starboard_msg_id"] = str(sb_msg.id)
             except discord.HTTPException as e:
                 if e.code == 50035:
@@ -258,7 +260,7 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
                         await old.delete()
                     except (discord.NotFound, discord.Forbidden):
                         pass
-                    sb_msg = await starboard_channel.send(view=layout)
+                    sb_msg = await starboard_channel.send(view=layout, allowed_mentions=discord.AllowedMentions.none())
                     entry["starboard_msg_id"] = str(sb_msg.id)
                 else:
                     raise
@@ -283,7 +285,7 @@ async def _handle_reaction(bot: commands.Bot, payload: discord.RawReactionAction
                     pass
 
             try:
-                sb_msg = await starboard_channel.send(view=layout)
+                sb_msg = await starboard_channel.send(view=layout, allowed_mentions=discord.AllowedMentions.none())
             except discord.Forbidden:
                 bot.logger.log(MODULE_NAME, "Missing permissions to post to starboard channel", "WARNING")
                 return

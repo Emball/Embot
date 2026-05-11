@@ -1184,10 +1184,12 @@ class CommunitySystem:
         mention = member.mention if member else name
 
         body = f"## 🌟 Spotlight Friday\nThis week's featured submission is **{top['title'] or 'Untitled'}** by {mention}!\n\n**Version** • {top['version']}\n**XP Score** • {xp_total} XP\n\n**Original Post**\n{link_line}"
-        if image_url:
-            body += f"\n\n![]({image_url})"
 
-        items = [discord.ui.Container(discord.ui.TextDisplay(body))]
+        container_children = [discord.ui.TextDisplay(body)]
+        if image_url:
+            container_children.append(discord.ui.MediaGallery(discord.ui.MediaGalleryItem(url=image_url)))
+
+        items = [discord.ui.Container(*container_children)]
 
         items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
         items.append(discord.ui.TextDisplay(f"-# Embot Spotlight Friday • {_now().strftime('%m/%d/%Y %-I:%M %p')}"))

@@ -187,19 +187,68 @@ Use `config-write` instead of `shell` for writing configs/data. Use `script-exec
 
 ## Components V2 (discord.py LayoutView)
 
-As of 2026, Components V2 is properly implanted in the latest version's of Discord.py
+As of 2026, Components V2 is properly supported in discord.py 2.6+. Signatures below are sourced directly from the installed library via `inspect` — treat them as ground truth.
 
-If other API details aren't properly covered here or you encounter errors, use your search tool to search online.
+If other API details aren't covered here or you encounter errors, use your search tool.
 
-**Key classes** (all under `discord.ui`):
-- `LayoutView(timeout=None)` — top-level container, sent via `channel.send(view=layout)` or `message.edit(view=layout)`
-- `Container(*children, accent_colour=None, accent_color=None, spoiler=False)` — card-like box; **do not pass `accent_colour`/`accent_color`** — despite being in the signature, it causes the component to silently fall back to a plain embed. Leave it out.
-- `TextDisplay(content)` — renders markdown text inside a Container or directly in the layout
-- `Separator(spacing=discord.SeparatorSpacing.small)` — vertical gap between items; `SeparatorSpacing.small` or `SeparatorSpacing.large`
+**All components are top-level only** — every component can only be used directly on `LayoutView` (or inside `Container`/`Section` where noted). They are NOT nestable arbitrarily.
+
+### Signatures
+
+```
+LayoutView(*, timeout=None)
+Container(*children, accent_colour=None, accent_color=None, spoiler=False, id=None)
+TextDisplay(content, *, id=None)
+Separator(*, visible=True, spacing=SeparatorSpacing.small, id=None)
+Section(*children, accessory, id=None)
+Thumbnail(media, *, description=None, spoiler=False, id=None)
+MediaGallery(*items, id=None)
+  MediaGalleryItem(media, *, description=None, spoiler=False)   # discord.ui.media_gallery.MediaGalleryItem
+File(media, *, spoiler=False, id=None)
+ActionRow(*children, id=None)
+Button(*, style=ButtonStyle.secondary, label=None, disabled=False, custom_id=None, url=None, emoji=None, ...)
+```
+
+`SeparatorSpacing`: `small=1`, `large=2`
+`ButtonStyle`: `primary=1`, `secondary=2`, `success=3`, `danger=4`, `link=5`, `premium=6`
+
+### What goes where
+
+- `LayoutView` — add items via `view.add_item(item)`
+- `Container(*children)` — children passed as positional args to constructor. Can contain: `ActionRow`, `TextDisplay`, `Section`, `MediaGallery`, `File`, `Separator`
+- `Section(*children, accessory)` — children are `TextDisplay` items or strings (up to 3); `accessory` is required, must be `Button` or `Thumbnail`
+- `MediaGallery(*items)` — up to 10 `MediaGalleryItem`s; `media` is positional URL or `attachment://filename`
+- `File(media)` — `media` is `attachment://filename`; pass actual `discord.File` objects in `files=` on the send call
+- `Thumbnail(media)` — `media` is positional URL or `attachment://filename`; Section accessory only
+- `ActionRow(*children)` — up to 5 `Button`s or 1 select menu
+
+**Important:** `MediaGalleryItem` is NOT re-exported to `discord.ui` — always use `discord.ui.media_gallery.MediaGalleryItem`.
+
+### Constraints
+
+- Do NOT pass `accent_colour`/`accent_color` to `Container` — silently falls back to plain embed
+- Do NOT mix `content=` or `embed=` with a LayoutView — Discord rejects it; all text goes in `TextDisplay`
+- Do NOT use markdown `![]()` in TextDisplay for images — use `MediaGallery` or `File`
+- Component limit: max 40 total components per message, 4000 chars across all TextDisplays
+- DEFAULTS string values must use `\n` escapes, not literal newlines — Python 3.11 rejects unterminated string literals
+
+### Sending/editing
+
+```python
+await channel.send(view=layout)             # new message
+await channel.send(view=layout, files=[...])  # with file attachments
+await existing_msg.edit(view=layout)        # update
+
+# discord.py sets the IS_COMPONENTS_V2 flag automatically — do NOT pass flags= manually
+await interaction.response.send_message(view=layout, ephemeral=True)
+```
+
+**Never** use `defer()` + `followup.send(view=layout)` — followup doesn't set the flag and renders as a plain message. Always use `interaction.response.send_message` directly.
 
 **Markdown in TextDisplay** renders fully: `**bold**`, `## headings`, `` `code` ``, `[links](url)`, `-# small text` (for footers).
 
-**Standard pattern** used in this codebase:
+### Standard pattern used in this codebase
+
 ```python
 def _build_layout(cfg):
     items = []
@@ -217,34 +266,6 @@ def _build_layout(cfg):
         view.add_item(item)
     return view
 ```
-
-**Sending/editing:**
-```python
-await channel.send(view=layout)          # new message
-await existing_msg.edit(view=layout)     # update
-
-# Interaction responses work the same — discord.py detects LayoutView and sets the flag automatically:
-await interaction.response.send_message(view=layout, ephemeral=True)
-# Do NOT pass flags= manually — send_message() does not accept a flags kwarg and will error
-```
-
-**Important:** Never use `defer()` + `followup.send(view=layout)` for Components V2 — followup does not set the flag and renders as a plain message. Always use `interaction.response.send_message` directly.
-
-**Additional components** (all under `discord.ui`):
-- `Section(*children, accessory)` — children are `TextDisplay` items or strings; `accessory` is a `Button` or `Thumbnail` on the right. `accessory` is required.
-- `Thumbnail(media, ...)` — small inline image used as a `Section` accessory; `media` is a **positional** URL string (not `url=`)
-- `MediaGallery(*items)` — correct way to embed images in a layout; each item is `discord.ui.media_gallery.MediaGalleryItem(media)` where `media` is a **positional** URL string (not `url=`). Do NOT use markdown `![]()` in TextDisplay for images.
-- `File(media, *, spoiler=False)` — embeds an uploaded file attachment inline; `media` is `'attachment://filename'`, pass the actual `discord.File` objects in `files=` on the send call. Not re-exported to `discord.ui` directly — use `discord.ui.file.File` or import from the module.
-- `ActionRow(*children)` — horizontal row of up to 5 `Button`s or 1 select menu; buttons/selects must live inside an ActionRow (or Section accessory)
-
-**Component limits:** max 40 total components per message, 4000 chars across all TextDisplays.
-
-**Important constraints:**
-- `Container` children are passed as positional args to the constructor, not via `add_item`
-- `LayoutView` items ARE added via `view.add_item(item)`
-- Do NOT mix `content=` or `embed=` with a LayoutView — Discord rejects it; all text goes in `TextDisplay`
-- Do NOT pass `color` in DEFAULTS for modules that don't use `accent_color` — `_build_layout` must not reference `DEFAULTS["color"]` if that key doesn't exist
-- DEFAULTS string values must use `\n` escapes, not literal newlines — Python 3.11 rejects unterminated string literals
 
 ## Session Start Acknowledgement
 

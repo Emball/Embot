@@ -31,6 +31,16 @@ def _sep() -> discord.ui.Separator:
 
 
 def _section_with_avatar(text: str, avatar_url: str) -> discord.ui.Container:
+    if '\n-#' in text:
+        main, footer = text.split('\n-#', 1)
+        return discord.ui.Container(
+            discord.ui.Section(
+                _text(main),
+                accessory=discord.ui.Thumbnail(avatar_url)
+            ),
+            _sep(),
+            _text(f'-#{footer}')
+        )
     return discord.ui.Container(
         discord.ui.Section(
             _text(text),

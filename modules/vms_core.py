@@ -696,7 +696,7 @@ def setup(bot):
                         pass
                     for i, entry in enumerate(snapshot, start=2):
                         try:
-                        await entry['msg'].edit(view=_ext_status_layout(i, total))
+                            await entry['msg'].edit(view=_ext_status_layout(i, total))
                         except Exception:
                             pass
 

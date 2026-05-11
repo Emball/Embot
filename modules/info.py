@@ -142,7 +142,8 @@ async def _sync(bot, guild: discord.Guild, *, force: bool = False) -> bool:
         except Exception as e:
             bot.logger.log(MODULE_NAME, f"Could not fetch info message: {e}", "WARNING")
 
-    if existing_msg and not force and current_hash == posted_hash:
+    message_missing = bool(msg_id and existing_msg is None)
+    if not force and current_hash == posted_hash and not message_missing:
         return False  # up to date, nothing to do
 
     layout = _build_layout(cfg)

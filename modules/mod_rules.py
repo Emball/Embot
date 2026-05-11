@@ -104,7 +104,8 @@ class RulesManager:
             except Exception as e:
                 self.bot.logger.log("RULES", f"Could not fetch rules message: {e}", "WARNING")
 
-        if existing_msg and not force and current_hash == posted_hash:
+        message_missing = bool(posted_msg_id and existing_msg is None)
+        if not force and current_hash == posted_hash and not message_missing:
             return False
 
         layout = self._build_layout(data)

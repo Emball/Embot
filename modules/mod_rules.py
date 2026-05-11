@@ -64,7 +64,7 @@ class RulesManager:
         if description:
             lines.append(description)
         for rule in data.get("rules", []):
-            lines.append(f"### Rule {rule['number']} — {rule['title']}\n{rule['description']}")
+            lines.append(f"### Rule {rule['number']}: {rule['title']}\n{rule['description']}")
         text = "\n".join(lines)
         try:
             mod_path = script_dir() / "config" / "mod.json"

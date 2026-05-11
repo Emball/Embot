@@ -1,9 +1,41 @@
+import io
 import discord
 from discord import app_commands
+from discord.ui import media_gallery as _mg
 from typing import Optional
 from _utils import _now
 
 MODULE_NAME = "LOGGER"
+
+image_exts = ('.png', '.jpg', '.jpeg', '.gif', '.webp')
+audio_exts = ('.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.opus', '.mp4', '.mov', '.webm')
+
+
+def _layout(*items) -> discord.ui.LayoutView:
+    view = discord.ui.LayoutView(timeout=None)
+    for item in items:
+        view.add_item(item)
+    return view
+
+
+def _container(*children) -> discord.ui.Container:
+    return discord.ui.Container(*children)
+
+
+def _text(content: str) -> discord.ui.TextDisplay:
+    return discord.ui.TextDisplay(content)
+
+
+def _sep() -> discord.ui.Separator:
+    return discord.ui.Separator(spacing=discord.SeparatorSpacing.small)
+
+
+def _section_with_avatar(text: str, avatar_url: str) -> discord.ui.Section:
+    return discord.ui.Section(
+        _text(text),
+        accessory=discord.ui.Thumbnail(avatar_url)
+    )
+
 
 class EventLogger:
 
@@ -32,15 +64,13 @@ class EventLogger:
             self._scanner = mod_sys.scanner
         return self._scanner
 
-    async def log_to_channel(self, channel, embed, file: discord.File = None, files: list = None) -> Optional[int]:
+    async def _send(self, channel, view: discord.ui.LayoutView, files: list = None) -> Optional[int]:
         if not channel:
             return None
         try:
-            kwargs = {"embed": embed}
+            kwargs = {"view": view}
             if files:
                 kwargs["files"] = files
-            elif file:
-                kwargs["file"] = file
             msg = await channel.send(**kwargs)
             return msg.id
         except discord.Forbidden:
@@ -63,24 +93,9 @@ class EventLogger:
         if not channel:
             return
 
-        description = f"**Message sent by {message.author.mention} deleted in {message.channel.mention}**"
-        if message.content:
-            description += f"\n{message.content}"
-
-        embed = discord.Embed(
-            description=description,
-            color=0xff4500,
-            timestamp=_now()
-        )
-
-        embed.set_author(
-            name=str(message.author),
-            icon_url=message.author.display_avatar.url
-        )
-        embed.set_footer(text=f"Author: {message.author.id} | Message ID: {message.id}")
-
-        image_exts = ('.png', '.jpg', '.jpeg', '.gif', '.webp')
-        audio_exts = ('.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.opus', '.mp4', '.mov', '.webm')
+        header = f"🗑️ **Message deleted** in {message.channel.mention}\n-# {message.author} • ID: {message.author.id} • Msg: {message.id}"
+        body = message.content if message.content else "*[No text content]*"
+        main_text = f"{header}\n\n{body}"
 
         if rehosted_files:
             scanner = self._get_scanner()
@@ -91,44 +106,49 @@ class EventLogger:
                     context=f"deleted message {message.id} by {message.author}",
                 )
                 if verdict.blocked and not verdict.safe_files:
-                    embed.add_field(
-                        name="Attachment(s) Withheld",
-                        value="One or more files were blocked by MediaScanner. The server owner has been alerted.",
-                        inline=False,
+                    view = _layout(
+                        _section_with_avatar(header, message.author.display_avatar.url),
+                        _sep(),
+                        _container(_text("⚠️ **Attachment(s) Withheld** — one or more files were blocked by MediaScanner. The server owner has been alerted."))
                     )
-                    await self.log_to_channel(channel, embed)
+                    await self._send(channel, view)
                     return
                 rehosted_files = verdict.safe_files
 
-            image_files = [f for f in rehosted_files if f['filename'].lower().endswith(image_exts)]
-            other_files = [f for f in rehosted_files if not f['filename'].lower().endswith(image_exts)]
-
             discord_files = [
-                discord.File(fp=__import__('io').BytesIO(f['data']), filename=f['filename'])
+                discord.File(fp=io.BytesIO(f['data']), filename=f['filename'])
                 for f in rehosted_files
             ]
 
-            if image_files and not other_files:
-                embed.set_image(url=f"attachment://{image_files[0]['filename']}")
-                await self.log_to_channel(channel, embed, files=discord_files)
-            elif other_files:
-                has_audio = any(f['filename'].lower().endswith(audio_exts) for f in other_files)
-                label = "audio"if has_audio else "file"
-                embed.add_field(name="Attachment", value=f"*{label} hosted above*", inline=False)
-                try:
-                    await channel.send(files=discord_files)
-                    await channel.send(embed=embed)
-                except Exception as e:
-                    self.bot.logger.error(MODULE_NAME, f"Failed to send deletion log with files: {e}")
-            else:
-                await self.log_to_channel(channel, embed)
+            img_names = [f['filename'] for f in rehosted_files if f['filename'].lower().endswith(image_exts)]
+            other_names = [f['filename'] for f in rehosted_files if not f['filename'].lower().endswith(image_exts)]
+
+            items = [_section_with_avatar(main_text, message.author.display_avatar.url)]
+
+            if img_names:
+                items.append(_sep())
+                items.append(discord.ui.MediaGallery(
+                    *[_mg.MediaGalleryItem(f"attachment://{name}") for name in img_names]
+                ))
+
+            if other_names:
+                items.append(_sep())
+                for name in other_names:
+                    items.append(discord.ui.File(f"attachment://{name}"))
+
+            await self._send(channel, _layout(*items), files=discord_files)
         else:
+            items = [_section_with_avatar(main_text, message.author.display_avatar.url)]
+
             if message.attachments:
-                for att in message.attachments:
-                    if att.filename.lower().endswith(image_exts):
-                        embed.set_image(url=att.url)
-                        break
-            await self.log_to_channel(channel, embed)
+                img_atts = [a for a in message.attachments if a.filename.lower().endswith(image_exts)]
+                if img_atts:
+                    items.append(_sep())
+                    items.append(discord.ui.MediaGallery(
+                        *[_mg.MediaGalleryItem(a.url) for a in img_atts]
+                    ))
+
+            await self._send(channel, _layout(*items))
 
     async def log_message_edit(self, before, after):
         if not self.mod_cfg.get("log_message_edits"):
@@ -150,27 +170,15 @@ class EventLogger:
         if len(after_content) > 800:
             after_content = after_content[:797] + "..."
 
-        description = (
-            f"**Message sent by {after.author.mention} edited in {after.channel.mention}**\n"
-            f"**Before**\n{before_content}\n"
-            f"**After**\n{after_content}\n"
-            f"[Jump to Message]({after.jump_url})"
+        text = (
+            f"✏️ **Message edited** in {after.channel.mention} • [Jump]({after.jump_url})\n"
+            f"-# {after.author} • ID: {after.author.id} • Msg: {after.id}\n\n"
+            f"**Before**\n{before_content}\n\n"
+            f"**After**\n{after_content}"
         )
 
-        embed = discord.Embed(
-            description=description,
-            color=0x3498db,
-            timestamp=_now()
-        )
-
-        embed.set_author(
-            name=str(after.author),
-            icon_url=after.author.display_avatar.url
-        )
-
-        embed.set_footer(text=f"User ID: {after.author.id} | Message ID: {after.id}")
-
-        await self.log_to_channel(channel, embed)
+        view = _layout(_section_with_avatar(text, after.author.display_avatar.url))
+        await self._send(channel, view)
 
     async def log_bulk_message_delete(self, messages):
         if not self.mod_cfg.get("log_message_deletes"):
@@ -182,17 +190,9 @@ class EventLogger:
         if not channel:
             return
 
-        description = (
-            f"**{len(messages)} messages were deleted in {messages[0].channel.mention}**"
-        )
-
-        embed = discord.Embed(
-            description=description,
-            color=0xe74c3c,
-            timestamp=_now()
-        )
-
-        await self.log_to_channel(channel, embed)
+        text = f"🗑️ **{len(messages)} messages bulk deleted** in {messages[0].channel.mention}"
+        view = _layout(_container(_text(text)))
+        await self._send(channel, view)
 
     async def log_member_join(self, member):
         if not self.mod_cfg.get("log_member_joins"):
@@ -215,26 +215,15 @@ class EventLogger:
         if days > 0 or not age_parts:
             age_parts.append(f"{days} day{'s' if days != 1 else ''}")
 
-        account_age_str = ", ".join(age_parts)
-
-        embed = discord.Embed(
-            description=f"{member.mention} {member.name}",
-            color=0x43b581,
-            timestamp=_now()
+        text = (
+            f"✅ **Member Joined**\n"
+            f"{member.mention} {member.name}\n"
+            f"-# ID: {member.id}\n\n"
+            f"**Account Age:** {', '.join(age_parts)}"
         )
 
-        embed.set_author(
-            name="Member Joined",
-            icon_url=member.display_avatar.url
-        )
-
-        embed.set_thumbnail(url=member.display_avatar.url)
-
-        embed.add_field(name="Account Age", value=account_age_str, inline=False)
-
-        embed.set_footer(text=f"ID: {member.id}")
-
-        await self.log_to_channel(channel, embed)
+        view = _layout(_section_with_avatar(text, member.display_avatar.url))
+        await self._send(channel, view)
 
     async def log_member_leave(self, member):
         if not self.mod_cfg.get("log_member_leaves"):
@@ -244,22 +233,14 @@ class EventLogger:
         if not channel:
             return
 
-        embed = discord.Embed(
-            description=f"{member.mention} {member.name}",
-            color=0xe67e22,
-            timestamp=_now()
+        text = (
+            f"👋 **Member Left**\n"
+            f"{member.mention} {member.name}\n"
+            f"-# ID: {member.id}"
         )
 
-        embed.set_author(
-            name="Member Left",
-            icon_url=member.display_avatar.url
-        )
-
-        embed.set_thumbnail(url=member.display_avatar.url)
-
-        embed.set_footer(text=f"ID: {member.id}")
-
-        await self.log_to_channel(channel, embed)
+        view = _layout(_section_with_avatar(text, member.display_avatar.url))
+        await self._send(channel, view)
 
     async def log_member_update(self, before, after):
         guild = after.guild
@@ -268,55 +249,32 @@ class EventLogger:
             return
 
         if self.mod_cfg.get("log_role_changes") and before.roles != after.roles:
-            added_roles = [role for role in after.roles if role not in before.roles]
-            removed_roles = [role for role in before.roles if role not in after.roles]
+            added_roles = [r for r in after.roles if r not in before.roles]
+            removed_roles = [r for r in before.roles if r not in after.roles]
 
             if added_roles or removed_roles:
-                description = f"**{after.mention}'s roles were updated**\n\n"
-
+                lines = [f"🎭 **Roles updated** for {after.mention}\n-# {after} • ID: {after.id}"]
                 if added_roles:
-                    description += f"**Roles Added:** {', '.join([role.mention for role in added_roles])}\n"
-
+                    lines.append(f"\n**Added:** {', '.join(r.mention for r in added_roles)}")
                 if removed_roles:
-                    description += f"**Roles Removed:** {', '.join([role.mention for role in removed_roles])}"
+                    lines.append(f"**Removed:** {', '.join(r.mention for r in removed_roles)}")
 
-                embed = discord.Embed(
-                    description=description,
-                    color=0x9b59b6,
-                    timestamp=_now()
-                )
-
-                embed.set_author(
-                    name=str(after),
-                    icon_url=after.display_avatar.url
-                )
-
-                embed.set_footer(text=f"User ID: {after.id}")
-                await self.log_to_channel(channel, embed)
+                view = _layout(_section_with_avatar("\n".join(lines), after.display_avatar.url))
+                await self._send(channel, view)
 
         if self.mod_cfg.get("log_nickname_changes") and before.nick != after.nick:
             before_nick = before.nick or "*No nickname*"
             after_nick = after.nick or "*No nickname*"
 
-            description = (
-                f"**{after.mention}'s nickname was changed**\n\n"
+            text = (
+                f"📝 **Nickname changed** for {after.mention}\n"
+                f"-# {after} • ID: {after.id}\n\n"
                 f"**Before:** {before_nick}\n"
                 f"**After:** {after_nick}"
             )
 
-            embed = discord.Embed(
-                description=description,
-                color=0x3498db,
-                timestamp=_now()
-            )
-
-            embed.set_author(
-                name=str(after),
-                icon_url=after.display_avatar.url
-            )
-
-            embed.set_footer(text=f"User ID: {after.id}")
-            await self.log_to_channel(channel, embed)
+            view = _layout(_section_with_avatar(text, after.display_avatar.url))
+            await self._send(channel, view)
 
     async def log_role_create(self, role):
         if not self.mod_cfg.get("log_role_changes"):
@@ -326,25 +284,14 @@ class EventLogger:
         if not channel:
             return
 
-        hoisted = "Yes"if role.hoist else "No"
-        mentionable = "Yes"if role.mentionable else "No"
-
-        description = (
-            f"**Role {role.mention} was created**\n\n"
-            f"**Name:** {role.name}\n"
-            f"**ID:** {role.id}\n"
-            f"**Color:** {role.color}\n"
-            f"**Hoisted:** {hoisted}\n"
-            f"**Mentionable:** {mentionable}"
+        text = (
+            f"✅ **Role created:** {role.mention}\n"
+            f"**Name:** {role.name} • **ID:** {role.id}\n"
+            f"**Color:** {role.color} • **Hoisted:** {'Yes' if role.hoist else 'No'} • **Mentionable:** {'Yes' if role.mentionable else 'No'}"
         )
 
-        embed = discord.Embed(
-            description=description,
-            color=0x2ecc71,
-            timestamp=_now()
-        )
-
-        await self.log_to_channel(channel, embed)
+        view = _layout(_container(_text(text)))
+        await self._send(channel, view)
 
     async def log_role_delete(self, role):
         if not self.mod_cfg.get("log_role_changes"):
@@ -354,20 +301,13 @@ class EventLogger:
         if not channel:
             return
 
-        description = (
-            f"**Role {role.name} was deleted**\n\n"
-            f"**Name:** {role.name}\n"
-            f"**ID:** {role.id}\n"
-            f"**Color:** {role.color}"
+        text = (
+            f"❌ **Role deleted:** {role.name}\n"
+            f"**ID:** {role.id} • **Color:** {role.color}"
         )
 
-        embed = discord.Embed(
-            description=description,
-            color=0xe74c3c,
-            timestamp=_now()
-        )
-
-        await self.log_to_channel(channel, embed)
+        view = _layout(_container(_text(text)))
+        await self._send(channel, view)
 
     async def log_role_update(self, before, after):
         if not self.mod_cfg.get("log_role_changes"):
@@ -378,36 +318,23 @@ class EventLogger:
             return
 
         changes = []
-
         if before.name != after.name:
             changes.append(f"**Name:** {before.name} → {after.name}")
-
         if before.color != after.color:
             changes.append(f"**Color:** {before.color} → {after.color}")
-
         if before.hoist != after.hoist:
             changes.append(f"**Hoisted:** {before.hoist} → {after.hoist}")
-
         if before.mentionable != after.mentionable:
             changes.append(f"**Mentionable:** {before.mentionable} → {after.mentionable}")
-
         if before.permissions != after.permissions:
             changes.append("**Permissions:** Updated")
 
         if not changes:
             return
 
-        description = f"**Role {after.mention} was updated**\n\n"+ "\n".join(changes)
-
-        embed = discord.Embed(
-            description=description,
-            color=0x3498db,
-            timestamp=_now()
-        )
-
-        embed.set_footer(text=f"Role ID: {after.id}")
-
-        await self.log_to_channel(channel, embed)
+        text = f"🔧 **Role updated:** {after.mention} • ID: {after.id}\n\n" + "\n".join(changes)
+        view = _layout(_container(_text(text)))
+        await self._send(channel, view)
 
     async def log_channel_create(self, channel):
         if not self.mod_cfg.get("log_channel_changes"):
@@ -417,20 +344,13 @@ class EventLogger:
         if not bot_logs:
             return
 
-        description = (
-            f"**Channel {channel.mention} was created**\n\n"
-            f"**Name:** {channel.name}\n"
-            f"**ID:** {channel.id}\n"
-            f"**Type:** {channel.type}"
+        text = (
+            f"✅ **Channel created:** {channel.mention}\n"
+            f"**Name:** {channel.name} • **ID:** {channel.id} • **Type:** {channel.type}"
         )
 
-        embed = discord.Embed(
-            description=description,
-            color=0x2ecc71,
-            timestamp=_now()
-        )
-
-        await self.log_to_channel(bot_logs, embed)
+        view = _layout(_container(_text(text)))
+        await self._send(bot_logs, view)
 
     async def log_channel_delete(self, channel):
         if not self.mod_cfg.get("log_channel_changes"):
@@ -440,20 +360,13 @@ class EventLogger:
         if not bot_logs:
             return
 
-        description = (
-            f"**Channel {channel.name} was deleted**\n\n"
-            f"**Name:** {channel.name}\n"
-            f"**ID:** {channel.id}\n"
-            f"**Type:** {channel.type}"
+        text = (
+            f"❌ **Channel deleted:** #{channel.name}\n"
+            f"**ID:** {channel.id} • **Type:** {channel.type}"
         )
 
-        embed = discord.Embed(
-            description=description,
-            color=0xe74c3c,
-            timestamp=_now()
-        )
-
-        await self.log_to_channel(bot_logs, embed)
+        view = _layout(_container(_text(text)))
+        await self._send(bot_logs, view)
 
     async def log_channel_update(self, before, after):
         if not self.mod_cfg.get("log_channel_changes"):
@@ -464,30 +377,19 @@ class EventLogger:
             return
 
         changes = []
-
         if before.name != after.name:
             changes.append(f"**Name:** {before.name} → {after.name}")
-
         if hasattr(before, 'topic') and hasattr(after, 'topic') and before.topic != after.topic:
             changes.append(f"**Topic:** {before.topic or 'None'} → {after.topic or 'None'}")
-
         if hasattr(before, 'slowmode_delay') and hasattr(after, 'slowmode_delay') and before.slowmode_delay != after.slowmode_delay:
             changes.append(f"**Slowmode:** {before.slowmode_delay}s → {after.slowmode_delay}s")
 
         if not changes:
             return
 
-        description = f"**Channel {after.mention} was updated**\n\n"+ "\n".join(changes)
-
-        embed = discord.Embed(
-            description=description,
-            color=0x3498db,
-            timestamp=_now()
-        )
-
-        embed.set_footer(text=f"Channel ID: {after.id}")
-
-        await self.log_to_channel(channel, embed)
+        text = f"🔧 **Channel updated:** {after.mention} • ID: {after.id}\n\n" + "\n".join(changes)
+        view = _layout(_container(_text(text)))
+        await self._send(channel, view)
 
     async def log_voice_state_update(self, member, before, after):
         if not self.mod_cfg.get("log_voice_changes"):
@@ -498,55 +400,16 @@ class EventLogger:
             return
 
         if before.channel is None and after.channel is not None:
-            description = f"**{member.mention} joined {after.channel.mention}**"
-
-            embed = discord.Embed(
-                description=description,
-                color=0x2ecc71,
-                timestamp=_now()
-            )
-
-            embed.set_author(
-                name=str(member),
-                icon_url=member.display_avatar.url
-            )
-
-            embed.set_footer(text=f"User ID: {member.id}")
-            await self.log_to_channel(channel, embed)
-
+            text = f"🔊 **{member.mention} joined** {after.channel.mention}\n-# {member} • ID: {member.id}"
         elif before.channel is not None and after.channel is None:
-            description = f"**{member.mention} left {before.channel.mention}**"
-
-            embed = discord.Embed(
-                description=description,
-                color=0xe74c3c,
-                timestamp=_now()
-            )
-
-            embed.set_author(
-                name=str(member),
-                icon_url=member.display_avatar.url
-            )
-
-            embed.set_footer(text=f"User ID: {member.id}")
-            await self.log_to_channel(channel, embed)
-
+            text = f"🔇 **{member.mention} left** {before.channel.mention}\n-# {member} • ID: {member.id}"
         elif before.channel != after.channel:
-            description = f"**{member.mention} moved from {before.channel.mention} to {after.channel.mention}**"
+            text = f"🔀 **{member.mention} moved** {before.channel.mention} → {after.channel.mention}\n-# {member} • ID: {member.id}"
+        else:
+            return
 
-            embed = discord.Embed(
-                description=description,
-                color=0x3498db,
-                timestamp=_now()
-            )
-
-            embed.set_author(
-                name=str(member),
-                icon_url=member.display_avatar.url
-            )
-
-            embed.set_footer(text=f"User ID: {member.id}")
-            await self.log_to_channel(channel, embed)
+        view = _layout(_section_with_avatar(text, member.display_avatar.url))
+        await self._send(channel, view)
 
     async def log_invite_create(self, invite):
         if not self.mod_cfg.get("log_invite_changes"):
@@ -556,38 +419,22 @@ class EventLogger:
         if not channel:
             return
 
-        max_uses = "Unlimited"if not invite.max_uses else str(invite.max_uses)
+        max_uses = "Unlimited" if not invite.max_uses else str(invite.max_uses)
+        expires = f"{invite.max_age // 3600} hours" if invite.max_age else "Never"
 
-        if invite.max_age:
-            hours = invite.max_age // 3600
-            expires = f"{hours} hours"
-        else:
-            expires = "Never"
-
-        description = (
-            f"**Invite Code:** {invite.code}\n"
-            f"**Channel:** {invite.channel.mention}\n"
-            f"**Max Uses:** {max_uses}\n"
-            f"**Expires:** {expires}"
-        )
-
-        embed = discord.Embed(
-            description=description,
-            color=0x2ecc71,
-            timestamp=_now()
+        text = (
+            f"🔗 **Invite created:** `{invite.code}`\n"
+            f"**Channel:** {invite.channel.mention} • **Max Uses:** {max_uses} • **Expires:** {expires}\n"
+            f"-# Code: {invite.code}"
         )
 
         if invite.inviter:
-            embed.set_author(
-                name=str(invite.inviter),
-                icon_url=invite.inviter.display_avatar.url
-            )
-            embed.set_footer(text=f"Inviter ID: {invite.inviter.id} | Code: {invite.code}")
+            text = f"-# {invite.inviter} • ID: {invite.inviter.id}\n" + text
+            view = _layout(_section_with_avatar(text, invite.inviter.display_avatar.url))
         else:
-            embed.set_author(name="Invite Created")
-            embed.set_footer(text=f"Code: {invite.code}")
+            view = _layout(_container(_text(text)))
 
-        await self.log_to_channel(channel, embed)
+        await self._send(channel, view)
 
     async def log_invite_delete(self, invite):
         if not self.mod_cfg.get("log_invite_changes"):
@@ -598,161 +445,135 @@ class EventLogger:
             return
 
         channel_name = invite.channel.mention if invite.channel else "Unknown"
-
-        description = (
-            f"**Invite {invite.code} was deleted**\n\n"
-            f"**Code:** {invite.code}\n"
-            f"**Channel:** {channel_name}"
-        )
-
-        embed = discord.Embed(
-            description=description,
-            color=0xe74c3c,
-            timestamp=_now()
-        )
-
-        await self.log_to_channel(channel, embed)
+        text = f"❌ **Invite deleted:** `{invite.code}`\n**Channel:** {channel_name}"
+        view = _layout(_container(_text(text)))
+        await self._send(channel, view)
 
     async def log_ban(self, guild: discord.Guild, user: discord.User,
                       moderator: discord.Member, reason: str,
                       delete_days: int, action_channel: discord.TextChannel) -> Optional[int]:
         channel = self.get_bot_logs_channel(guild)
-        embed = discord.Embed(
-            title="User Banned",
-            description=f"{user.mention} was banned from the server.",
-            color=0x992d22,
-            timestamp=_now()
+        text = (
+            f"🔨 **User Banned**\n"
+            f"{user.mention} was banned from the server.\n"
+            f"-# {user} • ID: {user.id}\n\n"
+            f"**Moderator:** {moderator.mention}\n"
+            f"**Reason:** {reason}\n"
+            f"**Messages Deleted:** {delete_days} day{'s' if delete_days != 1 else ''} • **Channel:** {action_channel.mention}"
         )
-        embed.set_thumbnail(url=user.display_avatar.url)
-        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Messages Deleted", value=f"{delete_days} day{'s' if delete_days != 1 else ''}", inline=True)
-        embed.add_field(name="Channel", value=action_channel.mention, inline=True)
-        return await self.log_to_channel(channel, embed)
+        view = _layout(_section_with_avatar(text, user.display_avatar.url))
+        return await self._send(channel, view)
 
     async def log_kick(self, guild: discord.Guild, member: discord.Member,
                        moderator: discord.Member, reason: str,
                        action_channel: discord.TextChannel) -> Optional[int]:
         channel = self.get_bot_logs_channel(guild)
-        embed = discord.Embed(
-            title="Member Kicked",
-            description=f"{member.mention} was kicked from the server.",
-            color=0xe67e22,
-            timestamp=_now()
+        text = (
+            f"👢 **Member Kicked**\n"
+            f"{member.mention} was kicked from the server.\n"
+            f"-# {member} • ID: {member.id}\n\n"
+            f"**Moderator:** {moderator.mention}\n"
+            f"**Reason:** {reason}\n"
+            f"**Channel:** {action_channel.mention}"
         )
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Channel", value=action_channel.mention, inline=True)
-        return await self.log_to_channel(channel, embed)
+        view = _layout(_section_with_avatar(text, member.display_avatar.url))
+        return await self._send(channel, view)
 
     async def log_timeout(self, guild: discord.Guild, member: discord.Member,
                           moderator: discord.Member, reason: str,
                           duration_str: str, action_channel: discord.TextChannel) -> Optional[int]:
         channel = self.get_bot_logs_channel(guild)
-        embed = discord.Embed(
-            title="Member Timed Out",
-            description=f"{member.mention} was timed out.",
-            color=0xe74c3c,
-            timestamp=_now()
+        text = (
+            f"⏱️ **Member Timed Out**\n"
+            f"{member.mention} was timed out.\n"
+            f"-# {member} • ID: {member.id}\n\n"
+            f"**Moderator:** {moderator.mention}\n"
+            f"**Reason:** {reason}\n"
+            f"**Duration:** {duration_str} • **Channel:** {action_channel.mention}"
         )
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Duration", value=duration_str, inline=True)
-        embed.add_field(name="Channel", value=action_channel.mention, inline=True)
-        return await self.log_to_channel(channel, embed)
+        view = _layout(_section_with_avatar(text, member.display_avatar.url))
+        return await self._send(channel, view)
 
     async def log_mute(self, guild: discord.Guild, member: discord.Member,
                        moderator: discord.Member, reason: str,
                        duration_str: str, action_channel: discord.TextChannel) -> Optional[int]:
         channel = self.get_bot_logs_channel(guild)
-        embed = discord.Embed(
-            title="Member Muted",
-            description=f"{member.mention} was muted.",
-            color=0xf39c12,
-            timestamp=_now()
+        text = (
+            f"🔇 **Member Muted**\n"
+            f"{member.mention} was muted.\n"
+            f"-# {member} • ID: {member.id}\n\n"
+            f"**Moderator:** {moderator.mention}\n"
+            f"**Reason:** {reason}\n"
+            f"**Duration:** {duration_str} • **Channel:** {action_channel.mention}"
         )
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Duration", value=duration_str, inline=True)
-        embed.add_field(name="Channel", value=action_channel.mention, inline=True)
-        return await self.log_to_channel(channel, embed)
+        view = _layout(_section_with_avatar(text, member.display_avatar.url))
+        return await self._send(channel, view)
 
     async def log_softban(self, guild: discord.Guild, member: discord.Member,
                           moderator: discord.Member, reason: str,
                           delete_days: int, action_channel: discord.TextChannel) -> Optional[int]:
         channel = self.get_bot_logs_channel(guild)
-        embed = discord.Embed(
-            title="Member Softbanned",
-            description=f"{member.mention} was softbanned (messages deleted, can rejoin).",
-            color=0x992d22,
-            timestamp=_now()
+        text = (
+            f"🔨 **Member Softbanned**\n"
+            f"{member.mention} was softbanned (messages deleted, can rejoin).\n"
+            f"-# {member} • ID: {member.id}\n\n"
+            f"**Moderator:** {moderator.mention}\n"
+            f"**Reason:** {reason}\n"
+            f"**Messages Deleted:** {delete_days} day{'s' if delete_days != 1 else ''} • **Channel:** {action_channel.mention}"
         )
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Messages Deleted", value=f"{delete_days} day{'s' if delete_days != 1 else ''}", inline=True)
-        embed.add_field(name="Channel", value=action_channel.mention, inline=True)
-        return await self.log_to_channel(channel, embed)
+        view = _layout(_section_with_avatar(text, member.display_avatar.url))
+        return await self._send(channel, view)
 
     async def log_purge(self, guild: discord.Guild, moderator: discord.Member,
                         count: int, action_channel: discord.TextChannel,
                         target_user: Optional[discord.Member] = None) -> Optional[int]:
         channel = self.get_bot_logs_channel(guild)
-        desc = f"**{count}** message{'s' if count != 1 else ''} deleted"
-        desc += f"from {target_user.mention}"if target_user else f"in {action_channel.mention}"
-        embed = discord.Embed(
-            title="Messages Purged",
-            description=desc,
-            color=0x2ecc71,
-            timestamp=_now()
+        desc = f"**{count}** message{'s' if count != 1 else ''} deleted "
+        desc += f"from {target_user.mention}" if target_user else f"in {action_channel.mention}"
+        text = (
+            f"🧹 **Messages Purged**\n"
+            f"{desc}\n\n"
+            f"**Moderator:** {moderator.mention} • **Channel:** {action_channel.mention} • **Amount:** {count}"
         )
         if target_user:
-            embed.set_thumbnail(url=target_user.display_avatar.url)
-        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
-        embed.add_field(name="Channel", value=action_channel.mention, inline=True)
-        embed.add_field(name="Amount", value=str(count), inline=True)
-        return await self.log_to_channel(channel, embed)
+            view = _layout(_section_with_avatar(text, target_user.display_avatar.url))
+        else:
+            view = _layout(_container(_text(text)))
+        return await self._send(channel, view)
 
     async def log_warn(self, guild: discord.Guild, member: discord.Member,
                        moderator: discord.Member, reason: str,
                        strike_count: int, action_channel: discord.TextChannel) -> Optional[int]:
         channel = self.get_bot_logs_channel(guild)
-        embed = discord.Embed(
-            title="Member Warned",
-            description=f"{member.mention} was warned.",
-            color=0xf39c12,
-            timestamp=_now()
+        text = (
+            f"⚠️ **Member Warned**\n"
+            f"{member.mention} was warned.\n"
+            f"-# {member} • ID: {member.id}\n\n"
+            f"**Moderator:** {moderator.mention}\n"
+            f"**Reason:** {reason}\n"
+            f"**Total Warnings:** {strike_count} • **Channel:** {action_channel.mention}"
         )
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Total Warnings", value=str(strike_count), inline=True)
-        embed.add_field(name="Channel", value=action_channel.mention, inline=True)
-        return await self.log_to_channel(channel, embed)
+        view = _layout(_section_with_avatar(text, member.display_avatar.url))
+        return await self._send(channel, view)
 
     async def log_lock(self, guild: discord.Guild, moderator: discord.Member,
                        reason: str, locked_channel: discord.TextChannel) -> Optional[int]:
         channel = self.get_bot_logs_channel(guild)
-        embed = discord.Embed(
-            title="Channel Locked",
-            description=f"{locked_channel.mention} was locked.",
-            color=0xe74c3c,
-            timestamp=_now()
+        text = (
+            f"🔒 **Channel Locked**\n"
+            f"{locked_channel.mention} was locked.\n\n"
+            f"**Moderator:** {moderator.mention}\n"
+            f"**Reason:** {reason} • **Channel:** {locked_channel.mention}"
         )
-        embed.add_field(name="Moderator", value=moderator.mention, inline=False)
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Channel", value=locked_channel.mention, inline=True)
-        return await self.log_to_channel(channel, embed)
+        view = _layout(_container(_text(text)))
+        return await self._send(channel, view)
+
 
 def setup(bot):
 
     from mod_core import is_owner
 
     event_logger = EventLogger(bot)
-
     bot._logger_event_logger = event_logger
 
     @bot.listen()
@@ -829,14 +650,8 @@ def setup(bot):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return
         event_logger.mod_cfg.set("join_logs_channel_id", channel.id)
-
-        embed = discord.Embed(
-            title="Join Logs Channel Set",
-            description=f"Join/leave logs will now be sent to {channel.mention}",
-            color=0x2ecc71
-        )
-
-        await interaction.response.send_message(embed=embed)
+        view = _layout(_container(_text(f"✅ **Join Logs Channel Set**\nJoin/leave logs will now be sent to {channel.mention}")))
+        await interaction.response.send_message(view=view)
         bot.logger.log(MODULE_NAME, f"Join logs channel set to {channel.name} by {interaction.user}")
 
     @bot.tree.command(name="setbotlogs", description="[Owner only] Set the channel for bot/moderation logs")
@@ -846,14 +661,8 @@ def setup(bot):
             await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
             return
         event_logger.mod_cfg.set("bot_logs_channel_id", channel.id)
-
-        embed = discord.Embed(
-            title="Bot Logs Channel Set",
-            description=f"Bot/moderation logs will now be sent to {channel.mention}",
-            color=0x2ecc71
-        )
-
-        await interaction.response.send_message(embed=embed)
+        view = _layout(_container(_text(f"✅ **Bot Logs Channel Set**\nBot/moderation logs will now be sent to {channel.mention}")))
+        await interaction.response.send_message(view=view)
         bot.logger.log(MODULE_NAME, f"Bot logs channel set to {channel.name} by {interaction.user}")
 
     @bot.tree.command(name="logconfig", description="[Owner only] View or toggle logging settings")
@@ -864,35 +673,35 @@ def setup(bot):
         join_channel = event_logger.get_join_logs_channel(interaction.guild)
         bot_channel = event_logger.get_bot_logs_channel(interaction.guild)
 
-        embed = discord.Embed(
-            title="Logging Configuration",
-            color=0x5865f2,
-            timestamp=_now()
-        )
-
-        embed.add_field(
-            name="Channels",
-            value=f"**Join Logs:** {join_channel.mention if join_channel else 'Not set'}\n"
-                  f"**Bot Logs:** {bot_channel.mention if bot_channel else 'Not set'}",
-            inline=False
-        )
-
+        cfg = event_logger.mod_cfg
         settings = [
-            f"{'' if event_logger.mod_cfg.get('log_message_edits') else ''} Message Edits",
-            f"{'' if event_logger.mod_cfg.get('log_message_deletes') else ''} Message Deletes",
-            f"{'' if event_logger.mod_cfg.get('log_member_joins') else ''} Member Joins",
-            f"{'' if event_logger.mod_cfg.get('log_member_leaves') else ''} Member Leaves",
-            f"{'' if event_logger.mod_cfg.get('log_bans') else ''} Bans/Unbans",
-            f"{'' if event_logger.mod_cfg.get('log_role_changes') else ''} Role Changes",
-            f"{'' if event_logger.mod_cfg.get('log_channel_changes') else ''} Channel Changes",
-            f"{'' if event_logger.mod_cfg.get('log_voice_changes') else ''} Voice Changes",
-            f"{'' if event_logger.mod_cfg.get('log_invite_changes') else ''} Invite Changes",
-            f"{'' if event_logger.mod_cfg.get('log_nickname_changes') else ''} Nickname Changes"
+            f"{'✅' if cfg.get('log_message_edits') else '❌'} Message Edits",
+            f"{'✅' if cfg.get('log_message_deletes') else '❌'} Message Deletes",
+            f"{'✅' if cfg.get('log_member_joins') else '❌'} Member Joins",
+            f"{'✅' if cfg.get('log_member_leaves') else '❌'} Member Leaves",
+            f"{'✅' if cfg.get('log_bans') else '❌'} Bans/Unbans",
+            f"{'✅' if cfg.get('log_role_changes') else '❌'} Role Changes",
+            f"{'✅' if cfg.get('log_channel_changes') else '❌'} Channel Changes",
+            f"{'✅' if cfg.get('log_voice_changes') else '❌'} Voice Changes",
+            f"{'✅' if cfg.get('log_invite_changes') else '❌'} Invite Changes",
+            f"{'✅' if cfg.get('log_nickname_changes') else '❌'} Nickname Changes",
         ]
 
-        embed.add_field(name="Enabled Features", value="\n".join(settings), inline=False)
-        embed.set_footer(text="Use /setjoinlogs and /setbotlogs to configure channels")
+        channels_text = (
+            f"## Logging Configuration\n"
+            f"**Join Logs:** {join_channel.mention if join_channel else 'Not set'}\n"
+            f"**Bot Logs:** {bot_channel.mention if bot_channel else 'Not set'}"
+        )
+        settings_text = "## Enabled Features\n" + "\n".join(settings)
+        footer_text = "-# Use /setjoinlogs and /setbotlogs to configure channels"
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        view = _layout(
+            _container(_text(channels_text)),
+            _sep(),
+            _container(_text(settings_text)),
+            _sep(),
+            _text(footer_text),
+        )
+        await interaction.response.send_message(view=view, ephemeral=True)
 
     bot.logger.log(MODULE_NAME, "Logger module setup complete")

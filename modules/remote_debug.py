@@ -506,9 +506,19 @@ class ClaudeBridgeListener:
                 if seq != 0 and seq != self._last_seq:
                     command = cmd.get("command", "")
                     args = cmd.get("args", [])
+                    payload = None
+                    if command in ("script-exec", "config-write", "config-patch"):
+                        try:
+                            import base64 as _b64
+                            raw = await asyncio.get_event_loop().run_in_executor(
+                                self._executor, self._gh_request, "payload.txt"
+                            )
+                            payload = _b64.b64decode(raw["content"]).decode("utf-8")
+                        except Exception as _pe:
+                            self.bot.logger.error(MODULE_NAME, f"[bridge] failed to fetch payload.txt", _pe)
                     self.bot.logger.log(MODULE_NAME, f"[bridge] seq={seq} cmd={command} args={args}")
                     self._last_seq = seq
-                    output, artifacts = await self._execute(command, args)
+                    output, artifacts = await self._execute(command, args, payload=payload)
                     asyncio.create_task(self._write_results(seq, command, output, artifacts))
                 await asyncio.sleep(self._interval)
             except Exception as e:
@@ -520,7 +530,7 @@ class ClaudeBridgeListener:
                     self.bot.logger.error(MODULE_NAME, f"[bridge] poll error #{consecutive_errors}, retrying in {backoff:.0f}s", e)
                 await asyncio.sleep(backoff)
 
-    async def _execute(self, command, args):
+    async def _execute(self, command, args, payload=None):
         """Route command to server handler, return (output_str, artifacts_dict)."""
         if command in self.BLOCKED:
             return f"command '{command}' not available via claude bridge", {}
@@ -617,10 +627,12 @@ class ClaudeBridgeListener:
             output = f"{len(rows)} row(s) — committed to db/{args[0]}_query.json"
 
         elif command == "config-write":
-            if len(args) < 2:
+            if not args:
                 return "usage: config-write <name> <json>", {}
             name = args[0]
-            json_str = " ".join(args[1:])
+            json_str = payload if payload is not None else (" ".join(args[1:]) if len(args) > 1 else "")
+            if not json_str:
+                return "usage: config-write <name> <json>", {}
             try:
                 data = json.loads(json_str)
             except json.JSONDecodeError as e:
@@ -633,10 +645,12 @@ class ClaudeBridgeListener:
                 return f"write failed: {e}", {}
 
         elif command == "config-patch":
-            if len(args) < 2:
+            if not args:
                 return "usage: config-patch <name> <json-patch>", {}
             name = args[0]
-            patch_str = " ".join(args[1:])
+            patch_str = payload if payload is not None else (" ".join(args[1:]) if len(args) > 1 else "")
+            if not patch_str:
+                return "usage: config-patch <name> <json-patch>", {}
             try:
                 patch = json.loads(patch_str)
             except json.JSONDecodeError as e:
@@ -668,7 +682,7 @@ class ClaudeBridgeListener:
                 output = "timed out"
 
         elif command == "script-exec":
-            script_src = " ".join(args) if args else ""
+            script_src = payload if payload is not None else (" ".join(args) if args else "")
             if not script_src:
                 return "missing script", {}
             tmp = script_dir() / "temp" / "_bridge_script.py"
@@ -990,18 +1004,37 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
         p = work / name
         return p.read_text() if p.exists() else None
 
+    # Commands whose payload must not travel through args — write to payload.txt instead
+    PAYLOAD_COMMANDS = {"script-exec", "config-write", "config-patch"}
+
     work = None
     try:
         # fresh clone to send — eliminates any conflict with stale local state
         work = clone()
         cmd_data = read_json(work, "cmd.json")
         seq = cmd_data.get("seq", 0) + 1
-        new_cmd = {"seq": seq, "command": command, "args": args}
+
+        # Extract payload from args for payload commands — avoids all shell/JSON mangling
+        payload = None
+        safe_args = list(args)
+        if command in PAYLOAD_COMMANDS and args:
+            if command == "script-exec":
+                payload = " ".join(args)
+                safe_args = []
+            elif command in ("config-write", "config-patch"):
+                safe_args = args[:1]  # keep config name only
+                payload = " ".join(args[1:]) if len(args) > 1 else ""
+
+        new_cmd = {"seq": seq, "command": command, "args": safe_args}
 
         pushed = False
         for attempt in range(6):
             (work / "cmd.json").write_text(json.dumps(new_cmd, indent=2) + "\n")
-            git(work, "add", "cmd.json")
+            files_to_add = ["cmd.json"]
+            if payload is not None:
+                (work / "payload.txt").write_text(payload, encoding="utf-8")
+                files_to_add.append("payload.txt")
+            git(work, "add", *files_to_add)
             git(work, "commit", "-m", str(seq))
             result = git(work, "push", "origin", "main", check=False)
             if result.returncode == 0:
@@ -1014,6 +1047,7 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
             cmd_data = read_json(work, "cmd.json")
             seq = cmd_data.get("seq", 0) + 1
             new_cmd["seq"] = seq
+            files_to_add = ["cmd.json"]  # payload.txt already staged in new clone if needed
 
         if not pushed:
             print("Failed to push command after retries", file=sys.stderr)

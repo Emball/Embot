@@ -732,6 +732,15 @@ class ClaudeBridgeListener:
             asyncio.create_task(self._delayed_restart_with_log())
             output = "restarting — log will be committed after startup"
 
+        elif command == "reload":
+            name = args[0] if args else ""
+            if not name:
+                output = "usage: reload <module>"
+            else:
+                import __main__
+                ok, msg = await __main__.reload_module(name)
+                output = msg
+
         else:
             output = f"unknown command: {command}"
 
@@ -1160,6 +1169,8 @@ def main():
 
     sub.add_parser("update", help="Git pull and restart if updated")
     sub.add_parser("restart", help="Restart the bot")
+    reload_p = sub.add_parser("reload", help="Hot-reload a module without restarting")
+    reload_p.add_argument("module", help="Module name (without .py)")
 
     init_p = sub.add_parser("session-init", help="Store GitHub token for Claude bridge (run once per session)")
     init_p.add_argument("github_token", help="GitHub personal access token with EmbotDebug repo access")
@@ -1195,6 +1206,8 @@ def main():
         _cmd_update(cfg)
     elif args.command == "restart":
         _cmd_restart(cfg)
+    elif args.command == "reload":
+        _cmd_bridge(cfg.get("claude_bridge", {}), "reload", [args.module])
     elif args.command == "session-init":
         _cmd_session_init(args.github_token)
     elif args.command == "bridge":

@@ -566,6 +566,15 @@ async def slash_restart(interaction: discord.Interaction):
     bot.logger.log("MAIN", f"/restart used by {interaction.user}")
     await _restart_async(bot)
 
+@bot.tree.command(name="reload", description="[Owner only] Hot-reload a module without restarting")
+@app_commands.describe(module="Module name to reload (e.g. mod_logger)")
+async def slash_reload(interaction: discord.Interaction, module: str):
+    if not _is_guild_owner(interaction):
+        return await interaction.response.send_message("Server owner only.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    ok, msg = await reload_module(module)
+    await interaction.followup.send(f"{'✅' if ok else '❌'} {msg}", ephemeral=True)
+
 @bot.event
 async def on_ready():
     if not hasattr(bot, 'initialized'):
@@ -858,6 +867,52 @@ async def run_exec(cmd, timeout=60):
     stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     return stdout.decode(errors='replace'), stderr.decode(errors='replace'), proc.returncode
 
+async def reload_module(name: str) -> tuple[bool, str]:
+    """Hot-reload a single module by name. Returns (success, message)."""
+    modules_dir = script_dir / 'modules'
+    file = modules_dir / f'{name}.py'
+    if not file.exists():
+        return False, f"module '{name}' not found"
+
+    try:
+        # Remove old slash commands registered by this module
+        if hasattr(bot, '_module_commands') and name in bot._module_commands:
+            for cmd_name in bot._module_commands[name]:
+                bot.tree.remove_command(cmd_name)
+            del bot._module_commands[name]
+
+        commands_before = {cmd.name for cmd in bot.tree.get_commands()}
+
+        if name in sys.modules:
+            module = importlib.reload(sys.modules[name])
+        else:
+            module = importlib.import_module(name)
+
+        if hasattr(module, 'setup'):
+            module.setup(bot)
+
+        commands_after = {cmd.name for cmd in bot.tree.get_commands()}
+        new_commands = commands_after - commands_before
+        if new_commands:
+            if not hasattr(bot, '_module_commands'):
+                bot._module_commands = {}
+            bot._module_commands[name] = new_commands
+            guild = bot.get_guild(bot.home_guild_id)
+            await bot.tree.sync(guild=guild)
+            await bot.tree.sync()
+            bot.logger.log("MAIN", f"Reloaded {name} — synced {len(new_commands)} new command(s)")
+        else:
+            bot.logger.log("MAIN", f"Reloaded {name}")
+
+        version = load_version()
+        return True, f"reloaded {name} (v{version})"
+
+    except Exception as e:
+        bot.logger.error("MAIN", f"Failed to reload module: {name}", e)
+        import traceback as _tb
+        return False, f"error reloading '{name}': {_tb.format_exc().strip()}"
+
+
 # --- Console command setup ---
 
 def setup_console_commands():
@@ -982,7 +1037,16 @@ def setup_console_commands():
                 print(json.dumps(row, default=str))
             print(f"({len(rows)} rows)")
 
+    async def handle_reload(args):
+        name = args.strip()
+        if not name:
+            print("Usage: reload <module>")
+            return
+        ok, msg = await reload_module(name)
+        print(msg)
+
     register_console_command("modules",  "List loaded/failed bot modules",                    handle_modules)
+    register_console_command("reload",   "reload <module>  Hot-reload a module",              handle_reload)
     register_console_command("update",   "Git pull + restart if updated",                     handle_update)
     register_console_command("restart",  "Restart the bot",                                   handle_restart)
     register_console_command("exec",     "Run a shell command",                               handle_exec)

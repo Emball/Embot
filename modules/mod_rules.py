@@ -53,22 +53,24 @@ class RulesManager:
                 return f"**Rule {rule['number']} - {rule['title']}**: {rule['description']}"
         return None
 
-    def build_embed(self, data: dict) -> discord.Embed:
-        color = data.get("color", 0x3498db)
-        embed = discord.Embed(
-            title=f" {data.get('title', 'Server Rules')}",
-            description=data.get("description", ""),
-            color=color,
-            timestamp=_now(),
-        )
+    def _build_layout(self, data: dict) -> discord.ui.LayoutView:
+        lines = []
+        title = data.get("title", "Server Rules")
+        description = data.get("description", "")
+        if title:
+            lines.append(f"# {title}")
+        if description:
+            lines.append(description)
         for rule in data.get("rules", []):
-            embed.add_field(
-                name=f"Rule {rule['number']}  -  {rule['title']}",
-                value=rule["description"],
-                inline=False,
-            )
-        embed.set_footer(text=data.get("footer", "Please follow the rules"))
-        return embed
+            lines.append(f"\n## Rule {rule['number']} — {rule['title']}\n{rule['description']}")
+        footer = data.get("footer", "")
+        text = "\n".join(lines)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(discord.ui.TextDisplay(text)))
+        if footer:
+            view.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+            view.add_item(discord.ui.TextDisplay(f"-# {footer}"))
+        return view
 
     def _get_rules_channel(self, guild: discord.Guild) -> Optional[discord.TextChannel]:
         return discord.utils.get(guild.text_channels, name=self.cfg.rules_channel_name)
@@ -91,39 +93,39 @@ class RulesManager:
             try:
                 existing_msg = await channel.fetch_message(posted_msg_id)
             except discord.NotFound:
-                self.bot.logger.log("RULES", "Rules embed was deleted — reposting", "WARNING")
+                self.bot.logger.log("RULES", "Rules message was deleted — reposting", "WARNING")
             except Exception as e:
                 self.bot.logger.log("RULES", f"Could not fetch rules message: {e}", "WARNING")
 
         if existing_msg and not force and current_hash == posted_hash:
             return False
 
-        embed = self.build_embed(data)
+        layout = self._build_layout(data)
 
         if existing_msg:
             try:
-                await existing_msg.edit(embed=embed)
+                await existing_msg.edit(view=layout)
                 self._save_state(guild.id, existing_msg.id, current_hash)
-                self.bot.logger.log("RULES", "Rules embed updated")
+                self.bot.logger.log("RULES", "Rules message updated")
                 return True
             except Exception as e:
-                self.bot.logger.log("RULES", f"Failed to edit rules embed: {e}", "WARNING")
+                self.bot.logger.log("RULES", f"Failed to edit rules message: {e}", "WARNING")
 
-        # clear stale bot embeds and repost
+        # clear stale bot messages and repost
         try:
             async for msg in channel.history(limit=50):
-                if msg.author == guild.me and msg.embeds:
+                if msg.author == guild.me:
                     await msg.delete()
         except Exception:
             pass
 
         try:
-            new_msg = await channel.send(embed=embed)
+            new_msg = await channel.send(view=layout)
             self._save_state(guild.id, new_msg.id, current_hash)
-            self.bot.logger.log("RULES", f"Rules embed posted (message {new_msg.id})")
+            self.bot.logger.log("RULES", f"Rules message posted (message {new_msg.id})")
             return True
         except Exception as e:
-            self.bot.logger.log("RULES", f"Failed to post rules embed: {e}", "ERROR")
+            self.bot.logger.log("RULES", f"Failed to post rules message: {e}", "ERROR")
             return False
 
     async def on_ready(self, guild: discord.Guild):
@@ -154,7 +156,7 @@ class RulesManager:
                         # verify message exists every 5 minutes (every 5 iterations)
                         if hash_changed or check_count % 5 == 0:
                             if hash_changed:
-                                self.bot.logger.log("RULES", "Rules content change detected — syncing embed")
+                                self.bot.logger.log("RULES", "Rules content change detected — syncing")
                             await self.sync(guild, force=hash_changed)
             except Exception as e:
                 self.bot.logger.log("RULES", f"Watcher error: {e}", "WARNING")

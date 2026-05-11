@@ -35,9 +35,11 @@ def _section_with_avatar(text: str, avatar_url: str) -> discord.ui.Container:
         main, footer = text.split('\n-#', 1)
         return discord.ui.Container(
             discord.ui.Section(
-                _text(f'{main}\n\n-#{footer}'),
+                _text(main.strip()),
                 accessory=discord.ui.Thumbnail(avatar_url)
-            )
+            ),
+            discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+            _text(f'-#{footer}'),
         )
     return discord.ui.Container(
         discord.ui.Section(
@@ -434,14 +436,14 @@ class EventLogger:
 
         text = (
             f"🔗 **Invite created:** `{invite.code}`\n"
-            f"**Channel:** {invite.channel.mention} • **Max Uses:** {max_uses} • **Expires:** {expires}\n"
-            f"-# Code: {invite.code}"
+            f"**Channel:** {invite.channel.mention} • **Max Uses:** {max_uses} • **Expires:** {expires}"
         )
 
         if invite.inviter:
-            text = f"-# {invite.inviter} • ID: {invite.inviter.id}\n" + text
+            text += f"\n-# {invite.inviter} • ID: {invite.inviter.id} • Code: {invite.code}"
             view = _layout(_section_with_avatar(text, invite.inviter.display_avatar.url))
         else:
+            text += f"\n-# Code: {invite.code}"
             view = _layout(_container(_text(text)))
 
         await self._send(channel, view)

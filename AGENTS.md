@@ -182,6 +182,15 @@ If facing response issues, never use `sleep` to wait for a response. Poll with `
 
 Use `config-write` instead of `shell` for writing configs/data — handles special characters safely. Use `script-exec` instead of `shell` for Python snippets — avoids quote nesting.
 
+For large `config-write` payloads (e.g. full JSON configs), invoke via Python subprocess to avoid shell mangling:
+```python
+import json, subprocess
+result = subprocess.run(
+    ["python", "modules/remote_debug.py", "bridge", "config-write", "<name>", json.dumps(data)],
+    cwd="/home/claude/Embot", capture_output=True, text=True
+)
+```
+
 ## Components V2 (discord.py LayoutView)
 
 As of 2026, Components V2 is properly implanted in the latest version's of Discord.py

@@ -79,7 +79,6 @@ def _build_layout(cfg: dict) -> discord.ui.LayoutView:
       - The section content via TextDisplay
       - A Separator between sections
     """
-    color = cfg.get("color", DEFAULTS["color"])
     sections = cfg.get("sections", [])
     footer = cfg.get("footer", "")
 

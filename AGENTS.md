@@ -163,9 +163,13 @@ LAN: `uv run python modules/remote_debug.py <command> [args...]`
 
 ## Debugging
 
-The bot auto-updates. After every push it polls git every ~1 minute, detects the version bump, and pulls. **If only module files changed, the bot hot-reloads those modules in place — no restart, no disruption.** A full restart only triggers if `Embot.py`, config, or other core files changed. `_version.py` never triggers a restart on its own. Use `bridge update` to trigger this immediately rather than waiting out the interval. Use `bridge restart` only when a full restart is explicitly needed. Auto-update is a good fallback if the server is unreachable.
+**Update hierarchy — three tiers, use the lowest one that fits:**
 
-For single-module changes during active development, prefer `bridge reload <module>` — it reloads immediately without touching any other module or waiting for a git pull cycle.
+1. **Auto-update (default, no action needed)** — the bot polls git every ~1 minute after every push. If only module files changed, it hot-reloads exactly those modules in place, no restart, no disruption. This handles the normal coding workflow automatically. `_version.py` never triggers a restart on its own.
+2. **`bridge update` (trigger immediately)** — runs the same smart diff logic right now instead of waiting the poll interval. Use when you want the bot to pick up a push immediately. Only causes a full restart if `Embot.py`, config, or other core files changed; module-only changes hot-reload as usual.
+3. **`bridge reload <module>` (manual override)** — directly hot-reloads a single named module right now, bypassing git entirely. Use when iterating fast on one module mid-session and you don't want to go through a commit/push/pull cycle. The module must already be committed if you want the change to survive a future pull.
+
+Use `bridge restart` only when a full restart is explicitly needed. Auto-update is a reliable fallback if the server is unreachable.
 
 Testing individual files is recommended, but do not try to run a Embot.py session locally. How the live bot responds to the latest code is the ideal source of truth on whether or not it's truly clean.
 

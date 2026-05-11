@@ -14,67 +14,15 @@ DEFAULTS = {
     "sections": [
         {
             "title": "Owner Commands",
-            "content": "**Logging**
-`/logconfig` — view or toggle log settings
-`/setbotlogs [channel]` — set mod log channel
-`/setjoinlogs [channel]` — set join/leave log channel
-
-**Server**
-`/updaterules` — reload rules from mod.json
-
-**Federation tools**
-`/fedcheck [user]` — check suspicion score
-`/fedflag [user] [reason]` — manually flag
-`/fedclear [user]` — clear flag
-`/fedscan` — scan all members
-`/fedinvites` — audit invite sources"
+            "content": "**Logging**\n`/logconfig` — view or toggle log settings\n`/setbotlogs [channel]` — set mod log channel\n`/setjoinlogs [channel]` — set join/leave log channel\n\n**Server**\n`/updaterules` — reload rules from mod.json\n\n**Federation tools**\n`/fedcheck [user]` — check suspicion score\n`/fedflag [user] [reason]` — manually flag\n`/fedclear [user]` — clear flag\n`/fedscan` — scan all members\n`/fedinvites` — audit invite sources"
         },
         {
             "title": "Mod Commands",
-            "content": "All commands work with both `/` and `?` prefixes.
-
-**Warn a member**
-`/warn [member] [reason]`
-
-**Timeout a member**
-`/timeout [member] [duration] [reason]`
-
-**Mute a member**
-`/mute [member] [duration] [reason]`
-
-**Kick a member**
-`/kick [member] [reason]`
-
-**Ban a member**
-`/ban [member] [reason] [delete_days]`
-
-**Softban** *(ban + immediate unban to purge messages)*
-`/softban [member] [reason]`
-
-**Ban multiple members at once**
-`/multiban [user_ids] [reason]`
-
-**Unban a member**
-`/unban [user_id] [reason]`
-
-**View or clear warnings**
-`/warnings [member]`
-`/clearwarnings [member]`
-
-**Purge messages**
-`/purge [count]`
-
-**Lock / unlock a channel**
-`/lock [channel] [reason]`
-`/unlock [channel]`
-
-**Set slowmode**
-`/slowmode [seconds]`"
+            "content": "All commands work with both `/` and `?` prefixes.\n\n**Warn a member**\n`/warn [member] [reason]`\n\n**Timeout a member**\n`/timeout [member] [duration] [reason]`\n\n**Mute a member**\n`/mute [member] [duration] [reason]`\n\n**Kick a member**\n`/kick [member] [reason]`\n\n**Ban a member**\n`/ban [member] [reason] [delete_days]`\n\n**Softban** *(ban + immediate unban to purge messages)*\n`/softban [member] [reason]`\n\n**Ban multiple members at once**\n`/multiban [user_ids] [reason]`\n\n**Unban a member**\n`/unban [user_id] [reason]`\n\n**View or clear warnings**\n`/warnings [member]`\n`/clearwarnings [member]`\n\n**Purge messages**\n`/purge [count]`\n\n**Lock / unlock a channel**\n`/lock [channel] [reason]`\n`/unlock [channel]`\n\n**Set slowmode**\n`/slowmode [seconds]`"
         },
         {
             "title": "Enforcement Guide",
-            "content": "Offense-by-offense action reference for all mods.
-[Emball Moderator Enforcement Guide](https://docs.google.com/spreadsheets/d/1Gz65bq6f4AtdWwmUiJAMP_NEahM9bvDIlJLR51kBAuU/edit?usp=sharing)"
+            "content": "Offense-by-offense action reference for all mods.\n[Emball Moderator Enforcement Guide](https://docs.google.com/spreadsheets/d/1Gz65bq6f4AtdWwmUiJAMP_NEahM9bvDIlJLR51kBAuU/edit?usp=sharing)"
         }
     ]
 }

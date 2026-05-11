@@ -43,6 +43,18 @@ class Song:
             return 0
         return 0
 
+class UrlSong:
+    __slots__ = ('url', 'stream_url', 'requested_by', 'title', 'duration')
+
+    def __init__(self, url, stream_url, title, duration, requested_by):
+        self.url = url
+        self.stream_url = stream_url
+        self.requested_by = requested_by
+        self.title = title
+        self.duration = duration
+
+    # No metadata/album fields needed — update_now_playing guards with .get()
+
 class MusicPlayer:
 
     def __init__(self, bot, guild_id):
@@ -84,11 +96,18 @@ class MusicPlayer:
             self.skip_votes.clear()
             self.bot.logger.log(MODULE_NAME, f"Now playing: {self.current.title}")
 
-            source = discord.FFmpegPCMAudio(
-                self.current.file_path,
-                before_options='-nostdin',
-                options='-vn'
-            )
+            if isinstance(self.current, UrlSong):
+                source = discord.FFmpegPCMAudio(
+                    self.current.stream_url,
+                    before_options='-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+                    options='-vn'
+                )
+            else:
+                source = discord.FFmpegPCMAudio(
+                    self.current.file_path,
+                    before_options='-nostdin',
+                    options='-vn'
+                )
             self._current_source = source
 
             def after_play(error):
@@ -154,10 +173,11 @@ class MusicPlayer:
         embed.add_field(name="Requested by", value=self.current.requested_by.mention, inline=True)
         embed.add_field(name="Duration", value=duration_str, inline=True)
 
-        if self.current.metadata.get('album'):
-            embed.add_field(name="Album", value=self.current.metadata['album'], inline=True)
-        if self.current.metadata.get('year'):
-            embed.add_field(name="Year", value=self.current.metadata['year'], inline=True)
+        metadata = getattr(self.current, 'metadata', {})
+        if metadata.get('album'):
+            embed.add_field(name="Album", value=metadata['album'], inline=True)
+        if metadata.get('year'):
+            embed.add_field(name="Year", value=metadata['year'], inline=True)
 
         if not self.queue.empty():
             queue_items: list = []
@@ -293,20 +313,14 @@ def setup(bot):
         elif before.channel and after.channel and before.channel != after.channel:
             player.voice_client = member.guild.voice_client
 
-    @bot.tree.command(name="play", description="Play a song in voice channel")
+    @bot.tree.command(name="play", description="Play a song — archive name or YouTube/SoundCloud URL")
     @app_commands.describe(
-        format="File format (FLAC or MP3)",
-        song_name="Name of the song",
-        version="Specific version (optional)"
+        song_name="Song name to search archive, or a YouTube/SoundCloud URL",
+        format="File format (FLAC or MP3) — ignored for URLs",
+        version="Specific version (optional, archive only)"
     )
     @app_commands.choices(format=[app_commands.Choice(name=fmt, value=fmt) for fmt in FORMATS])
-    async def play(interaction: discord.Interaction, format: str, song_name: str, version: Optional[str] = None):
-        command_data = {
-            'format': format,
-            'song_name': song_name,
-            'version': version or 'N/A'
-        }
-
+    async def play(interaction: discord.Interaction, song_name: str, format: Optional[str] = None, version: Optional[str] = None):
         if not interaction.user.voice or not interaction.user.voice.channel:
             await interaction.response.send_message(
                 "You need to be in a voice channel to use this command!",
@@ -315,41 +329,101 @@ def setup(bot):
             return
 
         voice_channel = interaction.user.voice.channel
+        is_url = song_name.startswith('http://') or song_name.startswith('https://')
 
-        if not hasattr(bot, 'ARCHIVE_manager') or not bot.ARCHIVE_manager.song_index_ready.is_set():
-            await interaction.response.send_message(
-                "Music index not ready—please try again shortly.",
-                ephemeral=True
+        if is_url:
+            await interaction.response.defer(thinking=True)
+            bot.logger.log(MODULE_NAME, f"Play URL: {song_name}")
+
+            # Resolve stream URL and metadata via yt-dlp
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    'yt-dlp', '-f', 'bestaudio', '--get-url', '--get-title', '--get-duration',
+                    '--no-playlist', song_name,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            except asyncio.TimeoutError:
+                await interaction.followup.send("yt-dlp timed out resolving that URL.", ephemeral=True)
+                bot.logger.log(MODULE_NAME, "yt-dlp timed out", "WARNING")
+                return
+            except Exception as e:
+                await interaction.followup.send("Failed to run yt-dlp.", ephemeral=True)
+                bot.logger.error(MODULE_NAME, "yt-dlp subprocess error", e)
+                return
+
+            if proc.returncode != 0:
+                err = stderr.decode(errors='replace').strip()
+                await interaction.followup.send(f"yt-dlp couldn't resolve that URL.", ephemeral=True)
+                bot.logger.log(MODULE_NAME, f"yt-dlp failed: {err}", "WARNING")
+                return
+
+            lines = stdout.decode(errors='replace').strip().splitlines()
+            # yt-dlp outputs: title, duration (seconds), stream URL — order depends on flags
+            # --get-title, --get-duration, --get-url prints them in that order
+            if len(lines) < 3:
+                await interaction.followup.send("Couldn't parse yt-dlp output.", ephemeral=True)
+                bot.logger.log(MODULE_NAME, f"Unexpected yt-dlp output: {lines}", "WARNING")
+                return
+
+            title = lines[0]
+            try:
+                duration = int(lines[1])
+            except ValueError:
+                duration = 0
+            stream_url = lines[2]
+
+            song = UrlSong(
+                url=song_name,
+                stream_url=stream_url,
+                title=title,
+                duration=duration,
+                requested_by=interaction.user
             )
-            bot.logger.log(MODULE_NAME, "Index not ready", "WARNING")
-            return
 
-        await interaction.response.defer(thinking=True)
-        bot.logger.log(MODULE_NAME, f"Play command: '{song_name}' (Format: {format}, Version: {version})")
+        else:
+            if not format:
+                await interaction.response.send_message(
+                    "Please specify a format (FLAC or MP3) when searching by name.",
+                    ephemeral=True
+                )
+                return
 
-        key = find_best_match(bot.ARCHIVE_manager.song_index, format, song_name)
-        if not key:
-            await interaction.followup.send(
-                f"Song not found: '{song_name}' in {format}",
-                ephemeral=True
+            if not hasattr(bot, 'ARCHIVE_manager') or not bot.ARCHIVE_manager.song_index_ready.is_set():
+                await interaction.response.send_message(
+                    "Music index not ready—please try again shortly.",
+                    ephemeral=True
+                )
+                bot.logger.log(MODULE_NAME, "Index not ready", "WARNING")
+                return
+
+            await interaction.response.defer(thinking=True)
+            bot.logger.log(MODULE_NAME, f"Play command: '{song_name}' (Format: {format}, Version: {version})")
+
+            key = find_best_match(bot.ARCHIVE_manager.song_index, format, song_name)
+            if not key:
+                await interaction.followup.send(
+                    f"Song not found: '{song_name}' in {format}",
+                    ephemeral=True
+                )
+                bot.logger.log(MODULE_NAME, f"Song not found: '{song_name}'", "WARNING")
+                return
+
+            candidates = bot.ARCHIVE_manager.song_index[format][key]
+            best = select_best_candidate(candidates, version)
+
+            if not best:
+                error_msg = f"Version '{version}' not found for '{song_name}'" if version else f"Song not found: '{song_name}'"
+                await interaction.followup.send(error_msg, ephemeral=True)
+                bot.logger.log(MODULE_NAME, f"Version not found: {version}", "WARNING")
+                return
+
+            song = Song(
+                file_path=best['path'],
+                metadata=best['metadata'],
+                requested_by=interaction.user
             )
-            bot.logger.log(MODULE_NAME, f"Song not found: '{song_name}'", "WARNING")
-            return
-
-        candidates = bot.ARCHIVE_manager.song_index[format][key]
-        best = select_best_candidate(candidates, version)
-
-        if not best:
-            error_msg = f"Version '{version}' not found for '{song_name}'"if version else f"Song not found: '{song_name}'"
-            await interaction.followup.send(error_msg, ephemeral=True)
-            bot.logger.log(MODULE_NAME, f"Version not found: {version}", "WARNING")
-            return
-
-        song = Song(
-            file_path=best['path'],
-            metadata=best['metadata'],
-            requested_by=interaction.user
-        )
 
         guild_id = interaction.guild_id
         player = bot.music_players.get(guild_id)

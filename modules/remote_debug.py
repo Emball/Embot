@@ -1023,8 +1023,8 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
                 (work / "payload.txt").write_text(payload, encoding="utf-8")
                 files_to_add.append("payload.txt")
             git(work, "add", *files_to_add)
-            git(work, "commit", "-m", str(seq))
-            result = git(work, "push", "origin", "main", check=False)
+            git(work, "commit", "--amend", "--no-edit")
+            result = git(work, "push", "origin", "main", "--force-with-lease", check=False)
             if result.returncode == 0:
                 pushed = True
                 break
@@ -1035,7 +1035,7 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
             cmd_data = read_json(work, "cmd.json")
             seq = cmd_data.get("seq", 0) + 1
             new_cmd["seq"] = seq
-            files_to_add = ["cmd.json"]  # payload.txt already staged in new clone if needed
+            files_to_add = ["cmd.json"]
 
         if not pushed:
             print("Failed to push command after retries", file=sys.stderr)

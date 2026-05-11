@@ -1187,7 +1187,7 @@ class CommunitySystem:
 
         items = [discord.ui.Container(discord.ui.TextDisplay(body), accent_color=0xf1c40f)]
         if image_url:
-            items.append(discord.ui.Container(discord.ui.TextDisplay(f"![]({image_url})")))
+            items.append(discord.ui.MediaGallery(discord.ui.MediaGalleryItem(url=image_url)))
 
         items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
         items.append(discord.ui.TextDisplay(f"-# Embot Spotlight Friday • {_now().strftime('%m/%d/%Y %-I:%M %p')}"))
@@ -1477,7 +1477,7 @@ def setup(bot):
 
         items = [discord.ui.Container(discord.ui.TextDisplay(body), accent_color=0xf1c40f)]
         if image_url:
-            items.append(discord.ui.Container(discord.ui.TextDisplay(f"![]({image_url})")))
+            items.append(discord.ui.MediaGallery(discord.ui.MediaGalleryItem(url=image_url)))
 
         items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
         items.append(discord.ui.TextDisplay(f"-# Embot Spotlight Friday • {_now().strftime('%m/%d/%Y %-I:%M %p')}"))

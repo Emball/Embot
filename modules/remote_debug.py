@@ -757,14 +757,7 @@ class ClaudeBridgeListener:
         else:
             self.bot.logger.log(MODULE_NAME, f"[bridge] seq={seq} result committed")
 
-        await asyncio.sleep(15)
 
-        def _zero():
-            cmd_sha = self._gh_get_sha("cmd.json")
-            result_sha2 = self._gh_get_sha("result.json")
-            self._gh_put_file("cmd.json", {"seq": 0, "command": "", "args": []}, cmd_sha or "", "clear")
-            self._gh_put_file("result.json", {"seq": 0, "command": "", "output": "", "error": ""}, result_sha2 or "", "clear")
-        await asyncio.get_event_loop().run_in_executor(self._executor, _zero)
 
     async def start(self):
         await asyncio.get_event_loop().run_in_executor(self._executor, self._zero_on_start)
@@ -772,11 +765,7 @@ class ClaudeBridgeListener:
         self.bot.logger.log(MODULE_NAME, f"[bridge] Claude bridge active — polling {self._repo}")
 
     def _zero_on_start(self):
-        cmd_sha = self._gh_get_sha("cmd.json")
-        result_sha = self._gh_get_sha("result.json")
         status_sha = self._gh_get_sha("status.json")
-        self._gh_put_file("cmd.json", {"seq": 0, "command": "", "args": []}, cmd_sha or "", "clear")
-        self._gh_put_file("result.json", {"seq": 0, "command": "", "output": "", "error": ""}, result_sha or "", "clear")
         version = getattr(self.bot, "version", "unknown")
         self._gh_put_file("status.json", {
             "online": True,

@@ -1163,25 +1163,6 @@ class CommunitySystem:
         member = guild.get_member(top["user_id"])
         name   = member.display_name if member else f"User {top['user_id']}"
 
-        since = (_now() - timedelta(days=7)).isoformat()
-        votes = self.db.get_vote_counts(top["group_id"], since)
-
-        embed = discord.Embed(
-            title="Spotlight Friday",
-            description=(
-                f"**{top['title'] or 'Untitled'}**\n\n"
-                f"{top['content'][:400]}{'...' if len(top['content']) > 400 else ''}"
-            ),
-            color=0xf1c40f,
-            timestamp=_now()
-        )
-
-        embed.add_field(
-            name="Votes",
-            value=f"🔥 {votes['🔥']}  │  😐 {votes['😐']}  │  🗑️ {votes['🗑️']}",
-            inline=False
-        )
-
         image_url = None
         if top["message_id"]:
             ch = guild.get_channel(top["channel_id"])
@@ -1195,30 +1176,27 @@ class CommunitySystem:
                 except Exception:
                     pass
 
-        if image_url:
-            embed.set_image(url=image_url)
-        elif member:
-            embed.set_thumbnail(url=member.display_avatar.url)
-
         links = json.loads(top["links"]) if top.get("links") else []
-        if links:
-            embed.add_field(
-                name="Download",
-                value=f"[Download Link]({links[0]})",
-                inline=False
-            )
-        elif top["message_id"]:
-            ch = guild.get_channel(top["channel_id"])
-            if ch:
-                embed.add_field(
-                    name="Original Post",
-                    value=f"[Jump to Submission](https://discord.com/channels/{guild.id}/{top['channel_id']}/{top['message_id']})",
-                    inline=False
-                )
+        jump_url = f"https://discord.com/channels/{guild.id}/{top['channel_id']}/{top['message_id']}"
+        link_line = f"[Download Link]({links[0]})" if links else f"[Jump to Submission]({jump_url})"
 
-        embed.set_footer(text="Embot Spotlight Friday")
+        xp_total = int(top["total_xp"])
+        mention = member.mention if member else name
 
-        await announcements.send(embed=embed)
+        body = f"## 🌟 Spotlight Friday\nThis week's featured submission is **{top['title'] or 'Untitled'}** by {mention}!\n\n**Version** • {top['version']}\n**XP Score** • {xp_total} XP\n\n**Original Post**\n{link_line}"
+
+        items = [discord.ui.Container(discord.ui.TextDisplay(body), accent_color=0xf1c40f)]
+        if image_url:
+            items.append(discord.ui.Container(discord.ui.TextDisplay(f"![]({image_url})")))
+
+        items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        items.append(discord.ui.TextDisplay(f"-# Embot Spotlight Friday • {_now().strftime('%m/%d/%Y %-I:%M %p')}"))
+
+        layout = discord.ui.LayoutView(timeout=None)
+        for item in items:
+            layout.add_item(item)
+
+        await announcements.send(view=layout)
         self.clog(
             f"Spotlight Friday posted: '{top['title']}' by user {top['user_id']} "
             f"({int(top['total_xp'])} XP)"

@@ -199,7 +199,7 @@ If other API details aren't properly covered here or you encounter errors, use y
 
 **Key classes** (all under `discord.ui`):
 - `LayoutView(timeout=None)` — top-level container, sent via `channel.send(view=layout)` or `message.edit(view=layout)`
-- `Container(*children, accent_color=None)` — card-like box; `accent_color` is an int (e.g. `0x1a1a2e`) for a colored left border, or `None` for no border
+- `Container(*children, accent_color=None)` — card-like box; **do not pass `accent_color`** — despite being in the signature, it causes the component to silently fall back to a plain embed. Leave it out.
 - `TextDisplay(content)` — renders markdown text inside a Container or directly in the layout
 - `Separator(spacing=discord.SeparatorSpacing.small)` — vertical gap between items; `SeparatorSpacing.small` or `SeparatorSpacing.large`
 

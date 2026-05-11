@@ -9,13 +9,11 @@
 
 ## User
 
-Michael (Emball/Embis). Vibe-coder with beginner Python knowledge. Assumes the bare minimum due diligence has been done — never tell him the bot "hasn't updated yet" or similar. Claude cannot perceive the passage of time and Michael will have already checked.
+Michael (Emball/Embis). Vibe-coder with beginner Python knowledge. However, never assume he is clueless or naive. If he raises an error or flags something, he will likely have already gone through the obvious (restarting the code, ensuring it's up to date, etc)
 
 ## Embot Codebase Overview
 
-Discord bot for Eminem fan server (discord.py, single guild focus, uv environment).
-
-The bot enforces single-guild operation: on `on_ready` it leaves any guild that isn't `home_guild_id`, and `on_guild_join` does the same for new joins. All console slash commands (`/status`, `/logs`, `/config`, etc.) gate on both `guild.id == home_guild_id` AND `user.id == guild.owner_id` via `_is_guild_owner()` — being owner of a foreign guild grants nothing.
+Codebase on GitHub at Emball/Embot. Discord bot for Eminem fan server (discord.py, single guild focus). The bot enforces single-guild operation and is not deployed in more than one server.
 
 **Read the actual source files** before making changes — don't rely solely on the descriptions below.
 
@@ -37,7 +35,7 @@ The bot enforces single-guild operation: on `on_ready` it leaves any guild that 
 
 Private `_*.py` files are skipped by the loader.
 
-Modules are listed in **dependency order** — this is also the required read order for audits (see Full Audit Protocol). This order is enforced at runtime via `_MODULE_ORDER` in `Embot.py`; if you add a new module, add it to that list in the correct position. Any module not in the list is appended alphabetically at the end.
+Module order is enforced at runtime via `_MODULE_ORDER` in `Embot.py`; if you add a new module, add it to that list in the correct position. 
 
 | Module | Description |
 |---|---|
@@ -103,56 +101,11 @@ Modules are listed in **dependency order** — this is also the required read or
 - `bot.logger` (ConsoleLogger) available to all modules
 - `_utils.py` used broadly across modules
 
-## Components V2 (discord.py LayoutView)
-
-Used in `info.py` and `mod_notes.py` for self-maintaining embeds. Components V2 messages are distinct from regular embeds — you cannot switch between them after posting; the bot deletes and reposts instead.
-
-**Key classes** (all under `discord.ui`):
-- `LayoutView(timeout=None)` — top-level container, sent via `channel.send(view=layout)` or `message.edit(view=layout)`
-- `Container(*children, accent_color=None)` — card-like box; `accent_color` is an int (e.g. `0x1a1a2e`) for a colored left border, or `None` for no border
-- `TextDisplay(content)` — renders markdown text inside a Container or directly in the layout
-- `Separator(spacing=discord.SeparatorSpacing.small)` — vertical gap between items; `SeparatorSpacing.small` or `SeparatorSpacing.large`
-
-**Markdown in TextDisplay** renders fully: `**bold**`, `## headings`, `` `code` ``, `[links](url)`, `-# small text` (for footers).
-
-**Standard pattern** used in this codebase:
-```python
-def _build_layout(cfg):
-    items = []
-    for i, section in enumerate(cfg["sections"]):
-        title, content = section["title"], section["content"]
-        text = f"## {title}\n{content}" if title.strip() else content
-        items.append(discord.ui.Container(discord.ui.TextDisplay(text)))
-        if i < len(cfg["sections"]) - 1:
-            items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
-    if cfg.get("footer"):
-        items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
-        items.append(discord.ui.TextDisplay(f"-# {cfg['footer']}"))
-    view = discord.ui.LayoutView(timeout=None)
-    for item in items:
-        view.add_item(item)
-    return view
-```
-
-**Sending/editing:**
-```python
-await channel.send(view=layout)          # new message
-await existing_msg.edit(view=layout)     # silent in-place edit, no "edited" timestamp
-```
-
-**Important constraints:**
-- `Container` children are passed as positional args to the constructor, not via `add_item`
-- `LayoutView` items ARE added via `view.add_item(item)`
-- Do NOT pass `color` in DEFAULTS for modules that don't use `accent_color` — `_build_layout` must not reference `DEFAULTS["color"]` if that key doesn't exist
-- DEFAULTS string values must use `\n` escapes, not literal newlines — Python 3.11 rejects unterminated string literals
-
 ## Embot Coding Rules
 
 Ensure new modules added to the bot properly log their processes in the bot console.
 
 Ensure there's no avenues in a module where an error could be silently swallowed or not passed to the console.
-
-Unhandled exceptions (sync and asyncio) are caught by global hooks in `Embot.py` and written directly to the log file with a `[FATAL]` prefix, bypassing the bot logger so crashes are always captured.
 
 ## Versioning & Git
 
@@ -163,19 +116,6 @@ Unhandled exceptions (sync and asyncio) are caught by global hooks in `Embot.py`
 - Increment version, commit, and push after every edit. No permission needed. Always stage `_version.py` in the same commit as the code change — never commit code without it.
 - Keep `requirements.txt` synced. Keep `.gitignore` clean. Keep AGENTS.md current.
 - Temp/test code goes in `/temp` (gitignored).
-
-## Discord Console Commands
-
-Server-owner-only slash commands registered in `Embot.py` as top-level commands. All responses are ephemeral. Auth uses `interaction.user.id == interaction.guild.owner_id` (actual Discord guild owner, not bot owner). Output is embedded inline as a code block; falls back to file attachment only if content exceeds 2000 characters.
-
-| Command | Description |
-|---|---|
-| `/status` | Version, latency, uptime, guilds, log file |
-| `/modules` | Loaded and failed module list |
-| `/logs [tail] [search]` | Recent log lines or regex search — inline, file if large |
-| `/config <name>` | View a config file — inline, file if large |
-| `/dbquery <name> <query>` | Read-only SQL query — inline, file if large |
-| `/restart` | Restart the bot |
 
 ## Claude Bridge
 
@@ -223,6 +163,8 @@ Testing individual files is recommended, but do not try to run a Embot.py sessio
 
 Exec is useful for debugging when you need to do something in the live bot root that remote_debug doesn't satisfy. Try to avoid modifying the live bot files though, as it can create uncommitted changes that block `git pull --ff-only`. Code edits go through git: edit locally → commit → push → server pulls.
 
+In Exec, double quotes inside double quotes get mangled. Always use single quotes: `bridge exec "uv run python -c 'code here'"`
+
 The raw, live bot log is a great source of truth. Check it first every time if something fails. The outputs are generally very verbose.
 
 Before drawing any conclusions about why something broke, fetch a large chunk of the log. Searching for specific strings is useful but can miss context.
@@ -235,44 +177,54 @@ Log Workflow:
 
 If that fails to identify the issue, you can expand to other avenues.
 
-Never use `sleep` to wait for the bot to update or restart. Poll with `bridge ping` instead — retry every few seconds until it responds.
+If facing response issues, never use `sleep` to wait for a response. Poll with `bridge ping` instead, and until it responds.
 
-**`bridge exec` quoting:** the command string goes through a shell, so double quotes inside double quotes get mangled. Always use single quotes for inner strings: `bridge exec "python3 -c 'code here'"`. For writing config/data to the server, use `config-write` instead of `exec` — it's shell-free and handles special characters (`$`, backticks, quotes) safely.
+Fse `config-write` instead of `exec` for writing configs/data, it and handles special characters safely.
 
-## Full Audit Protocol
+## Components V2 (discord.py LayoutView)
 
-Triggered by Michael saying **"full audit"** or **"audit: \<scope\>"**.
+As of 2026, Components V2 is properly implanted in the latest version's of Discord.py
 
-A full audit is not a quick scan. It requires loading every file in scope into context and reasoning across them together. Do not shortcut this — targeted reads miss architectural bugs that only appear when files are compared.
+If other API details aren't properly covered here or you encounter errors, use your search tool to search online.
 
-### Read Order
+**Key classes** (all under `discord.ui`):
+- `LayoutView(timeout=None)` — top-level container, sent via `channel.send(view=layout)` or `message.edit(view=layout)`
+- `Container(*children, accent_color=None)` — card-like box; `accent_color` is an int (e.g. `0x1a1a2e`) for a colored left border, or `None` for no border
+- `TextDisplay(content)` — renders markdown text inside a Container or directly in the layout
+- `Separator(spacing=discord.SeparatorSpacing.small)` — vertical gap between items; `SeparatorSpacing.small` or `SeparatorSpacing.large`
 
-Read `Embot.py` first, then the Modules table top-to-bottom — it is already ordered by dependency. For a scoped audit (`audit: mod`, `audit: vms`, etc.), read only the relevant cluster plus `Embot.py`, `_utils.py`, and `mod_core.py`.
+**Markdown in TextDisplay** renders fully: `**bold**`, `## headings`, `` `code` ``, `[links](url)`, `-# small text` (for footers).
 
-### Reasoning Passes (run both, in order)
+**Standard pattern** used in this codebase:
+```python
+def _build_layout(cfg):
+    items = []
+    for i, section in enumerate(cfg["sections"]):
+        title, content = section["title"], section["content"]
+        text = f"## {title}\n{content}" if title.strip() else content
+        items.append(discord.ui.Container(discord.ui.TextDisplay(text)))
+        if i < len(cfg["sections"]) - 1:
+            items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+    if cfg.get("footer"):
+        items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        items.append(discord.ui.TextDisplay(f"-# {cfg['footer']}"))
+    view = discord.ui.LayoutView(timeout=None)
+    for item in items:
+        view.add_item(item)
+    return view
+```
 
-**Pass 1 — Within-file:** For each file, check:
-- Silent error swallowing (`bare except`, `except: pass`, errors not logged)
-- Dead code (assigned but never read, tasks never started, unreachable branches)
-- Auth checks — correct pattern used? (`is_owner()` vs guild owner ID vs no check)
-- Resource leaks (connections, sessions, executors not closed)
+**Sending/editing:**
+```python
+await channel.send(view=layout)          # new message
+await existing_msg.edit(view=layout)     # silent in-place edit, no "edited" timestamp
+```
 
-**Pass 2 — Cross-file:** After all files are loaded, check:
-- Shared logic usage — does every call site use the canonical function, or does anything reimplement it inline? (`run_exec`, `_check_for_update`, `get_logs_data`, etc.)
-- Auth consistency — same operation uses same auth pattern across all three surfaces (console, guild slash, remote_debug)
-- Module dependencies — does anything import or reference a symbol that was removed or renamed?
-- Duplicate restart/cleanup logic across classes or modules
-
-### Output Format
-
-Group findings by severity:
-
-**Bugs** — incorrect behaviour, wrong logic, silent failures
-**Dead Code** — never runs, never read, can be deleted
-**Inconsistencies** — same operation done differently in different places
-**Suggestions** — not broken, but worth improving
-
-For each finding: file + line range, one-line description, and whether it's safe to fix immediately or needs discussion first.
+**Important constraints:**
+- `Container` children are passed as positional args to the constructor, not via `add_item`
+- `LayoutView` items ARE added via `view.add_item(item)`
+- Do NOT pass `color` in DEFAULTS for modules that don't use `accent_color` — `_build_layout` must not reference `DEFAULTS["color"]` if that key doesn't exist
+- DEFAULTS string values must use `\n` escapes, not literal newlines — Python 3.11 rejects unterminated string literals
 
 ## Session Start Acknowledgement
 

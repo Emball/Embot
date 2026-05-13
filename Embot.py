@@ -425,8 +425,9 @@ async def _smart_update(bot, caller="UPDATE") -> dict:
     )
 
     if needs_restart:
-        bot.logger.log(caller, "Core files changed — full restart required")
-        return {"status": "restart"}
+        core_changed = [f for f in changed if f not in ignored]
+        bot.logger.log(caller, f"Core files changed — full restart required: {core_changed}")
+        return {"status": "restart", "changed": core_changed}
 
     changed_modules = [
         f[len('modules/'):-len('.py')]
@@ -966,13 +967,23 @@ async def reload_module(name: str) -> tuple[bool, str]:
 
         commands_before = {cmd.name for cmd in bot.tree.get_commands()}
 
+        old_module = sys.modules.get(name)
+
         if name in sys.modules:
             module = importlib.reload(sys.modules[name])
         else:
             module = importlib.import_module(name)
 
-        if hasattr(module, 'setup'):
-            module.setup(bot)
+        try:
+            if hasattr(module, 'setup'):
+                module.setup(bot)
+        except Exception as setup_err:
+            # setup() failed — restore old module to avoid a broken half-loaded state
+            if old_module is not None:
+                sys.modules[name] = old_module
+            bot.logger.error("MAIN", f"setup() failed during reload of '{name}' — module may be in broken state", setup_err)
+            import traceback as _tb
+            return False, f"setup() failed for '{name}':\n{_tb.format_exc().strip()}"
 
         # Record newly added listeners for this module
         new_listeners = []

@@ -725,7 +725,9 @@ class ClaudeBridgeListener:
                 output = f"update failed: {result['message']}"
             elif status == "restart":
                 asyncio.create_task(self._delayed_restart_with_log())
-                return "core files changed — restarting (log committed after startup)", {}
+                changed = result.get("changed", [])
+                changed_str = ", ".join(changed) if changed else "unknown"
+                return f"core files changed ({changed_str}) — restarting (log committed after startup)", {}
             elif status == "reloaded":
                 lines = [f"{'ok' if ok else 'FAIL'}: {msg}" for _, ok, msg in result["modules"]]
                 output = "\n".join(lines) + f"\nv{self.bot.version}"

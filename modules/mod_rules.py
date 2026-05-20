@@ -143,20 +143,31 @@ class RulesManager:
         check_count = 0
         while not self.bot.is_closed():
             await asyncio.sleep(60)
+            check_count += 1
             try:
                 guild = self._watch_guild
-                if guild:
-                    data = self.load_rules()
-                    if data:
-                        current_hash = self._hash_rules(data)
-                        _, posted_hash = self._get_state(guild.id)
-                        hash_changed = current_hash != posted_hash
-                        check_count += 1
-                        # verify message exists every 5 minutes (every 5 iterations)
-                        if hash_changed or check_count % 5 == 0:
-                            if hash_changed:
-                                self.bot.logger.log("RULES", "Rules content change detected — syncing")
-                            await self.sync(guild, force=hash_changed)
+                if not guild:
+                    continue
+                data = self.load_rules()
+                if not data:
+                    continue
+                current_hash = self._hash_rules(data)
+                posted_msg_id, posted_hash = self._get_state(guild.id)
+                if current_hash != posted_hash:
+                    self.bot.logger.log("RULES", "Rules content change detected — syncing")
+                    await self.sync(guild, force=True)
+                elif check_count % 5 == 0:
+                    # Existence check only — repost only if message is gone
+                    if not posted_msg_id:
+                        await self.sync(guild, force=False)
+                    else:
+                        channel = self._get_rules_channel(guild)
+                        if channel:
+                            try:
+                                await channel.fetch_message(posted_msg_id)
+                            except discord.NotFound:
+                                self.bot.logger.log("RULES", "Rules message was deleted — reposting", "WARNING")
+                                await self.sync(guild, force=False)
             except Exception as e:
                 self.bot.logger.log("RULES", f"Watcher error: {e}", "WARNING")
 

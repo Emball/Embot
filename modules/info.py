@@ -171,13 +171,8 @@ async def _sync(bot, guild: discord.Guild, *, force: bool = False) -> bool:
 async def _watcher(bot):
     """Single loop: checks config hash every 15s, verifies message exists every 5min."""
     await bot.wait_until_ready()
-    # Seed last_hash from whichever guild has a saved state
-    last_hash = None
-    for guild in bot.guilds:
-        h = _load_state(guild.id).get("config_hash")
-        if h:
-            last_hash = h
-            break
+    # Seed last_hash from actual current config so reloads don't falsely trigger a repost
+    last_hash = _hash_config(_load_config())
     tick = 0
     while not bot.is_closed():
         await asyncio.sleep(15)
@@ -189,17 +184,23 @@ async def _watcher(bot):
 
             if config_changed:
                 bot.logger.log(MODULE_NAME, "Config change detected — syncing")
-
-            # Every 20 ticks (~5 min) do a full verify even if hash unchanged
-            full_verify = (tick % 20 == 0)
-
-            if config_changed or full_verify:
+                for guild in bot.guilds:
+                    await _sync(bot, guild, force=True)
+                last_hash = current_hash
+            elif tick % 20 == 0:
+                # Existence check only — repost if message is gone, never repost if content unchanged
                 for guild in bot.guilds:
                     msg_id = _load_state(guild.id).get("message_id")
-                    if config_changed or full_verify or not msg_id:
-                        await _sync(bot, guild, force=config_changed)
-                if config_changed:
-                    last_hash = current_hash
+                    if not msg_id:
+                        await _sync(bot, guild, force=False)
+                    else:
+                        channel = discord.utils.get(guild.text_channels, name=cfg.get("channel_name", ""))
+                        if channel:
+                            try:
+                                await channel.fetch_message(msg_id)
+                            except discord.NotFound:
+                                bot.logger.log(MODULE_NAME, "Info message was deleted — reposting", "WARNING")
+                                await _sync(bot, guild, force=False)
         except Exception as e:
             bot.logger.log(MODULE_NAME, f"Watcher error: {e}", "WARNING")
 

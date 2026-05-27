@@ -63,7 +63,7 @@ Modules sharing a prefix form a family. The `_core` file owns the DB, config, an
 
 | Module | Description |
 |---|---|
-| `mod_core.py` | Root — DB, shared state, `is_owner()`, media cache TTL loop, `on_vm_transcribed` automod, `on_member_ban` appeal DM |
+| `mod_core.py` | Root — DB, shared state, `is_owner()`, media cache TTL loop, `on_vm_transcribed` automod, `on_member_ban` appeal DM. Wraps `bot.logger.error` on setup to DM the owner (from `mod.json` `owner_id`) on every error, with 5-min dedup per unique message. |
 | `mod_suspicion.py` | Join scoring to detect suspicious users. Provides `is_flagged()` |
 | `mod_actions.py` | ban, kick, mute, warn, purge, lock, slowmode |
 | `mod_appeals.py` | Ban appeal flow — modal submission, mod voting, lifecycle management |
@@ -85,7 +85,7 @@ Modules sharing a prefix form a family. The `_core` file owns the DB, config, an
 
 | Module | Description |
 |---|---|
-| `music_archive.py` | SMB-compatible Eminem music archive. FLAC/MP3 scan, SQLite index, in-server CDN cache |
+| `music_archive.py` | SMB-compatible Eminem music archive. FLAC/MP3 scan, SQLite index, in-server CDN cache. Posts a persistent status embed to the songcache channel (delete-and-repost, change-detected to avoid unnecessary flashing). `cache_meta` table stores `status_msg_id` so reconcile never nukes it as an orphan. |
 | `music_player.py` | VC playback for archive files and YouTube/SoundCloud |
 
 **Standalone features**

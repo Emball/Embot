@@ -423,7 +423,7 @@ async def _post_status(bot, chan, state: dict) -> None:
     global _last_status_snapshot
     snapshot_key = (
         state.get("indexed"), state.get("cached"), state.get("activity"),
-        state.get("last_reconcile_ts"), state.get("orphans_deleted"),
+        state.get("orphans_deleted"),
         tuple(state.get("errors", [])[-3:]),
     )
     if snapshot_key == _last_status_snapshot.get("key") and _meta_get("status_msg_id"):

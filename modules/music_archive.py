@@ -531,7 +531,24 @@ async def _get_or_upload_cache(bot, file_path: str) -> Optional[str]:
     try:
         bot.logger.log(MODULE_NAME, f"Uploading {p.name} to {CACHE_CHANNEL_NAME}")
         mf = discord.File(p, filename=p.name)
-        msg = await asyncio.wait_for(chan.send(file=mf), timeout=120)
+        send_task = asyncio.ensure_future(chan.send(file=mf))
+        done, _ = await asyncio.wait({send_task}, timeout=120)
+        if not done:
+            try:
+                connector = bot.http._HTTPClient__session.connector
+                if connector and not connector.closed:
+                    for proto in list(getattr(connector, '_acquired', set())):
+                        try:
+                            proto.abort()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            await asyncio.wait({send_task}, timeout=3)
+            if not send_task.done():
+                send_task.cancel()
+            raise asyncio.TimeoutError()
+        msg = send_task.result()
         url = msg.attachments[0].url
         _cache_store(file_path, url, msg.id, chan.id, p.name,
                      p.stat().st_size if p.exists() else 0)
@@ -1164,19 +1181,25 @@ class ARCHIVEManager:
             send_task = asyncio.ensure_future(chan.send(files=files))
             done, _ = await asyncio.wait({send_task}, timeout=timeout)
             if not done:
-                send_task.cancel()
-                # force-close TCP connections so the stuck aiohttp send unblocks
+                # abort() force-kills TCP sockets so aiohttp unblocks immediately
                 try:
                     connector = self.bot.http._HTTPClient__session.connector
                     if connector and not connector.closed:
-                        await connector.close()
+                        for proto in list(getattr(connector, '_acquired', set())):
+                            try:
+                                proto.abort()
+                            except Exception:
+                                pass
                 except Exception:
                     pass
+                # give the task a moment to surface its error after abort
                 try:
-                    await asyncio.wait_for(asyncio.shield(send_task), timeout=2)
+                    await asyncio.wait({send_task}, timeout=3)
                 except Exception:
                     pass
-                self.bot.logger.log(MODULE_NAME, f"Batch upload timed out ({len(batch)} files) — connector reset", "WARNING")
+                if not send_task.done():
+                    send_task.cancel()
+                self.bot.logger.log(MODULE_NAME, f"Batch upload timed out ({len(batch)} files) — aborted", "WARNING")
                 return False
             msg = send_task.result()
             up_elapsed = time.time() - up_start

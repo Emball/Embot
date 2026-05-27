@@ -330,16 +330,16 @@ def _db_conn() -> sqlite3.Connection:
 def _db_init() -> None:
     with _db_conn() as c:
         c.executescript(DB_SCHEMA)
-        try:
-            c.execute("ALTER TABLE song_cache ADD COLUMN file_checksum TEXT NOT NULL DEFAULT ''")
-            c.commit()
-        except Exception:
-            pass
-        try:
-            c.execute("ALTER TABLE song_cache ADD COLUMN transcoded INTEGER NOT NULL DEFAULT 0")
-            c.commit()
-        except Exception:
-            pass
+        for migration in [
+            "ALTER TABLE song_cache ADD COLUMN file_checksum TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE song_cache ADD COLUMN transcoded INTEGER NOT NULL DEFAULT 0",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_song_cache_message_id ON song_cache(message_id)",
+        ]:
+            try:
+                c.execute(migration)
+                c.commit()
+            except Exception:
+                pass
 
 def _cache_lookup(file_path: str) -> Optional[dict]:
     key = str(Path(file_path))
@@ -396,6 +396,15 @@ def _cache_fail(file_path: str, reason: str) -> None:
         )
         c.commit()
 
+async def _delete_cache_message(bot, entry: dict) -> None:
+    try:
+        chan = bot.get_channel(int(entry["channel_id"]))
+        if chan:
+            msg = await chan.fetch_message(int(entry["message_id"]))
+            await msg.delete()
+    except Exception:
+        pass
+
 async def _get_or_upload_cache(bot, file_path: str) -> Optional[str]:
     p = Path(file_path)
     cached = _cache_lookup(file_path)
@@ -418,6 +427,9 @@ async def _get_or_upload_cache(bot, file_path: str) -> Optional[str]:
     if size > max_bytes:
         bot.logger.log(MODULE_NAME, f"File too large: {p.name} ({size // 1024 // 1024}MB)", "WARNING")
         return "FILE_TOO_LARGE"
+
+    if cached:
+        await _delete_cache_message(bot, cached)
 
     try:
         bot.logger.log(MODULE_NAME, f"Uploading {p.name} to {CACHE_CHANNEL_NAME}")
@@ -591,6 +603,7 @@ class ARCHIVEManager:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(METADATA_EXECUTOR, self._migrate_checksums)
             asyncio.create_task(self.backfill_cache())
+            asyncio.create_task(self.reconcile_channel())
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Background initialization failed", e)
 
@@ -619,6 +632,31 @@ class ARCHIVEManager:
                 await asyncio.wait_for(self.song_index_ready.wait(), timeout=30)
             except asyncio.TimeoutError:
                 self.bot.logger.log(MODULE_NAME, "Song index init timed out", "WARNING")
+
+    async def reconcile_channel(self):
+        chan = discord.utils.get(self.bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
+        if not chan:
+            return
+        with _db_conn() as c:
+            known_ids = {r[0] for r in c.execute("SELECT message_id FROM song_cache").fetchall()}
+        deleted = 0
+        try:
+            async for msg in chan.history(limit=None):
+                if msg.author != self.bot.user:
+                    await msg.delete()
+                    deleted += 1
+                    continue
+                if not msg.attachments:
+                    await msg.delete()
+                    deleted += 1
+                    continue
+                if str(msg.id) not in known_ids:
+                    await msg.delete()
+                    deleted += 1
+        except Exception as e:
+            self.bot.logger.log(MODULE_NAME, f"Reconcile error: {e}", "WARNING")
+        if deleted:
+            self.bot.logger.log(MODULE_NAME, f"Reconcile: deleted {deleted} orphan message(s)")
 
     async def backfill_cache(self):
         if not self.song_index:
@@ -932,6 +970,7 @@ def setup(bot):
             await interaction.followup.send("Uploading to cache (first time, may be slow)...", ephemeral=True)
         await _deliver_song(bot, interaction, best)
         await _log_delivery(bot, interaction.user, best, source="slash command")
+        asyncio.create_task(ARCHIVE_manager.reconcile_channel())
 
     @bot.tree.command(name="rebuild_index", description="[Owner only] Rebuild the song index cache")
     async def rebuild_index(interaction: discord.Interaction):

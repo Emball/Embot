@@ -697,6 +697,7 @@ class ARCHIVEManager:
         self.initialization_task = None
         self._status_msg_id = None
         self.backfill_active = False
+        self._backfill_task = None
         self._last_status_post = 0.0  # throttle _post_status during backfill
         self._status_state = {
             "indexed": 0, "cached": 0,
@@ -737,7 +738,7 @@ class ARCHIVEManager:
 
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(METADATA_EXECUTOR, self._migrate_checksums)
-            asyncio.create_task(self.backfill_cache())
+            self._backfill_task = asyncio.create_task(self.backfill_cache())
             # Yield so backfill_cache() runs first and sets backfill_active/DB flag before reconcile checks it
             await asyncio.sleep(0)
             asyncio.create_task(self.reconcile_channel())
@@ -892,6 +893,12 @@ class ARCHIVEManager:
         while True:
             await asyncio.sleep(INTERVAL)
             await self.reconcile_channel()
+
+    def shutdown(self):
+        if self._backfill_task and not self._backfill_task.done():
+            self._backfill_task.cancel()
+            self.bot.logger.log(MODULE_NAME, "Backfill task cancelled (module reload)")
+        self.backfill_active = False
 
     async def backfill_cache(self):
         if not self.song_index:
@@ -1150,7 +1157,7 @@ class ARCHIVEManager:
         for (fp, name, data, sz), att in zip(file_data, msg.attachments):
             actual_path = source_path if source_path and len(batch) == 1 else fp
             checksum = _file_checksum(actual_path)
-            _cache_store(fp, att.url, att.id, chan.id, name, sz, checksum, int(transcoded))
+            _cache_store(fp, att.url, msg.id, chan.id, name, sz, checksum, int(transcoded))
         self.bot.logger.log(MODULE_NAME,
             f"Cached batch: {len(batch)} file(s), {total_mb}MB "
             f"(read: {read_elapsed:.1f}s, upload: {up_elapsed:.1f}s)")
@@ -1165,6 +1172,10 @@ def setup(bot):
     from mod_core import is_owner
 
     bot.logger.log(MODULE_NAME, "Setting up ARCHIVE module")
+
+    old_mgr = getattr(bot, 'ARCHIVE_manager', None)
+    if old_mgr:
+        old_mgr.shutdown()
 
     ARCHIVE_manager = ARCHIVEManager(bot)
     bot.ARCHIVE_manager = ARCHIVE_manager

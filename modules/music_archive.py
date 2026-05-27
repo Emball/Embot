@@ -469,6 +469,8 @@ async def _post_status(bot, chan, state: dict) -> None:
         try:
             old_msg = await chan.fetch_message(int(old_id))
             await old_msg.delete()
+        except discord.NotFound:
+            pass  # already gone
         except Exception:
             pass
         _meta_del("status_msg_id")
@@ -756,18 +758,27 @@ class ARCHIVEManager:
         try:
             async for msg in chan.history(limit=None):
                 if msg.author != self.bot.user:
-                    await msg.delete()
-                    deleted += 1
+                    try:
+                        await msg.delete()
+                        deleted += 1
+                    except discord.NotFound:
+                        pass
                     continue
                 if str(msg.id) == status_id:
                     continue
                 if not msg.attachments:
-                    await msg.delete()
-                    deleted += 1
+                    try:
+                        await msg.delete()
+                        deleted += 1
+                    except discord.NotFound:
+                        pass
                     continue
                 if str(msg.id) not in known_ids:
-                    await msg.delete()
-                    deleted += 1
+                    try:
+                        await msg.delete()
+                        deleted += 1
+                    except discord.NotFound:
+                        pass
         except Exception as e:
             self.bot.logger.log(MODULE_NAME, f"Reconcile error: {e}", "WARNING")
         if deleted:

@@ -725,6 +725,7 @@ class ARCHIVEManager:
             await loop.run_in_executor(METADATA_EXECUTOR, self._migrate_checksums)
             asyncio.create_task(self.backfill_cache())
             asyncio.create_task(self.reconcile_channel())
+            asyncio.create_task(self._reconcile_loop())
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Background initialization failed", e)
 
@@ -803,6 +804,12 @@ class ARCHIVEManager:
             "activity": None,
         })
         await _post_status(self.bot, chan, self._status_state)
+
+    async def _reconcile_loop(self):
+        INTERVAL = 30 * 60  # 30 minutes
+        while True:
+            await asyncio.sleep(INTERVAL)
+            await self.reconcile_channel()
 
     async def backfill_cache(self):
         if not self.song_index:
@@ -1104,7 +1111,6 @@ def setup(bot):
             await interaction.followup.send("Uploading to cache (first time, may be slow)...", ephemeral=True)
         await _deliver_song(bot, interaction, best)
         await _log_delivery(bot, interaction.user, best, source="slash command")
-        asyncio.create_task(ARCHIVE_manager.reconcile_channel())
 
     @bot.tree.command(name="rebuild_index", description="[Owner only] Rebuild the song index cache")
     async def rebuild_index(interaction: discord.Interaction):

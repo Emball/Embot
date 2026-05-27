@@ -52,7 +52,7 @@ class IconManager:
 
         self.default_icon = 'Emball_Pit.png'
         self.current_icon = None
-        self._last_avatar_change: datetime | None = None
+        self._last_avatar_change: datetime | None = datetime.now(pytz.timezone('America/Detroit'))
 
     def should_use_icon(self, icon_name, now_est):
         config = self.icon_schedule.get(icon_name)

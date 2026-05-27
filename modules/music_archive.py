@@ -421,7 +421,6 @@ async def _post_status(bot, chan, state: dict) -> None:
     ts = int(_now().timestamp())
     indexed = state.get("indexed", 0)
     cached = state.get("cached", 0)
-    channel_msgs = state.get("channel_msgs", None)
     gap = indexed - cached
     activity = state.get("activity")
     errors = state.get("errors", [])
@@ -429,30 +428,25 @@ async def _post_status(bot, chan, state: dict) -> None:
     orphans = state.get("orphans_deleted", 0)
 
     pct = cached / indexed * 100 if indexed else 0
-    bar_len = 22
+    bar_len = 14
     filled = int(bar_len * cached / indexed) if indexed else 0
-    bar = "▰" * filled + "▱" * (bar_len - filled)
+    bar = "🟩" * filled + "⬛" * (bar_len - filled)
 
     accent = 0xe74c3c if errors else (0xf39c12 if activity else 0x57f287)
 
-    # main progress line
-    body = f"`{bar}`\n**{pct:.1f}%** — {cached:,} / {indexed:,} songs cached"
+    body = f"{bar}  **{pct:.1f}%**\n{cached:,} / {indexed:,} songs cached"
     if gap:
         body += f"\n-# {gap:,} not yet uploaded"
 
-    # activity line
     if activity:
         body += f"\n\n{activity}"
 
-    # sync state block
-    sync_parts = [f"DB  `{cached:,}`"]
-    if channel_msgs is not None:
-        in_sync = channel_msgs == cached
-        sync_icon = "✓" if in_sync else "✗"
-        sync_parts.append(f"channel  `{channel_msgs:,}`  {sync_icon}")
+    # sync state: DB entries vs what's indexed (these should always match)
+    in_sync = cached == indexed
+    sync_icon = "✓" if in_sync else "✗"
+    body += f"\n\nIndexed  `{indexed:,}`  ·  DB  `{cached:,}`  {sync_icon}"
     if orphans:
-        sync_parts.append(f"{orphans} removed last sync")
-    body += "\n\n" + "  ·  ".join(sync_parts)
+        body += f"  ·  {orphans} removed last sync"
 
     # errors
     if errors:
@@ -689,7 +683,7 @@ class ARCHIVEManager:
         self.initialization_task = None
         self._status_msg_id = None
         self._status_state = {
-            "indexed": 0, "cached": 0, "channel_msgs": None,
+            "indexed": 0, "cached": 0,
             "last_reconcile_ts": None, "orphans_deleted": 0,
             "errors": [], "activity": None,
         }
@@ -787,21 +781,11 @@ class ARCHIVEManager:
         if deleted:
             self.bot.logger.log(MODULE_NAME, f"Reconcile: deleted {deleted} orphan message(s)")
 
-        # count surviving attachment messages (= actual cached songs in channel)
-        channel_msgs = 0
-        try:
-            async for msg in chan.history(limit=None):
-                if msg.author == self.bot.user and msg.attachments and str(msg.id) != status_id:
-                    channel_msgs += 1
-        except Exception:
-            channel_msgs = None
-
         ts = int(_now().timestamp())
         with _db_conn() as c:
             cached = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
         self._status_state.update({
             "cached": cached,
-            "channel_msgs": channel_msgs,
             "last_reconcile_ts": ts,
             "orphans_deleted": deleted,
             "activity": None,

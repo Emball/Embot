@@ -478,12 +478,12 @@ async def _post_status(bot, chan, state: dict) -> None:
     if old_id:
         try:
             old_msg = await chan.fetch_message(int(old_id))
-            await old_msg.delete()
+            await old_msg.edit(view=view)
+            return
         except discord.NotFound:
-            pass
+            _meta_del("status_msg_id")
         except Exception:
             pass
-        _meta_del("status_msg_id")
 
     try:
         msg = await chan.send(view=view)

@@ -721,6 +721,11 @@ class ARCHIVEManager:
                 cached = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
             self._status_state.update({"indexed": indexed, "cached": cached, "activity": "Initializing..."})
 
+            # Pre-seed snapshot so reload doesn't repost if nothing changed
+            global _last_status_snapshot
+            if _meta_get("status_msg_id") and not _last_status_snapshot:
+                _last_status_snapshot["key"] = (indexed, cached, None, 0, ())
+
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(METADATA_EXECUTOR, self._migrate_checksums)
             asyncio.create_task(self.backfill_cache())

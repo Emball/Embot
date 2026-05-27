@@ -694,6 +694,7 @@ class ARCHIVEManager:
         self.song_index_ready = asyncio.Event()
         self.initialization_task = None
         self._status_msg_id = None
+        self.backfill_active = False
         self._status_state = {
             "indexed": 0, "cached": 0,
             "last_reconcile_ts": None, "orphans_deleted": 0,
@@ -761,6 +762,9 @@ class ARCHIVEManager:
                 self.bot.logger.log(MODULE_NAME, "Song index init timed out", "WARNING")
 
     async def reconcile_channel(self):
+        if self.backfill_active:
+            self.bot.logger.log(MODULE_NAME, "Reconcile skipped — backfill in progress")
+            return
         chan = discord.utils.get(self.bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
         if not chan:
             return
@@ -887,6 +891,13 @@ class ARCHIVEManager:
         if not chan:
             self.bot.logger.log(MODULE_NAME, f"Cannot backfill — no #{CACHE_CHANNEL_NAME} channel", "WARNING")
             return
+        self.backfill_active = True
+        try:
+            await self._backfill_cache(chan)
+        finally:
+            self.backfill_active = False
+
+    async def _backfill_cache(self, chan):
         max_bytes = min(getattr(chan.guild, 'filesize_limit', 25 * 1024 * 1024), 95 * 1024 * 1024)
 
         try:

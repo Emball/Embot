@@ -421,48 +421,50 @@ async def _post_status(bot, chan, state: dict) -> None:
     ts = int(_now().timestamp())
     indexed = state.get("indexed", 0)
     cached = state.get("cached", 0)
+    channel_msgs = state.get("channel_msgs", None)
     gap = indexed - cached
     activity = state.get("activity")
-    recent = state.get("recent_events", [])
     errors = state.get("errors", [])
     reconcile_ts = state.get("last_reconcile_ts")
     orphans = state.get("orphans_deleted", 0)
 
     pct = cached / indexed * 100 if indexed else 0
-    bar_len = 20
+    bar_len = 22
     filled = int(bar_len * cached / indexed) if indexed else 0
-    bar = "█" * filled + "░" * (bar_len - filled)
+    bar = "▰" * filled + "▱" * (bar_len - filled)
 
     accent = 0xe74c3c if errors else (0xf39c12 if activity else 0x57f287)
 
-    lines = [f"`{bar}`  **{pct:.1f}%**  ·  {cached:,} / {indexed:,} songs"]
+    # main progress line
+    body = f"`{bar}`\n**{pct:.1f}%** — {cached:,} / {indexed:,} songs cached"
     if gap:
-        lines.append(f"-# {gap:,} not yet cached")
+        body += f"\n-# {gap:,} not yet uploaded"
 
+    # activity line
     if activity:
-        lines.append(f"\n{activity}")
+        body += f"\n\n{activity}"
 
-    status_block = "\n".join(lines)
+    # sync state block
+    sync_parts = [f"DB  `{cached:,}`"]
+    if channel_msgs is not None:
+        in_sync = channel_msgs == cached
+        sync_icon = "✓" if in_sync else "✗"
+        sync_parts.append(f"channel  `{channel_msgs:,}`  {sync_icon}")
+    if orphans:
+        sync_parts.append(f"{orphans} removed last sync")
+    body += "\n\n" + "  ·  ".join(sync_parts)
 
-    meta_parts = []
-    if reconcile_ts:
-        meta_parts.append(f"synced <t:{reconcile_ts}:R>")
-        if orphans:
-            meta_parts.append(f"{orphans} removed")
-    if recent:
-        meta_parts.append(f"last: {recent[-1]}")
-
-    meta_line = "  ·  ".join(meta_parts) if meta_parts else "awaiting first sync"
-
-    error_block = ""
+    # errors
     if errors:
-        error_block = "\n" + "\n".join(f"-# ⚠ {e}" for e in errors[-3:])
+        body += "\n" + "\n".join(f"-# ⚠ {e}" for e in errors[-3:])
+
+    footer = f"synced <t:{reconcile_ts}:R>" if reconcile_ts else "not yet synced"
 
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(discord.ui.Container(
-        discord.ui.TextDisplay(f"### Song Cache\n{status_block}{error_block}"),
+        discord.ui.TextDisplay(f"### Song Cache\n{body}"),
         discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
-        discord.ui.TextDisplay(f"-# {meta_line}  ·  updated <t:{ts}:R>"),
+        discord.ui.TextDisplay(f"-# {footer}"),
         accent_color=accent,
     ))
 
@@ -472,7 +474,7 @@ async def _post_status(bot, chan, state: dict) -> None:
             old_msg = await chan.fetch_message(int(old_id))
             await old_msg.delete()
         except discord.NotFound:
-            pass  # already gone
+            pass
         except Exception:
             pass
         _meta_del("status_msg_id")
@@ -530,7 +532,6 @@ async def _get_or_upload_cache(bot, file_path: str) -> Optional[str]:
         if mgr:
             with _db_conn() as c:
                 mgr._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
-            mgr._status_state["recent_events"].append(f"Re-uploaded: {p.name}")
             asyncio.create_task(_post_status(bot, chan, mgr._status_state))
         return url
     except asyncio.TimeoutError:
@@ -688,9 +689,9 @@ class ARCHIVEManager:
         self.initialization_task = None
         self._status_msg_id = None
         self._status_state = {
-            "indexed": 0, "cached": 0,
+            "indexed": 0, "cached": 0, "channel_msgs": None,
             "last_reconcile_ts": None, "orphans_deleted": 0,
-            "recent_events": [], "errors": [], "activity": None,
+            "errors": [], "activity": None,
         }
 
     async def initialize(self):
@@ -786,11 +787,21 @@ class ARCHIVEManager:
         if deleted:
             self.bot.logger.log(MODULE_NAME, f"Reconcile: deleted {deleted} orphan message(s)")
 
+        # count surviving attachment messages (= actual cached songs in channel)
+        channel_msgs = 0
+        try:
+            async for msg in chan.history(limit=None):
+                if msg.author == self.bot.user and msg.attachments and str(msg.id) != status_id:
+                    channel_msgs += 1
+        except Exception:
+            channel_msgs = None
+
         ts = int(_now().timestamp())
         with _db_conn() as c:
             cached = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
         self._status_state.update({
             "cached": cached,
+            "channel_msgs": channel_msgs,
             "last_reconcile_ts": ts,
             "orphans_deleted": deleted,
             "activity": None,
@@ -1001,9 +1012,7 @@ class ARCHIVEManager:
             "activity": activity,
         })
         if not current_name:
-            self._status_state["recent_events"].append(
-                f"Backfill complete — {uploaded} uploaded, {errors} errors"
-            )
+            pass  # backfill complete, status will reflect updated cached count
         await _post_status(self.bot, chan, self._status_state)
 
     async def _send_batch(self, chan, batch, source_path=None, transcoded=False) -> bool:

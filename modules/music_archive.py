@@ -697,6 +697,7 @@ class ARCHIVEManager:
         self.initialization_task = None
         self._status_msg_id = None
         self.backfill_active = False
+        self._last_status_post = 0.0  # throttle _post_status during backfill
         self._status_state = {
             "indexed": 0, "cached": 0,
             "last_reconcile_ts": None, "orphans_deleted": 0,
@@ -1109,9 +1110,10 @@ class ARCHIVEManager:
             "cached": db_cached,
             "activity": activity,
         })
-        if not current_name:
-            pass  # backfill complete, status will reflect updated cached count
-        await _post_status(self.bot, chan, self._status_state)
+        now = time.time()
+        if not current_name or (now - self._last_status_post) >= 30:
+            self._last_status_post = now
+            await _post_status(self.bot, chan, self._status_state)
 
     async def _send_batch(self, chan, batch, source_path=None, transcoded=False) -> bool:
         read_start = time.time()

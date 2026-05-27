@@ -1256,6 +1256,7 @@ def setup(bot):
         audio_exts = ('.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.opus',
                       '.mp4', '.mov', '.webm')
 
+        from mod_oversight import bot_logs_channel
         bot_logs_ch = bot_logs_channel(mod_system, after.guild)
 
         if not removed_files:

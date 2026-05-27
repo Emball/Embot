@@ -378,15 +378,16 @@ async def _cache_refresh_url(bot, file_path: str, entry: dict) -> Optional[str]:
         if not msg.attachments:
             bot.logger.log(MODULE_NAME, f"Cache refresh failed: message {entry['message_id']} has no attachments", "WARNING")
             return None
+        def _norm(s): return s.replace('_', ' ')
         for att in msg.attachments:
-            if att.filename == entry["file_name"]:
+            if _norm(att.filename) == _norm(entry["file_name"]):
                 _cache_store(file_path, att.url, entry["message_id"], entry["channel_id"],
                              entry["file_name"], entry["file_size"])
                 return att.url
         att = msg.attachments[0]
         bot.logger.log(MODULE_NAME, f"Cache refresh: filename mismatch (stored='{entry['file_name']}' actual='{att.filename}'), using first attachment", "WARNING")
         _cache_store(file_path, att.url, entry["message_id"], entry["channel_id"],
-                     att.filename, entry["file_size"])
+                     entry["file_name"], entry["file_size"])
         return att.url
     except discord.NotFound:
         bot.logger.log(MODULE_NAME, f"Cache refresh failed: message {entry['message_id']} deleted", "WARNING")

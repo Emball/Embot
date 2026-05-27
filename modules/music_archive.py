@@ -13,7 +13,6 @@ from mutagen.flac import FLAC
 from mutagen.id3 import ID3
 from mutagen.mp3 import MP3
 import asyncio
-import aiohttp
 import difflib
 from discord import app_commands
 import discord
@@ -373,15 +372,26 @@ async def _cache_refresh_url(bot, file_path: str, entry: dict) -> Optional[str]:
     try:
         chan = bot.get_channel(int(entry["channel_id"]))
         if not chan:
+            bot.logger.log(MODULE_NAME, f"Cache refresh failed: channel {entry['channel_id']} not found", "WARNING")
             return None
         msg = await chan.fetch_message(int(entry["message_id"]))
+        if not msg.attachments:
+            bot.logger.log(MODULE_NAME, f"Cache refresh failed: message {entry['message_id']} has no attachments", "WARNING")
+            return None
         for att in msg.attachments:
             if att.filename == entry["file_name"]:
                 _cache_store(file_path, att.url, entry["message_id"], entry["channel_id"],
                              entry["file_name"], entry["file_size"])
                 return att.url
-    except Exception:
-        pass
+        att = msg.attachments[0]
+        bot.logger.log(MODULE_NAME, f"Cache refresh: filename mismatch (stored='{entry['file_name']}' actual='{att.filename}'), using first attachment", "WARNING")
+        _cache_store(file_path, att.url, entry["message_id"], entry["channel_id"],
+                     att.filename, entry["file_size"])
+        return att.url
+    except discord.NotFound:
+        bot.logger.log(MODULE_NAME, f"Cache refresh failed: message {entry['message_id']} deleted", "WARNING")
+    except Exception as e:
+        bot.logger.log(MODULE_NAME, f"Cache refresh failed: {e}", "WARNING")
     return None
 
 def _cache_fail(file_path: str, reason: str) -> None:
@@ -396,19 +406,11 @@ async def _get_or_upload_cache(bot, file_path: str) -> Optional[str]:
     p = Path(file_path)
     cached = _cache_lookup(file_path)
     if cached:
-        try:
-            async with aiohttp.ClientSession() as sess:
-                async with sess.head(cached["cdn_url"], timeout=5) as resp:
-                    if resp.status == 200:
-                        bot.logger.log(MODULE_NAME, f"Cache hit: {p.name}")
-                        return cached["cdn_url"]
-        except Exception:
-            pass
         fresh = await _cache_refresh_url(bot, file_path, cached)
         if fresh:
-            bot.logger.log(MODULE_NAME, f"Cache refreshed: {p.name}")
+            bot.logger.log(MODULE_NAME, f"Cache hit: {p.name}")
             return fresh
-        bot.logger.log(MODULE_NAME, f"Cache stale, re-uploading: {p.name}", "WARNING")
+        bot.logger.log(MODULE_NAME, f"Cache miss, re-uploading: {p.name}", "WARNING")
 
     chan = discord.utils.get(bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
     if not chan:

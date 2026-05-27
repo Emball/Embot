@@ -105,6 +105,22 @@ All configs are gitignored.
 | `musicarchive.db` | music_archive |
 | `archive.db` | mod_oversight |
 
+### Module Families & Naming Conventions
+
+Modules are grouped into families by prefix. When a feature grows large enough to split, it should be split along this pattern — not refactored into a monolith after the fact.
+
+**Prefix = family.** All modules sharing a prefix are one logical system:
+- `mod_` — moderation system. `mod_core` is the root; all others depend on it.
+- `vms_` — voice message system. `vms_core` is the root; others are subordinate.
+- `music_` — music archive + playback. Loosely coupled; share no runtime state.
+- `_` prefix — private shared utilities (`_utils.py`, `_messages.py`). No `setup(bot)`, imported directly. Never registered with the loader.
+
+**When to split a module:** if a module exceeds ~600 lines and contains clearly separable concerns (different lifecycles, different failure modes, different Discord event scopes), split it. Name the new file `prefix_descriptor.py`. The core file keeps the root logic and shared state; subordinate files handle distinct operations.
+
+**Root vs subordinate:** the `_core` file owns the DB, config, shared state, and any cross-system event dispatch. Subordinate files import from core — never the reverse. If two subordinate files need to share something, it belongs in core.
+
+**When not to split:** small features with a single concern stay as one file regardless of length. Splitting `links.py` or `artwork.py` would add indirection with no benefit.
+
 ### Cross-Module Dependencies
 
 - `mod_core.py` — provides `is_owner()` (lazy-imported by music_archive, community, links, mod_logger)

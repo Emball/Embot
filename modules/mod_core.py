@@ -1545,4 +1545,36 @@ def setup(bot):
         except Exception as e:
             bot.logger.error(MODULE_NAME, "on_vm_transcribed handler error", e)
 
+    # Wrap bot.logger.error to DM owner on every error/traceback
+    import traceback as _tb
+    _orig_logger_error = bot.logger.error
+    def _error_with_dm(module_name, message, exception=None):
+        _orig_logger_error(module_name, message, exception)
+        async def _dm():
+            try:
+                owner_id = mod_system.cfg.owner_id
+                if not owner_id:
+                    return
+                body = f"[{module_name}] {message}"
+                if exception:
+                    body += "\n\n" + "".join(_tb.format_exception(type(exception), exception, exception.__traceback__))
+                user = await bot.fetch_user(owner_id)
+                dm = await user.create_dm()
+                for i, chunk in enumerate([body[j:j+1800] for j in range(0, len(body), 1800)]):
+                    view = discord.ui.LayoutView(timeout=None)
+                    view.add_item(discord.ui.Container(
+                        discord.ui.TextDisplay(f"### ⚠ Error — {module_name}{' (cont.)' if i else ''}\n```\n{chunk}\n```"),
+                        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+                        discord.ui.TextDisplay(f"-# <t:{int(__import__('time').time())}:R>"),
+                        accent_color=0xe74c3c,
+                    ))
+                    await dm.send(view=view)
+            except Exception:
+                pass
+        try:
+            asyncio.get_running_loop().create_task(_dm())
+        except RuntimeError:
+            pass
+    bot.logger.error = _error_with_dm
+
     bot.logger.log(MODULE_NAME, "Moderation setup complete")

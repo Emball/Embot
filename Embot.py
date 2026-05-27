@@ -374,7 +374,11 @@ async def _smart_update(bot, caller="UPDATE") -> dict:
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
         msg = f"Fetch failed: {stderr.decode()[:200]}"
-        bot.logger.log(caller, msg, "WARNING")
+        from _utils import NetworkState
+        if NetworkState.is_online():
+            bot.logger.log(caller, msg, "WARNING")
+        else:
+            NetworkState.suppress()
         return {"status": "error", "message": msg}
 
     proc = await asyncio.create_subprocess_exec(
@@ -691,6 +695,22 @@ async def on_ready():
     else:
         bot.logger.log("MAIN", f"Embot reconnected as {bot.user}")
         bot.logger.log("MAIN", "Reconnected successfully (commands not resynced to avoid rate limits)")
+
+@bot.event
+async def on_disconnect():
+    from _utils import NetworkState
+    if NetworkState.is_online():
+        NetworkState.set_offline()
+        bot.logger.log("MAIN", "Network connection lost — suppressing connectivity errors until restored", "WARNING")
+
+@bot.event
+async def on_resumed():
+    from _utils import NetworkState
+    dropped = NetworkState.set_online()
+    msg = "Network connection restored"
+    if dropped:
+        msg += f" ({dropped} error(s) suppressed during outage)"
+    bot.logger.log("MAIN", msg)
 
 async def monitor_heartbeat():
     await bot.wait_until_ready()

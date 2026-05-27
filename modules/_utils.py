@@ -4,6 +4,34 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+
+class NetworkState:
+    """Shared connectivity state. Modules check this before logging network errors."""
+    _online = True
+    _suppressed = 0  # errors silently dropped while offline
+
+    @classmethod
+    def is_online(cls) -> bool:
+        return cls._online
+
+    @classmethod
+    def set_offline(cls):
+        cls._online = False
+        cls._suppressed = 0
+
+    @classmethod
+    def set_online(cls) -> int:
+        """Marks online. Returns count of suppressed errors since last outage."""
+        dropped = cls._suppressed
+        cls._online = True
+        cls._suppressed = 0
+        return dropped
+
+    @classmethod
+    def suppress(cls):
+        """Call instead of logging a network error while offline."""
+        cls._suppressed += 1
+
 def atomic_json_write(filepath, data, indent=2, ensure_ascii=False):
     path = Path(filepath)
     path.parent.mkdir(parents=True, exist_ok=True)

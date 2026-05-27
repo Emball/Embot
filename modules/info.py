@@ -202,7 +202,11 @@ async def _watcher(bot):
                                 bot.logger.log(MODULE_NAME, "Info message was deleted — reposting", "WARNING")
                                 await _sync(bot, guild, force=False)
         except Exception as e:
-            bot.logger.log(MODULE_NAME, f"Watcher error: {e}", "WARNING")
+            from _utils import NetworkState
+            if NetworkState.is_online():
+                bot.logger.log(MODULE_NAME, f"Watcher error: {e}", "WARNING")
+            else:
+                NetworkState.suppress()
 
 
 def setup(bot):

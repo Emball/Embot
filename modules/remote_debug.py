@@ -531,7 +531,10 @@ class ClaudeBridgeListener:
             except Exception as e:
                 consecutive_errors += 1
                 backoff = min(backoff * 2, BACKOFF_MAX)
-                if backoff >= DEAF_THRESHOLD:
+                from _utils import NetworkState
+                if not NetworkState.is_online():
+                    NetworkState.suppress()
+                elif backoff >= DEAF_THRESHOLD:
                     self.bot.logger.log(MODULE_NAME, f"[bridge] poll backoff {backoff:.0f}s — bridge effectively deaf to new commands (error #{consecutive_errors}: {e})", "WARNING")
                 else:
                     self.bot.logger.error(MODULE_NAME, f"[bridge] poll error #{consecutive_errors}, retrying in {backoff:.0f}s", e)

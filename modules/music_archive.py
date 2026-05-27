@@ -729,9 +729,14 @@ class ARCHIVEManager:
             if _meta_get("status_msg_id") and not _last_status_snapshot:
                 _last_status_snapshot["key"] = (indexed, cached, None, 0, ())
 
+            # Clear any stale backfill_active flag from a previous crash/reload
+            _meta_del("backfill_active")
+
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(METADATA_EXECUTOR, self._migrate_checksums)
             asyncio.create_task(self.backfill_cache())
+            # Yield so backfill_cache() runs first and sets backfill_active/DB flag before reconcile checks it
+            await asyncio.sleep(0)
             asyncio.create_task(self.reconcile_channel())
             asyncio.create_task(self._reconcile_loop())
         except Exception as e:
@@ -764,7 +769,7 @@ class ARCHIVEManager:
                 self.bot.logger.log(MODULE_NAME, "Song index init timed out", "WARNING")
 
     async def reconcile_channel(self):
-        if self.backfill_active:
+        if self.backfill_active or _meta_get("backfill_active") == "1":
             self.bot.logger.log(MODULE_NAME, "Reconcile skipped — backfill in progress")
             return
         chan = discord.utils.get(self.bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
@@ -894,10 +899,12 @@ class ARCHIVEManager:
             self.bot.logger.log(MODULE_NAME, f"Cannot backfill — no #{CACHE_CHANNEL_NAME} channel", "WARNING")
             return
         self.backfill_active = True
+        _meta_set("backfill_active", "1")
         try:
             await self._backfill_cache(chan)
         finally:
             self.backfill_active = False
+            _meta_del("backfill_active")
 
     async def _backfill_cache(self, chan):
         max_bytes = min(getattr(chan.guild, 'filesize_limit', 25 * 1024 * 1024), 95 * 1024 * 1024)

@@ -18,7 +18,7 @@
 
 - Brief comments only. Good code explains itself.
 - No section headers, block comments, or reasoning inside code.
-- All modules must log their processes to the bot console. No errors silently swallowed.
+- All modules must log their processes to the bot console. No errors silently swallowed — but check `NetworkState.is_online()` before logging network-related errors (see Known Quirks).
 
 ## User
 
@@ -28,7 +28,7 @@ Michael (Emball/Embis). Vibe-coder with beginner Python knowledge — don't assu
 
 GitHub: `Emball/Embot`. Discord bot for an Eminem fan server (discord.py, single guild).
 
-**Always read the actual source files before making changes.** 
+**Always read the actual source files before making changes.**
 
 The repo should be cloned locally at session start, always edit and read code from here.
 
@@ -52,14 +52,14 @@ Private `_*.py` files are skipped by the loader. Module load order is enforced v
 
 | Module | Description |
 |---|---|
-| `_utils.py` | `atomic_json_write()`, `migrate_config()`, `script_dir()`, `_now()` — imported by nearly everything |
+| `_utils.py` | `atomic_json_write()`, `migrate_config()`, `script_dir()`, `_now()`, `NetworkState` — imported by nearly everything |
 | `_messages.py` | Message + media cache. No bot dependency; imported directly by mod_core and vms_playback |
-| `mod_core.py` | Moderation core. Provides `is_owner()`. Owns media cache TTL loop and `on_vm_transcribed` automod listener |
+| `mod_core.py` | Moderation core. Provides `is_owner()`. Owns media cache TTL loop, `on_vm_transcribed` automod listener, and `on_member_ban` external-ban appeal DM |
 | `mod_suspicion.py` | Scores members on join using signals to detect suspicious users. Provides `is_flagged()` |
 | `mod_actions.py` | ban, kick, mute, warn, purge, lock, slowmode |
 | `mod_appeals.py` | Ban appeal flow — modal submission, mod voting, lifecycle management |
 | `mod_oversight.py` | Pending action review with approve/revert, daily integrity reports, deletion log tracking |
-| `mod_rules.py` | Syncs and displays server rules in #rules channel |
+| `mod_rules.py` | Syncs and displays server rules in #rules channel. Polls config every 30s, verifies message exists every 2.5min |
 | `mod_notes.py` | Self-maintaining mod command reference posted to #mod-notes |
 | `info.py` | Self-maintaining info docs synced to #info. Polls config every 15s, verifies embed every 5min |
 | `mod_logger.py` | 17 Discord event types → join-logs/bot-logs |
@@ -71,7 +71,7 @@ Private `_*.py` files are skipped by the loader. Module load order is enforced v
 | `music_archive.py` | SMB-compatible Eminem music archive. FLAC/MP3 scan, SQLite index, in-server CDN cache |
 | `music_player.py` | VC playback for archive files and YouTube/SoundCloud |
 | `community.py` | Project/artwork submission tracking with emoji voting and Spotlight Friday |
-| `starboard.py` | Dyno-style starboard, config-driven |
+| `starboard.py` | Dyno-style starboard, config-driven, Components V2 |
 | `youtube.py` | Polls a YouTube channel for new uploads, extracts .OGG audio, announces to Discord |
 | `links.py` | `?name` quick-link triggers, JSON-backed |
 | `icons.py` | Holiday icon rotation — server icon + bot avatar |
@@ -134,9 +134,9 @@ The GitHub token is in Claude's user preferences (`GitHub Access Token: ghp_...`
 
 **Result routing:**
 - Direct output (ping, status, guilds, modules, shell, update, restart, reload) → `result.json`
-- File artifacts (logs, config, db) → committed under `logs/`, `config/`, `db/`
+- Artifact output (logs, config, db-download) → `logs/`, `config/`, `db/` subdirectories
 
-| Command | Bridge | LAN | Purpose |
+| Command | Server | Bridge | Notes |
 |---|---|---|---|
 | `ping` | ✓ | ✓ | Test connectivity |
 | `status` | ✓ | ✓ | Bot vitals |
@@ -197,6 +197,8 @@ Prefer `config-write`/`config-patch` over `shell` for config changes. Prefer `sc
 - **Starboard — `allowed_mentions=discord.AllowedMentions.none()`** — always pass this on starboard send/edit. Raw message content may contain role mentions (`<@&...>`). Neutralise inline with a zero-width space after `<@` as a second layer.
 - **External/API bans** — `ModerationSystem._bot_initiated_bans` (set) tracks bot-initiated bans. `_do_ban` and `_do_softban` add the user ID just before the Discord ban call. `on_member_ban` in `mod_core.py` skips the appeal DM if the ID is present (bot-initiated), otherwise sends it (external/API ban).
 - **`CommandRegistrationError: ban already registered`** — appears in logs during `mod_core` reloads. Pre-existing quirk from the command registration order, not a bug introduced by recent changes. Bot recovers and continues cleanly.
+- **`on_message_edit` import** — `bot_logs_channel` must be lazy-imported inside `on_message_edit` (same pattern as `on_message_delete`). It is not available at module scope.
+- **Network error suppression** — `NetworkState` in `_utils.py` tracks online/offline state. `Embot.py` flips it via `on_disconnect`/`on_resumed`. Any module logging network errors should check `NetworkState.is_online()` first; if offline, call `NetworkState.suppress()` instead. This prevents console spam during host network blips.
 
 ## Components V2 (discord.py LayoutView)
 

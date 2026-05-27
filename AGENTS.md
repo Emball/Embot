@@ -119,7 +119,7 @@ All configs are gitignored.
 
 - Format: `MAJOR.MINOR.PATCH.MICRO`
 - Bump thresholds (lines changed): `300+` → MAJOR, `100+` → MINOR, `20+` → PATCH, `1+` → MICRO
-- Commit message = version number only.
+- Commit message format: `VERSION — short description` (e.g. `38.1.2.2 — starboard: fix duplicate post on V2 edit`). Description ≤10 words, covers the primary change. No vague words like "improvements", "fixes", "tweaks", or "updates".
 - Always stage `_version.py` in the same commit as the code change.
 - `_version.py` never triggers a bot restart.
 - Keep `requirements.txt` synced. Temp/test code goes in `/temp` (gitignored).

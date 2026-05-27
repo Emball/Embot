@@ -186,19 +186,14 @@ Prefer `config-write`/`config-patch` over `shell` for config changes. Prefer `sc
 
 ## Known Quirks
 
-- **`mod_logger.py` footers** — all `-#` footer lines must be the last line in the text string passed to `_section_with_avatar()`. The helper splits on the first `\n-#` and places everything after it outside the Section as a pinned footer.
-- **`mod_logger.py` mentions** — footers use `<@{id}>` format (renders as clickable, no ping). `_send()` always passes `allowed_mentions=discord.AllowedMentions.none()`.
-- **Hot-reload listener stacking** — `reload_module()` in `Embot.py` tracks and removes `bot.listen()` handlers before re-running `setup()`. Automatically handled for all modules.
+- **`mod_logger.py` footers** — `-#` footer line must be the last line in the text string passed to `_section_with_avatar()`. The helper splits on the first `\n-#` and pins everything after it as a footer outside the Section.
 - **`AGENTS.md` does not trigger restart** — it's in the `ignored` set in `_smart_update()` alongside `_version.py`.
 - **`mod_oversight.log_bot_register()`** — stores `text` string + `color` int instead of Embed fields. `handle_bot_log_deletion()` reconstructs LayoutView from stored text.
 - **Components V2 messages have no `.embeds`** — use recursive `getattr(c, 'content', None)` + `getattr(c, 'children', [])` to inspect text content in components.
 - **`script-exec` via bridge runs as a subprocess** — not inside the bot process. `bot`, `discord`, and the event loop are not available. Use `asyncio.ensure_future()` inside a module's `setup()` for in-process async work. For one-shot bot-internal tasks, write a temporary module (e.g. `sb_migrate.py`), push it via git, auto-update pulls it, then `bridge reload <module>` triggers `setup()` which fires the async task. Module should `Path(__file__).unlink(missing_ok=True)` when done and be removed from the repo in the next commit.
-- **Starboard — do not mix `content=` with V2 edits** — editing an old embed-based starboard message with a LayoutView raises `400 Bad Request: content field cannot be used with IS_COMPONENTS_V2`. Treat as `NotFound` — delete and repost.
-- **Starboard — `allowed_mentions=discord.AllowedMentions.none()`** — always pass this on starboard send/edit. Raw message content may contain role mentions (`<@&...>`). Neutralise inline with a zero-width space after `<@` as a second layer.
-- **External/API bans** — `ModerationSystem._bot_initiated_bans` (set) tracks bot-initiated bans. `_do_ban` and `_do_softban` add the user ID just before the Discord ban call. `on_member_ban` in `mod_core.py` skips the appeal DM if the ID is present (bot-initiated), otherwise sends it (external/API ban).
-- **`CommandRegistrationError: ban already registered`** — appears in logs during `mod_core` reloads. Pre-existing quirk from the command registration order, not a bug introduced by recent changes. Bot recovers and continues cleanly.
-- **`on_message_edit` import** — `bot_logs_channel` must be lazy-imported inside `on_message_edit` (same pattern as `on_message_delete`). It is not available at module scope.
-- **Network error suppression** — `NetworkState` in `_utils.py` tracks online/offline state. `Embot.py` flips it via `on_disconnect`/`on_resumed`. Any module logging network errors should check `NetworkState.is_online()` first; if offline, call `NetworkState.suppress()` instead. This prevents console spam during host network blips.
+- **Starboard V2 edits** — mixing `content=` with a LayoutView edit raises `400 IS_COMPONENTS_V2`. Treat as `NotFound` — delete and repost. Always pass `allowed_mentions=discord.AllowedMentions.none()` on send/edit; also neutralise mentions inline with a zero-width space after `<@`.
+- **`CommandRegistrationError: ban already registered`** — appears in logs during `mod_core` reloads. Pre-existing quirk, not a regression. Bot recovers cleanly.
+- **Network error suppression** — `NetworkState` in `_utils.py` tracks connectivity. Check `NetworkState.is_online()` before logging network errors; call `NetworkState.suppress()` instead when offline. `Embot.py` flips state via `on_disconnect`/`on_resumed`.
 
 ## Components V2 (discord.py LayoutView)
 

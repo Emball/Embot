@@ -730,8 +730,10 @@ class ARCHIVEManager:
 
             # Post status embed on startup (edit in place if already exists)
             chan = discord.utils.get(self.bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
+            self.bot.logger.log(MODULE_NAME, f"Startup status post — chan={'found' if chan else 'NOT FOUND'} status_msg_id={_meta_get('status_msg_id')}")
             if chan:
                 await _post_status(self.bot, chan, self._status_state)
+                self.bot.logger.log(MODULE_NAME, f"Startup status post complete — new status_msg_id={_meta_get('status_msg_id')}")
 
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(METADATA_EXECUTOR, self._migrate_checksums)

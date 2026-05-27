@@ -21,7 +21,9 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
 METADATA_EXECUTOR = ThreadPoolExecutor(max_workers=4)
+UPLOAD_EXECUTOR = ThreadPoolExecutor(max_workers=1)  # backfill file reads — isolated from metadata ops
 atexit.register(METADATA_EXECUTOR.shutdown, wait=False)
+atexit.register(UPLOAD_EXECUTOR.shutdown, wait=False)
 MODULE_NAME = "MUSIC ARCHIVE"
 
 def _migrate_path(new_path: Path, old_path: Path) -> Path:
@@ -959,6 +961,7 @@ class ARCHIVEManager:
         sent_batches = 0
 
         for fp in pending:
+            await asyncio.sleep(0)  # yield each iteration so event loop stays responsive
             if _cache_lookup(fp):
                 cached += 1
                 continue
@@ -994,7 +997,7 @@ class ARCHIVEManager:
                     self.bot.logger.log(MODULE_NAME, f"Downsample failed or still too large: {p.name}", "WARNING")
                     errors += 1
                 sent_batches += 1
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
                 continue
             if batch and batch_size + sz > max_bytes:
                 await self._update_backfill_embed(
@@ -1010,7 +1013,7 @@ class ARCHIVEManager:
                 sent_batches += 1
                 batch = []
                 batch_size = 0
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
             batch.append((fp, p, sz))
             batch_size += sz
             total_bytes += sz
@@ -1108,7 +1111,8 @@ class ARCHIVEManager:
         loop = asyncio.get_running_loop()
         file_data = []
         for fp, p, sz in batch:
-            data = await loop.run_in_executor(METADATA_EXECUTOR, p.read_bytes)
+            data = await loop.run_in_executor(UPLOAD_EXECUTOR, p.read_bytes)
+            await asyncio.sleep(0)  # yield between file reads
             cache_key = source_path if source_path and len(batch) == 1 else fp
             file_data.append((cache_key, p.name, data, sz))
         read_elapsed = time.time() - read_start
@@ -1143,6 +1147,7 @@ class ARCHIVEManager:
             self.bot.logger.log(MODULE_NAME,
                 f"Batch mismatch: sent {len(batch)} files, got {len(msg.attachments)} attachments", "WARNING")
             ok = False
+        await asyncio.sleep(0)  # yield after upload so event loop can process other work
         return ok
 
 def setup(bot):

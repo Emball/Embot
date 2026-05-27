@@ -148,8 +148,8 @@ class IconManager:
                         self.bot.logger.log(MODULE_NAME,
                             "Avatar rate-limited by Discord — will retry next cycle", "WARNING")
                     elif e.code == 50035:
-                        self.bot.logger.error(MODULE_NAME,
-                            f"Failed to update bot profile picture - invalid image format or size: {e.text}")
+                        self.bot.logger.log(MODULE_NAME,
+                            f"Failed to update bot profile picture - invalid image format or size: {e.text}", "WARNING")
                     else:
                         self.bot.logger.error(MODULE_NAME,
                             f"Failed to update bot profile picture", e)

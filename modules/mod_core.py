@@ -1546,10 +1546,17 @@ def setup(bot):
             bot.logger.error(MODULE_NAME, "on_vm_transcribed handler error", e)
 
     # Wrap bot.logger.error to DM owner on every error/traceback
-    import traceback as _tb
+    import traceback as _tb, time as _time
     _orig_logger_error = bot.logger.error
+    _dm_last_sent: dict = {}  # (module, message_prefix) -> timestamp
+    _DM_COOLDOWN = 300  # seconds between identical DMs
     def _error_with_dm(module_name, message, exception=None):
         _orig_logger_error(module_name, message, exception)
+        dedup_key = (module_name, message[:80])
+        now = _time.time()
+        if now - _dm_last_sent.get(dedup_key, 0) < _DM_COOLDOWN:
+            return
+        _dm_last_sent[dedup_key] = now
         async def _dm():
             try:
                 owner_id = mod_system.cfg.owner_id
@@ -1565,7 +1572,7 @@ def setup(bot):
                     view.add_item(discord.ui.Container(
                         discord.ui.TextDisplay(f"### ⚠ Error — {module_name}{' (cont.)' if i else ''}\n```\n{chunk}\n```"),
                         discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
-                        discord.ui.TextDisplay(f"-# <t:{int(__import__('time').time())}:R>"),
+                        discord.ui.TextDisplay(f"-# <t:{int(_time.time())}:R>"),
                         accent_color=0xe74c3c,
                     ))
                     await dm.send(view=view)

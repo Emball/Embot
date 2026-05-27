@@ -418,10 +418,6 @@ def _meta_del(key: str) -> None:
         c.commit()
 
 async def _post_status(bot, chan, state: dict) -> None:
-    """Delete-and-repost the persistent status embed. state keys:
-       indexed, cached, last_reconcile_ts, orphans_deleted,
-       recent_events (list of str), activity (str or None), errors (list of str)
-    """
     ts = int(_now().timestamp())
     indexed = state.get("indexed", 0)
     cached = state.get("cached", 0)
@@ -432,37 +428,43 @@ async def _post_status(bot, chan, state: dict) -> None:
     reconcile_ts = state.get("last_reconcile_ts")
     orphans = state.get("orphans_deleted", 0)
 
-    bar_len = 16
-    filled = int(bar_len * cached / indexed) if indexed else 0
-    bar = "▓" * filled + "░" * (bar_len - filled)
     pct = cached / indexed * 100 if indexed else 0
+    bar_len = 20
+    filled = int(bar_len * cached / indexed) if indexed else 0
+    bar = "█" * filled + "░" * (bar_len - filled)
 
-    status_line = f"🔄 {activity}" if activity else "✅ Idle"
-    reconcile_line = (f"Last reconcile: <t:{reconcile_ts}:R> — {orphans} orphan(s) removed"
-                      if reconcile_ts else "No reconcile yet this session")
-    gap_line = f"{gap} uncached" if gap else "Fully cached"
+    accent = 0xe74c3c if errors else (0xf39c12 if activity else 0x57f287)
 
-    events_text = ""
+    lines = [f"`{bar}`  **{pct:.1f}%**  ·  {cached:,} / {indexed:,} songs"]
+    if gap:
+        lines.append(f"-# {gap:,} not yet cached")
+
+    if activity:
+        lines.append(f"\n{activity}")
+
+    status_block = "\n".join(lines)
+
+    meta_parts = []
+    if reconcile_ts:
+        meta_parts.append(f"synced <t:{reconcile_ts}:R>")
+        if orphans:
+            meta_parts.append(f"{orphans} removed")
     if recent:
-        events_text = "\n\n**Recent Events**\n" + "\n".join(f"- {e}" for e in recent[-8:])
-    errors_text = ""
-    if errors:
-        errors_text = "\n\n**Errors**\n" + "\n".join(f"⚠️ {e}" for e in errors[-5:])
+        meta_parts.append(f"last: {recent[-1]}")
 
-    accent = 0xe74c3c if errors else (0x3498db if activity else 0x2ecc71)
+    meta_line = "  ·  ".join(meta_parts) if meta_parts else "awaiting first sync"
+
+    error_block = ""
+    if errors:
+        error_block = "\n" + "\n".join(f"-# ⚠ {e}" for e in errors[-3:])
 
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(discord.ui.Container(
-        discord.ui.TextDisplay(
-            f"## 🗄️ Song Cache Status\n"
-            f"`{bar}` **{pct:.1f}%** — {cached}/{indexed} cached ({gap_line})\n\n"
-            f"**Status:** {status_line}\n"
-            f"-# {reconcile_line}"
-            f"{events_text}{errors_text}"
-        ),
+        discord.ui.TextDisplay(f"### Song Cache\n{status_block}{error_block}"),
+        discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+        discord.ui.TextDisplay(f"-# {meta_line}  ·  updated <t:{ts}:R>"),
         accent_color=accent,
     ))
-    view.add_item(discord.ui.TextDisplay(f"-# Updated <t:{ts}:R>"))
 
     old_id = _meta_get("status_msg_id")
     if old_id:

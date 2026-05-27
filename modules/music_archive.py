@@ -1161,17 +1161,25 @@ class ARCHIVEManager:
         try:
             timeout = 120 + 30 * len(batch)
             up_start = time.time()
-            msg = await asyncio.wait_for(chan.send(files=files), timeout=timeout)
+            send_task = asyncio.ensure_future(chan.send(files=files))
+            done, _ = await asyncio.wait({send_task}, timeout=timeout)
+            if not done:
+                send_task.cancel()
+                # force-close TCP connections so the stuck aiohttp send unblocks
+                try:
+                    connector = self.bot.http._HTTPClient__session.connector
+                    if connector and not connector.closed:
+                        await connector.close()
+                except Exception:
+                    pass
+                try:
+                    await asyncio.wait_for(asyncio.shield(send_task), timeout=2)
+                except Exception:
+                    pass
+                self.bot.logger.log(MODULE_NAME, f"Batch upload timed out ({len(batch)} files) — connector reset", "WARNING")
+                return False
+            msg = send_task.result()
             up_elapsed = time.time() - up_start
-        except asyncio.TimeoutError:
-            self.bot.logger.log(MODULE_NAME, f"Batch upload timed out ({len(batch)} files) — forcing connector reset", "WARNING")
-            try:
-                connector = self.bot.http._HTTPClient__session.connector
-                if connector and not connector.closed:
-                    await connector.close()
-            except Exception:
-                pass
-            return False
         except discord.HTTPException as e:
             self.bot.logger.log(MODULE_NAME, f"Batch upload failed ({len(batch)} files): {e}", "WARNING")
             return False

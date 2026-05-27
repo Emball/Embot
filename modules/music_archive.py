@@ -698,6 +698,7 @@ class ARCHIVEManager:
         self._status_msg_id = None
         self.backfill_active = False
         self._backfill_task = None
+        self._shutdown_flag = False
         self._last_status_post = 0.0  # throttle _post_status during backfill
         self._status_state = {
             "indexed": 0, "cached": 0,
@@ -895,10 +896,18 @@ class ARCHIVEManager:
             await self.reconcile_channel()
 
     def shutdown(self):
+        self._shutdown_flag = True
+        self.backfill_active = False
         if self._backfill_task and not self._backfill_task.done():
             self._backfill_task.cancel()
+            # Force-close the HTTP connector so any stuck aiohttp send unblocks immediately
+            try:
+                connector = self.bot.http._HTTPClient__session.connector
+                if connector and not connector.closed:
+                    asyncio.get_event_loop().call_soon_threadsafe(connector.close)
+            except Exception:
+                pass
             self.bot.logger.log(MODULE_NAME, "Backfill task cancelled (module reload)")
-        self.backfill_active = False
 
     async def backfill_cache(self):
         if not self.song_index:
@@ -909,6 +918,7 @@ class ARCHIVEManager:
             self.bot.logger.log(MODULE_NAME, f"Cannot backfill — no #{CACHE_CHANNEL_NAME} channel", "WARNING")
             return
         self.backfill_active = True
+        self._shutdown_flag = False
         _meta_set("backfill_active", "1")
         try:
             await self._backfill_cache(chan)
@@ -979,6 +989,9 @@ class ARCHIVEManager:
 
         for fp in pending:
             await asyncio.sleep(0)  # yield each iteration so event loop stays responsive
+            if self._shutdown_flag:
+                self.bot.logger.log(MODULE_NAME, "Backfill interrupted by shutdown")
+                return
             if _cache_lookup(fp):
                 cached += 1
                 continue
@@ -1015,6 +1028,9 @@ class ARCHIVEManager:
                     errors += 1
                 sent_batches += 1
                 await asyncio.sleep(3)
+                if self._shutdown_flag:
+                    self.bot.logger.log(MODULE_NAME, "Backfill interrupted by shutdown")
+                    return
                 continue
             if batch and batch_size + sz > max_bytes:
                 await self._update_backfill_embed(
@@ -1031,6 +1047,9 @@ class ARCHIVEManager:
                 batch = []
                 batch_size = 0
                 await asyncio.sleep(3)
+                if self._shutdown_flag:
+                    self.bot.logger.log(MODULE_NAME, "Backfill interrupted by shutdown")
+                    return
             batch.append((fp, p, sz))
             batch_size += sz
             total_bytes += sz
@@ -1145,7 +1164,13 @@ class ARCHIVEManager:
             msg = await asyncio.wait_for(chan.send(files=files), timeout=timeout)
             up_elapsed = time.time() - up_start
         except asyncio.TimeoutError:
-            self.bot.logger.log(MODULE_NAME, f"Batch upload timed out ({len(batch)} files)", "WARNING")
+            self.bot.logger.log(MODULE_NAME, f"Batch upload timed out ({len(batch)} files) — forcing connector reset", "WARNING")
+            try:
+                connector = self.bot.http._HTTPClient__session.connector
+                if connector and not connector.closed:
+                    await connector.close()
+            except Exception:
+                pass
             return False
         except discord.HTTPException as e:
             self.bot.logger.log(MODULE_NAME, f"Batch upload failed ({len(batch)} files): {e}", "WARNING")

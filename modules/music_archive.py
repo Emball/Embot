@@ -387,7 +387,8 @@ async def _cache_refresh_url(bot, file_path: str, entry: dict) -> Optional[str]:
             bot.logger.log(MODULE_NAME, f"Cache refresh failed: message {entry['message_id']} has no attachments", "WARNING")
             return None
         # Match by filename — message may contain multiple files from a batch
-        att = next((a for a in msg.attachments if a.filename == entry["file_name"]), msg.attachments[0])
+        def _norm(s): return s.replace(' ', '_').lower()
+        att = next((a for a in msg.attachments if _norm(a.filename) == _norm(entry["file_name"])), msg.attachments[0])
         _cache_store(file_path, att.url, entry["message_id"], entry["channel_id"],
                      entry["file_name"], entry["file_size"])
         return att.url
@@ -867,17 +868,17 @@ class ARCHIVEManager:
                     continue
                 if msg.author != self.bot.user or not msg.attachments:
                     continue
+                def _norm(s): return s.replace(' ', '_').lower()
                 for att in msg.attachments:
                     fp = next(
                         (e['path'] for fmt in FORMATS
                          for entries in self.song_index.get(fmt, {}).values()
-                         for e in entries if Path(e['path']).name == att.filename),
+                         for e in entries if _norm(Path(e['path']).name) == _norm(att.filename)),
                         None
                     )
                     if fp and not _cache_lookup(fp):
-                        p = Path(fp)
                         _cache_store(fp, att.url, str(msg.id), str(chan.id),
-                                     att.filename, att.size)
+                                     Path(fp).name, att.size)
                         recovered += 1
         except Exception as e:
             self.bot.logger.log(MODULE_NAME, f"Channel recovery scan error: {e}", "WARNING")

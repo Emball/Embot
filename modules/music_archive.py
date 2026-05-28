@@ -812,18 +812,10 @@ class ARCHIVEManager:
             await self.reconcile_channel()
 
     def shutdown(self):
+        # Signal the backfill loop to stop at the next checkpoint — don't cancel mid-batch
+        # or the in-flight send_task won't store its result to the DB.
         self._shutdown_flag = True
         self.backfill_active = False
-        if self._backfill_task and not self._backfill_task.done():
-            self._backfill_task.cancel()
-            # Force-close the HTTP connector so any stuck aiohttp send unblocks immediately
-            try:
-                connector = self.bot.http._HTTPClient__session.connector
-                if connector and not connector.closed:
-                    asyncio.get_event_loop().call_soon_threadsafe(connector.close)
-            except Exception:
-                pass
-            self.bot.logger.log(MODULE_NAME, "Backfill task cancelled (module reload)")
 
     async def backfill_cache(self):
         if not self.song_index:
@@ -1179,11 +1171,9 @@ def setup(bot):
             await interaction.response.send_message("Owner only.", ephemeral=True)
             return
         _meta_del("backfill_enabled")
+        ARCHIVE_manager._shutdown_flag = True
         if ARCHIVE_manager.backfill_active:
-            ARCHIVE_manager._shutdown_flag = True
-            if ARCHIVE_manager._backfill_task and not ARCHIVE_manager._backfill_task.done():
-                ARCHIVE_manager._backfill_task.cancel()
-            await interaction.response.send_message("Backfill stopped and resume flag cleared.", ephemeral=True)
+            await interaction.response.send_message("Backfill will stop after the current batch finishes.", ephemeral=True)
         else:
             await interaction.response.send_message("Backfill wasn't running — resume flag cleared.", ephemeral=True)
 

@@ -387,8 +387,10 @@ async def _cache_refresh_url(bot, file_path: str, entry: dict) -> Optional[str]:
             bot.logger.log(MODULE_NAME, f"Cache refresh failed: message {entry['message_id']} has no attachments", "WARNING")
             return None
         # Match by filename — message may contain multiple files from a batch
-        def _norm(s): return s.replace(' ', '_').lower()
-        att = next((a for a in msg.attachments if _norm(a.filename) == _norm(entry["file_name"])), msg.attachments[0])
+        att = next(
+            (a for a in msg.attachments if normalize_title(Path(a.filename).stem) == normalize_title(Path(entry["file_name"]).stem)),
+            msg.attachments[0]
+        )
         _cache_store(file_path, att.url, entry["message_id"], entry["channel_id"],
                      entry["file_name"], entry["file_size"])
         return att.url
@@ -1016,11 +1018,6 @@ class ARCHIVEManager:
                 _mbps = _total_mb / _total_secs if _total_secs > 0 else None
                 _remaining_mb = (total_bytes - uploaded_bytes) / 1024 / 1024
                 with _db_conn() as c:
-                    self._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
-                channel_count += len(_cur_batch) if ok else 0
-                self._status_state["cached"] = channel_count
-                channel_count += len(_cur_batch) if ok else 0
-                with _db_conn() as c:
                     db_count = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
                 channel_actual = await _count_channel_files(chan, self.bot.user)
                 _meta_set("channel_cached", str(channel_actual))
@@ -1068,7 +1065,6 @@ class ARCHIVEManager:
                 _total_secs = sum(s for _, s in speed_samples)
                 _mbps = _total_mb / _total_secs if _total_secs > 0 else None
                 _remaining_mb = (total_bytes - uploaded_bytes) / 1024 / 1024
-                channel_count += len(_cur_batch) if ok else 0
                 with _db_conn() as c:
                     db_count = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
                 channel_actual = await _count_channel_files(chan, self.bot.user)

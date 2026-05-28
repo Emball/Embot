@@ -471,11 +471,14 @@ async def _post_status(bot, chan, state: dict) -> None:
         accent_color=accent,
     ))
 
+    old_id = _meta_get("status_msg_id")
+    bot.logger.log(MODULE_NAME, f"_post_status: purging old embed (id={old_id}), cached={cached}")
     await _purge_stale_status(bot, chan)
     _meta_del("status_msg_id")
     try:
         msg = await chan.send(view=view)
         _meta_set("status_msg_id", str(msg.id))
+        bot.logger.log(MODULE_NAME, f"_post_status: reposted as {msg.id}")
     except Exception as e:
         bot.logger.log(MODULE_NAME, f"Failed to post status embed: {e}", "WARNING")
 

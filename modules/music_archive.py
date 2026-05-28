@@ -857,6 +857,32 @@ class ARCHIVEManager:
     async def _backfill_cache(self, chan):
         max_bytes = min(getattr(chan.guild, 'filesize_limit', 25 * 1024 * 1024), 95 * 1024 * 1024)
 
+        # Recover any uploads that made it to Discord but weren't stored (e.g. mid-upload disconnect)
+        status_id = _meta_get("status_msg_id")
+        recovered = 0
+        try:
+            async for msg in chan.history(limit=None):
+                if str(msg.id) == status_id:
+                    continue
+                if msg.author != self.bot.user or not msg.attachments:
+                    continue
+                for att in msg.attachments:
+                    fp = next(
+                        (e['path'] for fmt in FORMATS
+                         for entries in self.song_index.get(fmt, {}).values()
+                         for e in entries if Path(e['path']).name == att.filename),
+                        None
+                    )
+                    if fp and not _cache_lookup(fp):
+                        p = Path(fp)
+                        _cache_store(fp, att.url, str(msg.id), str(chan.id),
+                                     att.filename, att.size)
+                        recovered += 1
+        except Exception as e:
+            self.bot.logger.log(MODULE_NAME, f"Channel recovery scan error: {e}", "WARNING")
+        if recovered:
+            self.bot.logger.log(MODULE_NAME, f"Recovered {recovered} untracked upload(s) from channel")
+
         seen = set()
         for fmt in FORMATS:
             for entries in self.song_index.get(fmt, {}).values():

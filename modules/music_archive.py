@@ -786,7 +786,7 @@ class ARCHIVEManager:
             indexed = len({c['path'] for fmt in FORMATS for v in self.song_index.get(fmt, {}).values() for c in v})
             with _db_conn() as c:
                 cached = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
-            self._status_state.update({"indexed": indexed, "cached": cached, "activity": "Initializing..."})
+            self._status_state.update({"indexed": indexed, "cached": cached, "activity": None})
 
             # Clear transient backfill_active flag; check persistent enabled flag
             _meta_del("backfill_active")

@@ -421,43 +421,23 @@ def _meta_del(key: str) -> None:
         c.execute("DELETE FROM cache_meta WHERE key=?", (key,))
         c.commit()
 
-_last_status_snapshot: dict = {}
-
 def _is_status_embed(msg, bot_user) -> bool:
-    """True if this message looks like a status embed posted by the bot."""
-    if msg.author != bot_user:
-        return False
-    # Status embeds have no attachments and use LayoutView (Components V2 flag)
-    return not msg.attachments
+    return msg.author == bot_user and not msg.attachments
 
-async def _purge_stale_status(bot, chan, keep_id: str | None) -> None:
-    """Delete all bot status embed messages except keep_id."""
-    to_delete = []
+async def _purge_stale_status(bot, chan) -> None:
+    """Delete every bot status embed in the channel."""
     async for msg in chan.history(limit=200):
-        if _is_status_embed(msg, bot.user) and str(msg.id) != keep_id:
-            to_delete.append(msg)
-    for msg in to_delete:
-        try:
-            await msg.delete()
-        except Exception:
-            pass
+        if _is_status_embed(msg, bot.user):
+            try:
+                await msg.delete()
+            except Exception:
+                pass
 
-async def _post_status(bot, chan, state: dict, force_repost: bool = False) -> None:
-    global _last_status_snapshot
-    snapshot_key = (
-        state.get("indexed"), state.get("cached"), state.get("activity"),
-        state.get("orphans_deleted"),
-        tuple(state.get("errors", [])[-3:]),
-    )
-    if snapshot_key == _last_status_snapshot.get("key") and _meta_get("status_msg_id") and not force_repost:
-        return
-    _last_status_snapshot["key"] = snapshot_key
-
-    ts = int(_now().timestamp())
+async def _post_status(bot, chan, state: dict) -> None:
+    """Delete any existing status embed(s) and repost at the bottom."""
     indexed = state.get("indexed", 0)
     cached = state.get("cached", 0)
     gap = indexed - cached
-    activity = state.get("activity")
     errors = state.get("errors", [])
     reconcile_ts = state.get("last_reconcile_ts")
     orphans = state.get("orphans_deleted", 0)
@@ -467,21 +447,17 @@ async def _post_status(bot, chan, state: dict, force_repost: bool = False) -> No
     filled = int(bar_len * cached / indexed) if indexed else 0
     bar = "🟩" * filled + "⬛" * (bar_len - filled)
 
-    accent = 0xe74c3c if errors else (0xf39c12 if activity else 0x57f287)
+    accent = 0xe74c3c if errors else (0xf39c12 if cached < indexed else 0x57f287)
 
     body = f"{bar}  **{pct:.1f}%**\n{cached:,} / {indexed:,} songs cached"
     if gap:
         body += f"\n-# {gap:,} not yet uploaded"
-
-    if activity:
-        body += f"\n\n{activity}"
 
     in_sync = cached == indexed
     sync_icon = "✓" if in_sync else "✗"
     body += f"\n\nIndexed  `{indexed:,}`  ·  DB  `{cached:,}`  {sync_icon}"
     if orphans:
         body += f"  ·  {orphans} removed last sync"
-
     if errors:
         body += "\n" + "\n".join(f"-# ⚠ {e}" for e in errors[-3:])
 
@@ -495,42 +471,8 @@ async def _post_status(bot, chan, state: dict, force_repost: bool = False) -> No
         accent_color=accent,
     ))
 
-    old_id = _meta_get("status_msg_id")
-
-    # During backfill or forced repost: always delete-and-repost to stay at bottom
-    if force_repost or activity:
-        if old_id:
-            try:
-                await (await chan.fetch_message(int(old_id))).delete()
-            except Exception:
-                pass
-            _meta_del("status_msg_id")
-        await _purge_stale_status(bot, chan, None)
-        try:
-            msg = await chan.send(view=view)
-            _meta_set("status_msg_id", str(msg.id))
-        except Exception as e:
-            bot.logger.log(MODULE_NAME, f"Failed to post status embed: {e}", "WARNING")
-        return
-
-    # Idle: edit in place if still the last message, otherwise delete-and-repost
-    if old_id:
-        try:
-            old_msg = await chan.fetch_message(int(old_id))
-            # Check if it's the last message in the channel
-            last = [m async for m in chan.history(limit=1)]
-            if last and str(last[0].id) == old_id:
-                await old_msg.edit(view=view)
-                return
-            else:
-                await old_msg.delete()
-        except discord.NotFound:
-            pass
-        except Exception:
-            pass
-        _meta_del("status_msg_id")
-
-    await _purge_stale_status(bot, chan, None)
+    await _purge_stale_status(bot, chan)
+    _meta_del("status_msg_id")
     try:
         msg = await chan.send(view=view)
         _meta_set("status_msg_id", str(msg.id))
@@ -760,11 +702,10 @@ class ARCHIVEManager:
         self.backfill_active = False
         self._backfill_task = None
         self._shutdown_flag = False
-        self._last_status_post = 0.0  # throttle _post_status during backfill
         self._status_state = {
             "indexed": 0, "cached": 0,
             "last_reconcile_ts": None, "orphans_deleted": 0,
-            "errors": [], "activity": None,
+            "errors": [],
         }
 
     async def initialize(self):
@@ -786,7 +727,7 @@ class ARCHIVEManager:
             indexed = len({c['path'] for fmt in FORMATS for v in self.song_index.get(fmt, {}).values() for c in v})
             with _db_conn() as c:
                 cached = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
-            self._status_state.update({"indexed": indexed, "cached": cached, "activity": None})
+            self._status_state.update({"indexed": indexed, "cached": cached})
 
             # Clear transient backfill_active flag; check persistent enabled flag
             _meta_del("backfill_active")
@@ -799,7 +740,7 @@ class ARCHIVEManager:
             self.bot.logger.log(MODULE_NAME, f"Startup status post — chan={'found' if chan else 'NOT FOUND'} status_msg_id={_meta_get('status_msg_id')}")
             if chan:
                 await _purge_stale_status(self.bot, chan, _meta_get("status_msg_id"))
-                await _post_status(self.bot, chan, self._status_state, force_repost=True)
+                await _post_status(self.bot, chan, self._status_state)
                 self.bot.logger.log(MODULE_NAME, f"Startup status post complete — new status_msg_id={_meta_get('status_msg_id')}")
 
             loop = asyncio.get_running_loop()
@@ -861,7 +802,6 @@ class ARCHIVEManager:
             "cached": cached,
             "last_reconcile_ts": ts,
             "orphans_deleted": deleted,
-            "activity": None,
         })
         await _post_status(self.bot, chan, self._status_state)
 
@@ -982,9 +922,6 @@ class ARCHIVEManager:
                 self.bot.logger.log(MODULE_NAME, f"Skipping {p.name} — stat timed out", "WARNING")
                 continue
             if sz > max_bytes:
-                await self._update_backfill_embed(
-                    chan, start, total, cached, uploaded, errors,
-                    uploaded_bytes, total_bytes, f"Downsampling {p.name}...")
                 ds_path, ds_sz, transcoded = await loop.run_in_executor(
                     METADATA_EXECUTOR, _downsample_flac, fp, max_bytes)
                 if ds_path and ds_sz and ds_sz <= max_bytes:
@@ -1007,15 +944,15 @@ class ARCHIVEManager:
                     self.bot.logger.log(MODULE_NAME, f"Downsample failed or still too large: {p.name}", "WARNING")
                     errors += 1
                 sent_batches += 1
+                with _db_conn() as c:
+                    self._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
+                await _post_status(self.bot, chan, self._status_state)
                 await asyncio.sleep(3)
                 if self._shutdown_flag:
                     self.bot.logger.log(MODULE_NAME, "Backfill interrupted by shutdown")
                     return
                 continue
             if batch and batch_size + sz > max_bytes:
-                await self._update_backfill_embed(
-                    chan, start, total, cached, uploaded, errors,
-                    uploaded_bytes, total_bytes, f"Uploading batch ({len(batch)} files)...")
                 ok = await self._send_batch(chan, batch)
                 if ok:
                     uploaded += len(batch)
@@ -1026,6 +963,9 @@ class ARCHIVEManager:
                 sent_batches += 1
                 batch = []
                 batch_size = 0
+                with _db_conn() as c:
+                    self._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
+                await _post_status(self.bot, chan, self._status_state)
                 await asyncio.sleep(3)
                 if self._shutdown_flag:
                     self.bot.logger.log(MODULE_NAME, "Backfill interrupted by shutdown")
@@ -1037,9 +977,6 @@ class ARCHIVEManager:
         if batch:
             batch = [(fp, p, sz) for fp, p, sz in batch if not _cache_lookup(fp)]
             if batch:
-                await self._update_backfill_embed(
-                    chan, start, total, cached, uploaded, errors,
-                    uploaded_bytes, total_bytes, f"Uploading batch ({len(batch)} files)...")
                 ok = await self._send_batch(chan, batch)
                 if ok:
                     uploaded += len(batch)
@@ -1048,10 +985,9 @@ class ARCHIVEManager:
                     uploaded, uploaded_bytes, errors = await self._fallback_batch(
                         chan, batch, uploaded, uploaded_bytes, errors)
                 sent_batches += 1
-
-        await self._update_backfill_embed(
-            chan, start, total, cached, uploaded, errors,
-            uploaded_bytes, total_bytes, None)
+                with _db_conn() as c:
+                    self._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
+                await _post_status(self.bot, chan, self._status_state)
         self.bot.logger.log(MODULE_NAME,
             f"Cache backfill complete: {uploaded} uploaded in {sent_batches} batch(es), "
             f"{cached} cached, {errors} errors")
@@ -1087,41 +1023,6 @@ class ARCHIVEManager:
             await asyncio.sleep(1)
         return uploaded, uploaded_bytes, errors
 
-    async def _update_backfill_embed(self, chan, start, total, cached, uploaded, errors, uploaded_bytes, total_bytes, current_name):
-        elapsed = time.time() - start
-        done = uploaded + cached
-        pct = done / total * 100 if total else 0
-
-        bar_len = 12
-        filled = int(bar_len * done / total) if total else 0
-        bar = "▓" * filled + "░" * (bar_len - filled)
-
-        if elapsed > 0 and uploaded > 0:
-            files_per_sec = uploaded / elapsed
-            remaining = total - done
-            eta_secs = remaining / files_per_sec if files_per_sec > 0 else 0
-            speed = f"{uploaded_bytes / 1024 / 1024 / elapsed:.1f} MB/s"
-        else:
-            eta_secs = 0
-            speed = "—"
-
-        eta_str = "—" if not eta_secs else f"{eta_secs / 60:.0f}m {eta_secs % 60:.0f}s"
-
-        if current_name:
-            activity = f"Backfill {pct:.0f}% ({done}/{total}) — {speed} ETA {eta_str} — {current_name[:80]}"
-        else:
-            activity = None
-
-        with _db_conn() as c:
-            db_cached = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
-        self._status_state.update({
-            "cached": db_cached,
-            "activity": activity,
-        })
-        now = time.time()
-        if not current_name or (now - self._last_status_post) >= 30:
-            self._last_status_post = now
-            await _post_status(self.bot, chan, self._status_state, force_repost=True)
 
     async def _send_batch(self, chan, batch, source_path=None, transcoded=False) -> bool:
         read_start = time.time()

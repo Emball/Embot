@@ -901,7 +901,8 @@ class ARCHIVEManager:
             f"(max {max_bytes // 1024 // 1024}MB per message)")
 
         with _db_conn() as c:
-            self._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
+            channel_count = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
+        self._status_state["cached"] = channel_count
         await _post_status(self.bot, chan, self._status_state)
 
         if not pending:
@@ -990,6 +991,10 @@ class ARCHIVEManager:
                 _remaining_mb = (total_bytes - uploaded_bytes) / 1024 / 1024
                 with _db_conn() as c:
                     self._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
+                channel_count += len(_cur_batch) if ok else 0
+                self._status_state["cached"] = channel_count
+                channel_count += len(_cur_batch) if ok else 0
+                self._status_state["cached"] = channel_count
                 self._status_state["mbps"] = _mbps
                 self._status_state["remaining_mb"] = _remaining_mb
                 self._status_state["last_batch"] = f"{len(_cur_batch)} file(s), {_batch_mb:.0f}MB in {_batch_secs:.0f}s"
@@ -1034,6 +1039,8 @@ class ARCHIVEManager:
                 _remaining_mb = (total_bytes - uploaded_bytes) / 1024 / 1024
                 with _db_conn() as c:
                     self._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
+                channel_count += len(_cur_batch) if ok else 0
+                self._status_state["cached"] = channel_count
                 self._status_state["mbps"] = _mbps
                 self._status_state["remaining_mb"] = _remaining_mb
                 self._status_state["last_batch"] = f"{len(_cur_batch)} file(s), {_batch_mb:.0f}MB in {_batch_secs:.0f}s"

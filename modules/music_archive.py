@@ -304,10 +304,9 @@ CREATE TABLE IF NOT EXISTS song_cache (
 );
 
 CREATE TABLE IF NOT EXISTS song_cache_fails (
-    file_path   TEXT NOT NULL,
+    file_path   TEXT PRIMARY KEY,
     failed_at   TEXT NOT NULL,
-    reason      TEXT NOT NULL,
-    PRIMARY KEY (file_path, failed_at)
+    reason      TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS cache_meta (
@@ -403,7 +402,7 @@ async def _cache_refresh_url(bot, file_path: str, entry: dict) -> Optional[str]:
 def _cache_fail(file_path: str, reason: str) -> None:
     with _db_conn() as c:
         c.execute(
-            "INSERT INTO song_cache_fails (file_path, failed_at, reason) VALUES (?,?,?)",
+            "INSERT OR REPLACE INTO song_cache_fails (file_path, failed_at, reason) VALUES (?,?,?)",
             (str(Path(file_path)), _now().isoformat(), reason)
         )
         c.commit()

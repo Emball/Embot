@@ -1019,11 +1019,10 @@ class ARCHIVEManager:
                 _remaining_mb = (total_bytes - uploaded_bytes) / 1024 / 1024
                 with _db_conn() as c:
                     db_count = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
-                channel_actual = await _count_channel_files(chan, self.bot.user)
-                _meta_set("channel_cached", str(channel_actual))
-                self._status_state["cached"] = channel_actual
+                _meta_set("channel_cached", str(db_count))
+                self._status_state["cached"] = db_count
                 self._status_state["db_cached"] = db_count
-                self._status_state["channel_cached"] = channel_actual
+                self._status_state["channel_cached"] = db_count
                 self._status_state["mbps"] = _mbps
                 self._status_state["remaining_mb"] = _remaining_mb
                 self._status_state["last_batch"] = f"{len(_cur_batch)} file(s), {_batch_mb:.0f}MB in {_batch_secs:.0f}s"
@@ -1067,11 +1066,10 @@ class ARCHIVEManager:
                 _remaining_mb = (total_bytes - uploaded_bytes) / 1024 / 1024
                 with _db_conn() as c:
                     db_count = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
-                channel_actual = await _count_channel_files(chan, self.bot.user)
-                _meta_set("channel_cached", str(channel_actual))
-                self._status_state["cached"] = channel_actual
+                _meta_set("channel_cached", str(db_count))
+                self._status_state["cached"] = db_count
                 self._status_state["db_cached"] = db_count
-                self._status_state["channel_cached"] = channel_actual
+                self._status_state["channel_cached"] = db_count
                 self._status_state["mbps"] = _mbps
                 self._status_state["remaining_mb"] = _remaining_mb
                 self._status_state["last_batch"] = f"{len(_cur_batch)} file(s), {_batch_mb:.0f}MB in {_batch_secs:.0f}s"

@@ -1143,10 +1143,6 @@ class ARCHIVEManager:
             return False
         except discord.HTTPException as e:
             self.bot.logger.log(MODULE_NAME, f"Batch upload failed ({len(batch)} files): {e}", "WARNING")
-            if e.status == 413:
-                for fp, name, data, sz in file_data:
-                    _cache_fail(fp, f"413 too large ({sz // 1024 // 1024}MB)")
-                    self.bot.logger.log(MODULE_NAME, f"Marked as too-large, skipping permanently: {name}", "WARNING")
             return False
         except Exception as e:
             self.bot.logger.log(MODULE_NAME, f"Batch upload error ({len(batch)} files): {e}", "WARNING")

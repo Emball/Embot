@@ -830,24 +830,14 @@ class ARCHIVEManager:
             db_ids = {r[0] for r in c.execute("SELECT message_id FROM song_cache").fetchall()}
         stale_db = db_ids - live_ids
 
-        # Require approval for any bulk channel deletion (more than 1 message)
         deleted = 0
-        if len(to_delete) > 1:
-            await self._dm_owner(
-                f"⚠️ **Music Archive reconcile wants to delete {len(to_delete)} channel messages** "
-                f"and purge {len(stale_db)} stale DB entries from #{CACHE_CHANNEL_NAME}.\n"
-                f"Use `/reconcile_approve` to confirm or `/reconcile_cancel` to skip."
-            )
-            self.bot.logger.log(MODULE_NAME,
-                f"Reconcile: {len(to_delete)} deletions pending owner approval")
-            _meta_set("reconcile_pending_count", str(len(to_delete)))
-        elif to_delete:
-            for msg in to_delete:
-                try:
-                    await msg.delete()
-                    deleted += 1
-                except discord.NotFound:
-                    pass
+        for msg in to_delete:
+            try:
+                await msg.delete()
+                deleted += 1
+            except discord.NotFound:
+                pass
+        if deleted:
             self.bot.logger.log(MODULE_NAME, f"Reconcile: deleted {deleted} orphan message(s)")
 
         # Always purge stale DB entries — these are messages already gone from channel
@@ -867,44 +857,6 @@ class ARCHIVEManager:
             "activity": None,
         })
         await _post_status(self.bot, chan, self._status_state)
-
-    async def _dm_owner(self, message: str):
-        try:
-            from mod_core import ModConfig
-            cfg = ModConfig()
-            owner_id = cfg.get_int("owner_id")
-            if not owner_id:
-                return
-            user = await self.bot.fetch_user(owner_id)
-            await user.send(message)
-        except Exception as e:
-            self.bot.logger.log(MODULE_NAME, f"DM to owner failed: {e}", "WARNING")
-
-    async def reconcile_approve(self):
-        chan = discord.utils.get(self.bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
-        if not chan:
-            return
-        status_id = _meta_get("status_msg_id")
-        with _db_conn() as c:
-            known_ids = {r[0] for r in c.execute("SELECT message_id FROM song_cache").fetchall()}
-        if status_id:
-            known_ids.add(status_id)
-        deleted = 0
-        try:
-            async for msg in chan.history(limit=None):
-                if str(msg.id) == status_id:
-                    continue
-                if msg.author != self.bot.user or not msg.attachments or str(msg.id) not in known_ids:
-                    try:
-                        await msg.delete()
-                        deleted += 1
-                    except discord.NotFound:
-                        pass
-        except Exception as e:
-            self.bot.logger.log(MODULE_NAME, f"Reconcile approve error: {e}", "WARNING")
-        _meta_del("reconcile_pending_count")
-        self.bot.logger.log(MODULE_NAME, f"Reconcile approved: deleted {deleted} orphan message(s)")
-        await self._dm_owner(f"✅ Reconcile complete — deleted {deleted} orphan messages from #{CACHE_CHANNEL_NAME}.")
 
     async def _reconcile_loop(self):
         INTERVAL = 30 * 60  # 30 minutes
@@ -1014,7 +966,10 @@ class ARCHIVEManager:
                 continue
             p = Path(fp)
             try:
-                sz = await loop.run_in_executor(METADATA_EXECUTOR, lambda: p.stat().st_size)
+                sz = await asyncio.wait_for(
+                    loop.run_in_executor(METADATA_EXECUTOR, lambda: p.stat().st_size),
+                    timeout=3.0
+                )
             except (OSError, asyncio.TimeoutError):
                 self.bot.logger.log(MODULE_NAME, f"Skipping {p.name} — stat timed out", "WARNING")
                 continue
@@ -1279,31 +1234,6 @@ def setup(bot):
             await interaction.followup.send("Uploading to cache (first time, may be slow)...", ephemeral=True)
         await _deliver_song(bot, interaction, best)
         await _log_delivery(bot, interaction.user, best, source="slash command")
-
-    @bot.tree.command(name="reconcile_approve", description="[Owner only] Approve pending reconcile deletions")
-    async def reconcile_approve_cmd(interaction: discord.Interaction):
-        if not is_owner(interaction.user):
-            await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
-            return
-        pending = _meta_get("reconcile_pending_count")
-        if not pending:
-            await interaction.response.send_message("No reconcile pending.", ephemeral=True)
-            return
-        await interaction.response.send_message(f"Approving reconcile ({pending} deletions)...", ephemeral=True)
-        await ARCHIVE_manager.reconcile_approve()
-
-    @bot.tree.command(name="reconcile_cancel", description="[Owner only] Cancel pending reconcile deletions")
-    async def reconcile_cancel_cmd(interaction: discord.Interaction):
-        if not is_owner(interaction.user):
-            await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
-            return
-        pending = _meta_get("reconcile_pending_count")
-        if not pending:
-            await interaction.response.send_message("No reconcile pending.", ephemeral=True)
-            return
-        _meta_del("reconcile_pending_count")
-        await interaction.response.send_message(f"Reconcile cancelled — {pending} deletions skipped.", ephemeral=True)
-        ARCHIVE_manager.bot.logger.log(MODULE_NAME, f"Reconcile cancelled by owner ({pending} deletions skipped)")
 
     @bot.tree.command(name="rebuild_index", description="[Owner only] Rebuild the song index cache")
     async def rebuild_index(interaction: discord.Interaction):

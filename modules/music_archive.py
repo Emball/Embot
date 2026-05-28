@@ -739,7 +739,7 @@ class ARCHIVEManager:
             chan = discord.utils.get(self.bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
             self.bot.logger.log(MODULE_NAME, f"Startup status post — chan={'found' if chan else 'NOT FOUND'} status_msg_id={_meta_get('status_msg_id')}")
             if chan:
-                await _purge_stale_status(self.bot, chan, _meta_get("status_msg_id"))
+                await _purge_stale_status(self.bot, chan)
                 await _post_status(self.bot, chan, self._status_state)
                 self.bot.logger.log(MODULE_NAME, f"Startup status post complete — new status_msg_id={_meta_get('status_msg_id')}")
 

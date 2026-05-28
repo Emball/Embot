@@ -445,6 +445,9 @@ async def _post_status(bot, chan, state: dict) -> None:
     remaining_mb = state.get("remaining_mb")  # MB not yet uploaded
     last_batch = state.get("last_batch")  # e.g. "3 files, 91MB in 25s"
 
+    db_cached = state.get("db_cached", cached)  # what DB thinks is cached
+    channel_cached = state.get("channel_cached")  # ground truth from channel
+
     pct = cached / indexed * 100 if indexed else 0
     bar_len = 14
     filled = int(bar_len * cached / indexed) if indexed else 0
@@ -466,9 +469,14 @@ async def _post_status(bot, chan, state: dict) -> None:
     if last_batch and not uploading:
         body += f"\n-# ✓ last: {last_batch}"
 
-    in_sync = cached == indexed
-    sync_icon = "✓" if in_sync else "✗"
-    body += f"\n\nIndexed  `{indexed:,}`  ·  DB  `{cached:,}`  {sync_icon}"
+    # Three-way breakdown
+    chan_str = f"`{channel_cached:,}`" if channel_cached is not None else "`—`"
+    db_str = f"`{db_cached:,}`"
+    mismatch = channel_cached is not None and channel_cached != db_cached
+    sync_icon = "⚠" if mismatch else ("✓" if db_cached == indexed else "✗")
+    body += f"\n\nIndexed `{indexed:,}` · DB {db_str} · Channel {chan_str}  {sync_icon}"
+    if mismatch:
+        body += f"\n-# DB/channel mismatch — {abs(db_cached - channel_cached)} file(s) differ"
     if orphans:
         body += f"  ·  {orphans} removed last sync"
     if errors:
@@ -743,7 +751,12 @@ class ARCHIVEManager:
             indexed = len({c['path'] for fmt in FORMATS for v in self.song_index.get(fmt, {}).values() for c in v})
             with _db_conn() as c:
                 cached = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
-            self._status_state.update({"indexed": indexed, "cached": cached})
+            channel_cached_str = _meta_get("channel_cached")
+            channel_cached = int(channel_cached_str) if channel_cached_str else None
+            self._status_state.update({
+                "indexed": indexed, "cached": cached,
+                "db_cached": cached, "channel_cached": channel_cached,
+            })
 
             # Clear transient backfill_active flag; check persistent enabled flag
             _meta_del("backfill_active")
@@ -901,8 +914,12 @@ class ARCHIVEManager:
             f"(max {max_bytes // 1024 // 1024}MB per message)")
 
         with _db_conn() as c:
-            channel_count = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
+            db_count = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
+        channel_count = db_count  # post-recovery, DB and channel are in sync
+        _meta_set("channel_cached", str(channel_count))
         self._status_state["cached"] = channel_count
+        self._status_state["db_cached"] = db_count
+        self._status_state["channel_cached"] = channel_count
         await _post_status(self.bot, chan, self._status_state)
 
         if not pending:
@@ -994,7 +1011,12 @@ class ARCHIVEManager:
                 channel_count += len(_cur_batch) if ok else 0
                 self._status_state["cached"] = channel_count
                 channel_count += len(_cur_batch) if ok else 0
+                with _db_conn() as c:
+                    db_count = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
+                _meta_set("channel_cached", str(channel_count))
                 self._status_state["cached"] = channel_count
+                self._status_state["db_cached"] = db_count
+                self._status_state["channel_cached"] = channel_count
                 self._status_state["mbps"] = _mbps
                 self._status_state["remaining_mb"] = _remaining_mb
                 self._status_state["last_batch"] = f"{len(_cur_batch)} file(s), {_batch_mb:.0f}MB in {_batch_secs:.0f}s"
@@ -1036,10 +1058,13 @@ class ARCHIVEManager:
                 _total_secs = sum(s for _, s in speed_samples)
                 _mbps = _total_mb / _total_secs if _total_secs > 0 else None
                 _remaining_mb = (total_bytes - uploaded_bytes) / 1024 / 1024
-                with _db_conn() as c:
-                    self._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
                 channel_count += len(_cur_batch) if ok else 0
+                with _db_conn() as c:
+                    db_count = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
+                _meta_set("channel_cached", str(channel_count))
                 self._status_state["cached"] = channel_count
+                self._status_state["db_cached"] = db_count
+                self._status_state["channel_cached"] = channel_count
                 self._status_state["mbps"] = _mbps
                 self._status_state["remaining_mb"] = _remaining_mb
                 self._status_state["last_batch"] = f"{len(_cur_batch)} file(s), {_batch_mb:.0f}MB in {_batch_secs:.0f}s"

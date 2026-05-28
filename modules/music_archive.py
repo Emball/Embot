@@ -386,7 +386,8 @@ async def _cache_refresh_url(bot, file_path: str, entry: dict) -> Optional[str]:
         if not msg.attachments:
             bot.logger.log(MODULE_NAME, f"Cache refresh failed: message {entry['message_id']} has no attachments", "WARNING")
             return None
-        att = msg.attachments[0]
+        # Match by filename — message may contain multiple files from a batch
+        att = next((a for a in msg.attachments if a.filename == entry["file_name"]), msg.attachments[0])
         _cache_store(file_path, att.url, entry["message_id"], entry["channel_id"],
                      entry["file_name"], entry["file_size"])
         return att.url

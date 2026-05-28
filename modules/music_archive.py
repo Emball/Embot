@@ -340,7 +340,7 @@ def _db_init() -> None:
         for migration in [
             "ALTER TABLE song_cache ADD COLUMN file_checksum TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE song_cache ADD COLUMN transcoded INTEGER NOT NULL DEFAULT 0",
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_song_cache_message_id ON song_cache(message_id)",
+            "CREATE INDEX IF NOT EXISTS idx_song_cache_message_id ON song_cache(message_id)",
             "CREATE TABLE IF NOT EXISTS cache_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
         ]:
             try:

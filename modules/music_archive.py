@@ -949,9 +949,6 @@ class ARCHIVEManager:
                     return
                 continue
             if batch and batch_size + sz > max_bytes:
-                with _db_conn() as c:
-                    self._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
-                await _post_status(self.bot, chan, self._status_state)
                 ok = await self._send_batch(chan, batch)
                 if ok:
                     uploaded += len(batch)
@@ -959,6 +956,9 @@ class ARCHIVEManager:
                 else:
                     uploaded, uploaded_bytes, errors = await self._fallback_batch(
                         chan, batch, uploaded, uploaded_bytes, errors)
+                with _db_conn() as c:
+                    self._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
+                await _post_status(self.bot, chan, self._status_state)
                 sent_batches += 1
                 batch = []
                 batch_size = 0
@@ -973,9 +973,6 @@ class ARCHIVEManager:
         if batch:
             batch = [(fp, p, sz) for fp, p, sz in batch if not _cache_lookup(fp)]
             if batch:
-                with _db_conn() as c:
-                    self._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
-                await _post_status(self.bot, chan, self._status_state)
                 ok = await self._send_batch(chan, batch)
                 if ok:
                     uploaded += len(batch)
@@ -983,6 +980,9 @@ class ARCHIVEManager:
                 else:
                     uploaded, uploaded_bytes, errors = await self._fallback_batch(
                         chan, batch, uploaded, uploaded_bytes, errors)
+                with _db_conn() as c:
+                    self._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
+                await _post_status(self.bot, chan, self._status_state)
                 sent_batches += 1
         self.bot.logger.log(MODULE_NAME,
             f"Cache backfill complete: {uploaded} uploaded in {sent_batches} batch(es), "
@@ -1050,10 +1050,16 @@ class ARCHIVEManager:
             self.bot.logger.log(MODULE_NAME, f"Batch upload error ({len(batch)} files): {e}", "WARNING")
             return False
         ok = True
-        for (fp, name, data, sz), att in zip(file_data, msg.attachments):
+        for i, ((fp, name, data, sz), att) in enumerate(zip(file_data, msg.attachments)):
             actual_path = source_path if source_path and len(batch) == 1 else fp
-            checksum = _file_checksum(actual_path)
-            _cache_store(fp, att.url, msg.id, chan.id, name, sz, checksum, int(transcoded))
+            self.bot.logger.log(MODULE_NAME, f"Storing {i+1}/{len(batch)}: {name} att={att.filename}")
+            try:
+                checksum = await loop.run_in_executor(UPLOAD_EXECUTOR, _file_checksum, actual_path)
+                _cache_store(fp, att.url, msg.id, chan.id, name, sz, checksum, int(transcoded))
+                self.bot.logger.log(MODULE_NAME, f"Stored {i+1}/{len(batch)}: {name}")
+            except Exception as store_err:
+                self.bot.logger.log(MODULE_NAME, f"Store failed {i+1}/{len(batch)} {name}: {store_err}", "WARNING")
+                ok = False
         self.bot.logger.log(MODULE_NAME,
             f"Cached batch: {len(batch)} file(s), {total_mb}MB "
             f"(read: {read_elapsed:.1f}s, upload: {up_elapsed:.1f}s)")

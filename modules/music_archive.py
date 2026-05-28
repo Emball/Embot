@@ -1242,18 +1242,47 @@ def setup(bot):
         else:
             await interaction.response.send_message("Backfill wasn't running — resume flag cleared.", ephemeral=True)
 
-    @bot.tree.command(name="clear_cache_db", description="[Owner only] Wipe the song cache DB (song_cache, fails, meta)")
-    async def clear_cache_db(interaction: discord.Interaction):
+    class ClearCacheConfirmView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=30)
+
+        @discord.ui.button(label="Yes, wipe everything", style=discord.ButtonStyle.danger)
+        async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.stop()
+            chan = discord.utils.get(interaction.guild.text_channels, name=CACHE_CHANNEL_NAME)
+            category = chan.category if chan else None
+            position = chan.position if chan else None
+            overwrites = chan.overwrites if chan else {}
+            topic = chan.topic if chan else None
+            if chan:
+                await chan.delete(reason=f"Cache wipe by {interaction.user}")
+            new_chan = await interaction.guild.create_text_channel(
+                CACHE_CHANNEL_NAME, category=category, position=position,
+                overwrites=overwrites, topic=topic,
+                reason=f"Cache wipe by {interaction.user}"
+            )
+            with _db_conn() as c:
+                c.execute("DELETE FROM song_cache")
+                c.execute("DELETE FROM song_cache_fails")
+                c.execute("DELETE FROM cache_meta")
+            ARCHIVE_manager.backfill_active = False
+            ARCHIVE_manager._shutdown_flag = False
+            bot.logger.log(MODULE_NAME, f"Cache DB and #{CACHE_CHANNEL_NAME} wiped by {interaction.user}")
+            await interaction.response.edit_message(
+                content=f"Done — #{CACHE_CHANNEL_NAME} deleted and recreated, DB wiped.", view=None)
+
+        @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+        async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+            self.stop()
+            await interaction.response.edit_message(content="Cancelled.", view=None)
+
+    @bot.tree.command(name="clear_cache", description="[Owner only] Wipe cache DB and delete/recreate the songcache channel")
+    async def clear_cache(interaction: discord.Interaction):
         if not is_owner(interaction.user):
             await interaction.response.send_message("Owner only.", ephemeral=True)
             return
-        with _db_conn() as c:
-            c.execute("DELETE FROM song_cache")
-            c.execute("DELETE FROM song_cache_fails")
-            c.execute("DELETE FROM cache_meta")
-        ARCHIVE_manager.backfill_active = False
-        ARCHIVE_manager._shutdown_flag = False
-        bot.logger.log(MODULE_NAME, f"Cache DB wiped by {interaction.user}")
-        await interaction.response.send_message("Cache DB wiped — song_cache, fails, and meta are clear.", ephemeral=True)
+        await interaction.response.send_message(
+            "⚠️ This will **wipe the entire cache DB** and **delete + recreate** the songcache channel. Are you sure?",
+            view=ClearCacheConfirmView(), ephemeral=True)
 
     bot.logger.log(MODULE_NAME, "ARCHIVE module setup complete")

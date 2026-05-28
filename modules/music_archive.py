@@ -465,7 +465,7 @@ async def _post_status(bot, chan, state: dict) -> None:
     if mbps and remaining_mb and remaining_mb > 0:
         eta_secs = int(remaining_mb / mbps)
         eta_ts = int(time.time()) + eta_secs
-        body += f"\n-# ↑ {mbps:.1f} MB/s avg · ETA <t:{eta_ts}:R>"
+        body += f"\n-# ↑ {mbps:.1f} MB/s avg · Finishing <t:{eta_ts}:R>"
     if last_batch and not uploading:
         body += f"\n-# ✓ last: {last_batch}"
 

@@ -423,14 +423,33 @@ def _meta_del(key: str) -> None:
 
 _last_status_snapshot: dict = {}
 
-async def _post_status(bot, chan, state: dict) -> None:
+def _is_status_embed(msg, bot_user) -> bool:
+    """True if this message looks like a status embed posted by the bot."""
+    if msg.author != bot_user:
+        return False
+    # Status embeds have no attachments and use LayoutView (Components V2 flag)
+    return not msg.attachments
+
+async def _purge_stale_status(bot, chan, keep_id: str | None) -> None:
+    """Delete all bot status embed messages except keep_id."""
+    to_delete = []
+    async for msg in chan.history(limit=200):
+        if _is_status_embed(msg, bot.user) and str(msg.id) != keep_id:
+            to_delete.append(msg)
+    for msg in to_delete:
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
+async def _post_status(bot, chan, state: dict, force_repost: bool = False) -> None:
     global _last_status_snapshot
     snapshot_key = (
         state.get("indexed"), state.get("cached"), state.get("activity"),
         state.get("orphans_deleted"),
         tuple(state.get("errors", [])[-3:]),
     )
-    if snapshot_key == _last_status_snapshot.get("key") and _meta_get("status_msg_id"):
+    if snapshot_key == _last_status_snapshot.get("key") and _meta_get("status_msg_id") and not force_repost:
         return
     _last_status_snapshot["key"] = snapshot_key
 
@@ -457,14 +476,12 @@ async def _post_status(bot, chan, state: dict) -> None:
     if activity:
         body += f"\n\n{activity}"
 
-    # sync state: DB entries vs what's indexed (these should always match)
     in_sync = cached == indexed
     sync_icon = "✓" if in_sync else "✗"
     body += f"\n\nIndexed  `{indexed:,}`  ·  DB  `{cached:,}`  {sync_icon}"
     if orphans:
         body += f"  ·  {orphans} removed last sync"
 
-    # errors
     if errors:
         body += "\n" + "\n".join(f"-# ⚠ {e}" for e in errors[-3:])
 
@@ -479,16 +496,41 @@ async def _post_status(bot, chan, state: dict) -> None:
     ))
 
     old_id = _meta_get("status_msg_id")
+
+    # During backfill or forced repost: always delete-and-repost to stay at bottom
+    if force_repost or activity:
+        if old_id:
+            try:
+                await (await chan.fetch_message(int(old_id))).delete()
+            except Exception:
+                pass
+            _meta_del("status_msg_id")
+        await _purge_stale_status(bot, chan, None)
+        try:
+            msg = await chan.send(view=view)
+            _meta_set("status_msg_id", str(msg.id))
+        except Exception as e:
+            bot.logger.log(MODULE_NAME, f"Failed to post status embed: {e}", "WARNING")
+        return
+
+    # Idle: edit in place if still the last message, otherwise delete-and-repost
     if old_id:
         try:
             old_msg = await chan.fetch_message(int(old_id))
-            await old_msg.edit(view=view)
-            return
+            # Check if it's the last message in the channel
+            last = [m async for m in chan.history(limit=1)]
+            if last and str(last[0].id) == old_id:
+                await old_msg.edit(view=view)
+                return
+            else:
+                await old_msg.delete()
         except discord.NotFound:
-            _meta_del("status_msg_id")
+            pass
         except Exception:
             pass
+        _meta_del("status_msg_id")
 
+    await _purge_stale_status(bot, chan, None)
     try:
         msg = await chan.send(view=view)
         _meta_set("status_msg_id", str(msg.id))
@@ -756,7 +798,8 @@ class ARCHIVEManager:
             chan = discord.utils.get(self.bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
             self.bot.logger.log(MODULE_NAME, f"Startup status post — chan={'found' if chan else 'NOT FOUND'} status_msg_id={_meta_get('status_msg_id')}")
             if chan:
-                await _post_status(self.bot, chan, self._status_state)
+                await _purge_stale_status(self.bot, chan, _meta_get("status_msg_id"))
+                await _post_status(self.bot, chan, self._status_state, force_repost=True)
                 self.bot.logger.log(MODULE_NAME, f"Startup status post complete — new status_msg_id={_meta_get('status_msg_id')}")
 
             loop = asyncio.get_running_loop()
@@ -1078,7 +1121,7 @@ class ARCHIVEManager:
         now = time.time()
         if not current_name or (now - self._last_status_post) >= 30:
             self._last_status_post = now
-            await _post_status(self.bot, chan, self._status_state)
+            await _post_status(self.bot, chan, self._status_state, force_repost=True)
 
     async def _send_batch(self, chan, batch, source_path=None, transcoded=False) -> bool:
         read_start = time.time()

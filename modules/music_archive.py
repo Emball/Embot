@@ -1084,7 +1084,10 @@ class ARCHIVEManager:
         cached = 0
         with _db_conn() as c:
             live_ids = {r[0] for r in c.execute("SELECT message_id FROM song_cache").fetchall()}
+            failed_paths = {r[0] for r in c.execute("SELECT file_path FROM song_cache_fails").fetchall()}
         for fp in sorted(seen):
+            if fp in failed_paths:
+                continue
             try:
                 entry = _cache_lookup(fp)
                 if entry and entry.get("message_id") in live_ids:
@@ -1140,6 +1143,10 @@ class ARCHIVEManager:
             return False
         except discord.HTTPException as e:
             self.bot.logger.log(MODULE_NAME, f"Batch upload failed ({len(batch)} files): {e}", "WARNING")
+            if e.status == 413:
+                for fp, name, data, sz in file_data:
+                    _cache_fail(fp, f"413 too large ({sz // 1024 // 1024}MB)")
+                    self.bot.logger.log(MODULE_NAME, f"Marked as too-large, skipping permanently: {name}", "WARNING")
             return False
         except Exception as e:
             self.bot.logger.log(MODULE_NAME, f"Batch upload error ({len(batch)} files): {e}", "WARNING")

@@ -441,6 +441,9 @@ async def _post_status(bot, chan, state: dict) -> None:
     errors = state.get("errors", [])
     reconcile_ts = state.get("last_reconcile_ts")
     orphans = state.get("orphans_deleted", 0)
+    mbps = state.get("mbps")  # rolling avg MB/s upload speed
+    remaining_mb = state.get("remaining_mb")  # MB not yet uploaded
+    last_batch = state.get("last_batch")  # e.g. "3 files, 91MB in 25s"
 
     pct = cached / indexed * 100 if indexed else 0
     bar_len = 14
@@ -452,6 +455,13 @@ async def _post_status(bot, chan, state: dict) -> None:
     body = f"{bar}  **{pct:.1f}%**\n{cached:,} / {indexed:,} songs cached"
     if gap:
         body += f"\n-# {gap:,} not yet uploaded"
+
+    if mbps and remaining_mb and remaining_mb > 0:
+        eta_secs = int(remaining_mb / mbps)
+        eta_ts = int(time.time()) + eta_secs
+        body += f"\n-# ↑ {mbps:.1f} MB/s · ETA <t:{eta_ts}:R>"
+    if last_batch:
+        body += f"\n-# last batch: {last_batch}"
 
     in_sync = cached == indexed
     sync_icon = "✓" if in_sync else "✗"
@@ -898,6 +908,7 @@ class ARCHIVEManager:
         uploaded_bytes = 0
         total_bytes = 0
         start = time.time()
+        speed_samples = []  # list of (mb, secs) per batch for rolling avg
 
         batch = []
         batch_size = 0
@@ -949,15 +960,31 @@ class ARCHIVEManager:
                     return
                 continue
             if batch and batch_size + sz > max_bytes:
-                ok = await self._send_batch(chan, batch)
+                _cur_batch = batch
+                _t0 = time.time()
+                ok = await self._send_batch(chan, _cur_batch)
                 if ok:
-                    uploaded += len(batch)
-                    uploaded_bytes += sum(s for _, _, s in batch)
+                    uploaded += len(_cur_batch)
+                    uploaded_bytes += sum(s for _, _, s in _cur_batch)
                 else:
                     uploaded, uploaded_bytes, errors = await self._fallback_batch(
-                        chan, batch, uploaded, uploaded_bytes, errors)
+                        chan, _cur_batch, uploaded, uploaded_bytes, errors)
+                _t1 = time.time()
+                _batch_mb = sum(s for _, _, s in _cur_batch) / 1024 / 1024
+                _batch_secs = _t1 - _t0
+                if _batch_secs > 0 and _batch_mb > 0:
+                    speed_samples.append((_batch_mb, _batch_secs))
+                    if len(speed_samples) > 10:
+                        speed_samples.pop(0)
+                _total_mb = sum(m for m, _ in speed_samples)
+                _total_secs = sum(s for _, s in speed_samples)
+                _mbps = _total_mb / _total_secs if _total_secs > 0 else None
+                _remaining_mb = (total_bytes - uploaded_bytes) / 1024 / 1024
                 with _db_conn() as c:
                     self._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
+                self._status_state["mbps"] = _mbps
+                self._status_state["remaining_mb"] = _remaining_mb
+                self._status_state["last_batch"] = f"{len(_cur_batch)} file(s), {_batch_mb:.0f}MB in {_batch_secs:.0f}s"
                 await _post_status(self.bot, chan, self._status_state)
                 sent_batches += 1
                 batch = []
@@ -973,15 +1000,31 @@ class ARCHIVEManager:
         if batch:
             batch = [(fp, p, sz) for fp, p, sz in batch if not _cache_lookup(fp)]
             if batch:
-                ok = await self._send_batch(chan, batch)
+                _cur_batch = batch
+                _t0 = time.time()
+                ok = await self._send_batch(chan, _cur_batch)
                 if ok:
-                    uploaded += len(batch)
-                    uploaded_bytes += sum(s for _, _, s in batch)
+                    uploaded += len(_cur_batch)
+                    uploaded_bytes += sum(s for _, _, s in _cur_batch)
                 else:
                     uploaded, uploaded_bytes, errors = await self._fallback_batch(
-                        chan, batch, uploaded, uploaded_bytes, errors)
+                        chan, _cur_batch, uploaded, uploaded_bytes, errors)
+                _t1 = time.time()
+                _batch_mb = sum(s for _, _, s in _cur_batch) / 1024 / 1024
+                _batch_secs = _t1 - _t0
+                if _batch_secs > 0 and _batch_mb > 0:
+                    speed_samples.append((_batch_mb, _batch_secs))
+                    if len(speed_samples) > 10:
+                        speed_samples.pop(0)
+                _total_mb = sum(m for m, _ in speed_samples)
+                _total_secs = sum(s for _, s in speed_samples)
+                _mbps = _total_mb / _total_secs if _total_secs > 0 else None
+                _remaining_mb = (total_bytes - uploaded_bytes) / 1024 / 1024
                 with _db_conn() as c:
                     self._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
+                self._status_state["mbps"] = _mbps
+                self._status_state["remaining_mb"] = _remaining_mb
+                self._status_state["last_batch"] = f"{len(_cur_batch)} file(s), {_batch_mb:.0f}MB in {_batch_secs:.0f}s"
                 await _post_status(self.bot, chan, self._status_state)
                 sent_batches += 1
         self.bot.logger.log(MODULE_NAME,

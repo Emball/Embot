@@ -424,6 +424,14 @@ def _meta_del(key: str) -> None:
 def _is_status_embed(msg, bot_user) -> bool:
     return msg.author == bot_user and not msg.attachments
 
+async def _count_channel_files(chan, bot_user) -> int:
+    """Count bot messages with audio attachments in the channel."""
+    count = 0
+    async for msg in chan.history(limit=None):
+        if msg.author == bot_user and msg.attachments:
+            count += len(msg.attachments)
+    return count
+
 async def _purge_stale_status(bot, chan) -> None:
     """Delete every bot status embed in the channel."""
     async for msg in chan.history(limit=200):
@@ -751,8 +759,10 @@ class ARCHIVEManager:
             indexed = len({c['path'] for fmt in FORMATS for v in self.song_index.get(fmt, {}).values() for c in v})
             with _db_conn() as c:
                 cached = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
-            channel_cached_str = _meta_get("channel_cached")
-            channel_cached = int(channel_cached_str) if channel_cached_str else None
+            chan = discord.utils.get(self.bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
+            channel_cached = await _count_channel_files(chan, self.bot.user) if chan else None
+            if channel_cached is not None:
+                _meta_set("channel_cached", str(channel_cached))
             self._status_state.update({
                 "indexed": indexed, "cached": cached,
                 "db_cached": cached, "channel_cached": channel_cached,
@@ -764,8 +774,7 @@ class ARCHIVEManager:
                 self.bot.logger.log(MODULE_NAME, "backfill_enabled flag set — resuming backfill")
                 asyncio.create_task(self.backfill_cache())
 
-            # Post status embed on startup (edit in place if already exists)
-            chan = discord.utils.get(self.bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
+            # Post status embed on startup
             self.bot.logger.log(MODULE_NAME, f"Startup status post — chan={'found' if chan else 'NOT FOUND'} status_msg_id={_meta_get('status_msg_id')}")
             if chan:
                 await _purge_stale_status(self.bot, chan)
@@ -1013,10 +1022,11 @@ class ARCHIVEManager:
                 channel_count += len(_cur_batch) if ok else 0
                 with _db_conn() as c:
                     db_count = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
-                _meta_set("channel_cached", str(channel_count))
-                self._status_state["cached"] = channel_count
+                channel_actual = await _count_channel_files(chan, self.bot.user)
+                _meta_set("channel_cached", str(channel_actual))
+                self._status_state["cached"] = channel_actual
                 self._status_state["db_cached"] = db_count
-                self._status_state["channel_cached"] = channel_count
+                self._status_state["channel_cached"] = channel_actual
                 self._status_state["mbps"] = _mbps
                 self._status_state["remaining_mb"] = _remaining_mb
                 self._status_state["last_batch"] = f"{len(_cur_batch)} file(s), {_batch_mb:.0f}MB in {_batch_secs:.0f}s"
@@ -1061,10 +1071,11 @@ class ARCHIVEManager:
                 channel_count += len(_cur_batch) if ok else 0
                 with _db_conn() as c:
                     db_count = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
-                _meta_set("channel_cached", str(channel_count))
-                self._status_state["cached"] = channel_count
+                channel_actual = await _count_channel_files(chan, self.bot.user)
+                _meta_set("channel_cached", str(channel_actual))
+                self._status_state["cached"] = channel_actual
                 self._status_state["db_cached"] = db_count
-                self._status_state["channel_cached"] = channel_count
+                self._status_state["channel_cached"] = channel_actual
                 self._status_state["mbps"] = _mbps
                 self._status_state["remaining_mb"] = _remaining_mb
                 self._status_state["last_batch"] = f"{len(_cur_batch)} file(s), {_batch_mb:.0f}MB in {_batch_secs:.0f}s"

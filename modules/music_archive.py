@@ -893,7 +893,7 @@ class ARCHIVEManager:
 
         self.bot.logger.log(MODULE_NAME, f"Scanning {total} files against cache DB...")
         loop = asyncio.get_running_loop()
-        pending, cached, _ = await loop.run_in_executor(
+        pending, cached, _, total_pending_bytes = await loop.run_in_executor(
             METADATA_EXECUTOR, self._scan_pending, list(seen))
 
         self.bot.logger.log(MODULE_NAME,
@@ -911,7 +911,7 @@ class ARCHIVEManager:
         uploaded = 0
         errors = 0
         uploaded_bytes = 0
-        total_bytes = 0
+        total_bytes = total_pending_bytes  # pre-computed so ETA is available from batch 1
         start = time.time()
         speed_samples = []  # list of (mb, secs) per batch for rolling avg
 
@@ -1008,7 +1008,6 @@ class ARCHIVEManager:
                     return
             batch.append((fp, p, sz))
             batch_size += sz
-            total_bytes += sz
 
         if batch:
             batch = [(fp, p, sz) for fp, p, sz in batch if not _cache_lookup(fp)]
@@ -1055,9 +1054,6 @@ class ARCHIVEManager:
         cached = 0
         with _db_conn() as c:
             live_ids = {r[0] for r in c.execute("SELECT message_id FROM song_cache").fetchall()}
-        # A file is only cached if its DB entry points to a message that still exists.
-        # We verify by checking message_id is in the DB — stale entries were already
-        # purged by reconcile, so any DB row here is considered live.
         for fp in sorted(seen):
             try:
                 entry = _cache_lookup(fp)
@@ -1067,7 +1063,14 @@ class ARCHIVEManager:
                     pending.append(fp)
             except Exception:
                 pass
-        return pending, cached, len(seen) - len(pending) - cached
+        # Stat pending files to get total bytes for ETA calculation
+        total_pending_bytes = 0
+        for fp in pending:
+            try:
+                total_pending_bytes += Path(fp).stat().st_size
+            except Exception:
+                pass
+        return pending, cached, len(seen) - len(pending) - cached, total_pending_bytes
 
     async def _fallback_batch(self, chan, batch, uploaded, uploaded_bytes, errors):
         for fp, p, sz in batch:

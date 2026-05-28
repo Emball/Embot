@@ -756,10 +756,6 @@ class ARCHIVEManager:
 
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(METADATA_EXECUTOR, self._migrate_checksums)
-            self._backfill_task = asyncio.create_task(self.backfill_cache())
-            # Yield so backfill_cache() runs first and sets backfill_active/DB flag before reconcile checks it
-            await asyncio.sleep(0)
-            asyncio.create_task(self.reconcile_channel())
             asyncio.create_task(self._reconcile_loop())
         except Exception as e:
             self.bot.logger.error(MODULE_NAME, "Background initialization failed", e)
@@ -791,62 +787,25 @@ class ARCHIVEManager:
                 self.bot.logger.log(MODULE_NAME, "Song index init timed out", "WARNING")
 
     async def reconcile_channel(self):
-        if self.backfill_active or _meta_get("backfill_active") == "1":
-            self.bot.logger.log(MODULE_NAME, "Reconcile skipped — backfill in progress")
-            return
         chan = discord.utils.get(self.bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
         if not chan:
             return
         status_id = _meta_get("status_msg_id")
-
-        # Pass 1: scan channel, build live_ids, identify what needs deleting
-        with _db_conn() as c:
-            known_ids = {r[0] for r in c.execute("SELECT message_id FROM song_cache").fetchall()}
-        if status_id:
-            known_ids.add(status_id)
-
-        to_delete = []
-        live_ids = set()
+        deleted = 0
         try:
             async for msg in chan.history(limit=None):
                 if str(msg.id) == status_id:
-                    live_ids.add(str(msg.id))
                     continue
                 if msg.author != self.bot.user:
-                    to_delete.append(msg)
-                    continue
-                if not msg.attachments:
-                    to_delete.append(msg)
-                    continue
-                if str(msg.id) not in known_ids:
-                    to_delete.append(msg)
-                    continue
-                live_ids.add(str(msg.id))
+                    try:
+                        await msg.delete()
+                        deleted += 1
+                    except discord.NotFound:
+                        pass
         except Exception as e:
             self.bot.logger.log(MODULE_NAME, f"Reconcile error: {e}", "WARNING")
-
-        # Pass 2: DB → channel — find stale DB entries
-        with _db_conn() as c:
-            db_ids = {r[0] for r in c.execute("SELECT message_id FROM song_cache").fetchall()}
-        stale_db = db_ids - live_ids
-
-        deleted = 0
-        for msg in to_delete:
-            try:
-                await msg.delete()
-                deleted += 1
-            except discord.NotFound:
-                pass
         if deleted:
-            self.bot.logger.log(MODULE_NAME, f"Reconcile: deleted {deleted} orphan message(s)")
-
-        # Always purge stale DB entries — these are messages already gone from channel
-        if stale_db:
-            with _db_conn() as c:
-                c.executemany("DELETE FROM song_cache WHERE message_id=?", [(mid,) for mid in stale_db])
-                c.commit()
-            self.bot.logger.log(MODULE_NAME, f"Reconcile: purged {len(stale_db)} stale DB entries")
-
+            self.bot.logger.log(MODULE_NAME, f"Reconcile: deleted {deleted} non-bot message(s)")
         ts = int(_now().timestamp())
         with _db_conn() as c:
             cached = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
@@ -897,33 +856,6 @@ class ARCHIVEManager:
 
     async def _backfill_cache(self, chan):
         max_bytes = min(getattr(chan.guild, 'filesize_limit', 25 * 1024 * 1024), 95 * 1024 * 1024)
-
-        try:
-            async for msg in chan.history(limit=100):
-                if msg.author != self.bot.user:
-                    await msg.delete()
-                    continue
-                # Components V2 messages have no .embeds — check raw component content
-                is_backfill = False
-                if msg.embeds:
-                    for e in msg.embeds:
-                        if e.title and "Cache Backfill" in e.title:
-                            is_backfill = True
-                            break
-                if not is_backfill:
-                    def _has_backfill_text(comps):
-                        for c in comps:
-                            if getattr(c, 'content', None) and "Cache Backfill" in c.content:
-                                return True
-                            if _has_backfill_text(getattr(c, 'children', []) or []):
-                                return True
-                        return False
-                    if _has_backfill_text(msg.components):
-                        is_backfill = True
-                if is_backfill:
-                    await msg.delete()
-        except Exception:
-            pass
 
         seen = set()
         for fmt in FORMATS:

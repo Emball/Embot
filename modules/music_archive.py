@@ -948,15 +948,15 @@ class ARCHIVEManager:
                     self.bot.logger.log(MODULE_NAME, f"Downsample failed or still too large: {p.name}", "WARNING")
                     errors += 1
                 sent_batches += 1
-                with _db_conn() as c:
-                    self._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
-                await _post_status(self.bot, chan, self._status_state)
                 await asyncio.sleep(3)
                 if self._shutdown_flag:
                     self.bot.logger.log(MODULE_NAME, "Backfill interrupted by shutdown")
                     return
                 continue
             if batch and batch_size + sz > max_bytes:
+                with _db_conn() as c:
+                    self._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
+                await _post_status(self.bot, chan, self._status_state)
                 ok = await self._send_batch(chan, batch)
                 if ok:
                     uploaded += len(batch)
@@ -967,9 +967,6 @@ class ARCHIVEManager:
                 sent_batches += 1
                 batch = []
                 batch_size = 0
-                with _db_conn() as c:
-                    self._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
-                await _post_status(self.bot, chan, self._status_state)
                 await asyncio.sleep(3)
                 if self._shutdown_flag:
                     self.bot.logger.log(MODULE_NAME, "Backfill interrupted by shutdown")
@@ -981,6 +978,9 @@ class ARCHIVEManager:
         if batch:
             batch = [(fp, p, sz) for fp, p, sz in batch if not _cache_lookup(fp)]
             if batch:
+                with _db_conn() as c:
+                    self._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
+                await _post_status(self.bot, chan, self._status_state)
                 ok = await self._send_batch(chan, batch)
                 if ok:
                     uploaded += len(batch)
@@ -989,9 +989,6 @@ class ARCHIVEManager:
                     uploaded, uploaded_bytes, errors = await self._fallback_batch(
                         chan, batch, uploaded, uploaded_bytes, errors)
                 sent_batches += 1
-                with _db_conn() as c:
-                    self._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
-                await _post_status(self.bot, chan, self._status_state)
         self.bot.logger.log(MODULE_NAME,
             f"Cache backfill complete: {uploaded} uploaded in {sent_batches} batch(es), "
             f"{cached} cached, {errors} errors")

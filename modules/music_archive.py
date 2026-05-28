@@ -891,6 +891,10 @@ class ARCHIVEManager:
             f"Cache backfill: {len(pending)}/{total} files need upload "
             f"(max {max_bytes // 1024 // 1024}MB per message)")
 
+        with _db_conn() as c:
+            self._status_state["cached"] = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
+        await _post_status(self.bot, chan, self._status_state)
+
         if not pending:
             return
 

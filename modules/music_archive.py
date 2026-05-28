@@ -520,7 +520,7 @@ async def _get_or_upload_cache(bot, file_path: str) -> Optional[str]:
         bot.logger.error(MODULE_NAME, f"File not found: {file_path}")
         return None
     size = p.stat().st_size
-    max_bytes = getattr(getattr(chan, 'guild', None), 'filesize_limit', 25 * 1024 * 1024)
+    max_bytes = 95 * 1024 * 1024
     if size > max_bytes:
         bot.logger.log(MODULE_NAME, f"File too large: {p.name} ({size // 1024 // 1024}MB)", "WARNING")
         return "FILE_TOO_LARGE"
@@ -855,7 +855,7 @@ class ARCHIVEManager:
             _meta_del("backfill_active")
 
     async def _backfill_cache(self, chan):
-        max_bytes = min(getattr(chan.guild, 'filesize_limit', 25 * 1024 * 1024), 95 * 1024 * 1024)
+        max_bytes = 95 * 1024 * 1024  # guild supports 100MB; leave 5MB headroom
 
         # Recover any uploads that made it to Discord but weren't stored (e.g. mid-upload disconnect)
         status_id = _meta_get("status_msg_id")

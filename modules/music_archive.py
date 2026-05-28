@@ -456,12 +456,15 @@ async def _post_status(bot, chan, state: dict) -> None:
     if gap:
         body += f"\n-# {gap:,} not yet uploaded"
 
+    uploading = state.get("uploading")  # e.g. "3 files, 91MB" while batch in flight
+    if uploading:
+        body += f"\n-# 📤 uploading {uploading}..."
     if mbps and remaining_mb and remaining_mb > 0:
         eta_secs = int(remaining_mb / mbps)
         eta_ts = int(time.time()) + eta_secs
-        body += f"\n-# ↑ {mbps:.1f} MB/s · ETA <t:{eta_ts}:R>"
-    if last_batch:
-        body += f"\n-# last batch: {last_batch}"
+        body += f"\n-# ↑ {mbps:.1f} MB/s avg · ETA <t:{eta_ts}:R>"
+    if last_batch and not uploading:
+        body += f"\n-# ✓ last: {last_batch}"
 
     in_sync = cached == indexed
     sync_icon = "✓" if in_sync else "✗"
@@ -861,12 +864,13 @@ class ARCHIVEManager:
                     continue
                 if msg.author != self.bot.user or not msg.attachments:
                     continue
-                def _norm(s): return s.replace(' ', '_').lower()
                 for att in msg.attachments:
+                    # Strip extension, then normalize the same way song_index keys are built
+                    att_key = normalize_title(Path(att.filename).stem)
                     fp = next(
                         (e['path'] for fmt in FORMATS
                          for entries in self.song_index.get(fmt, {}).values()
-                         for e in entries if _norm(Path(e['path']).name) == _norm(att.filename)),
+                         for e in entries if normalize_title(Path(e['path']).stem) == att_key),
                         None
                     )
                     if fp and not _cache_lookup(fp):
@@ -961,8 +965,12 @@ class ARCHIVEManager:
                 continue
             if batch and batch_size + sz > max_bytes:
                 _cur_batch = batch
+                _batch_mb_pre = sum(s for _, _, s in _cur_batch) / 1024 / 1024
+                self._status_state["uploading"] = f"{len(_cur_batch)} file(s), {_batch_mb_pre:.0f}MB"
+                await _post_status(self.bot, chan, self._status_state)
                 _t0 = time.time()
                 ok = await self._send_batch(chan, _cur_batch)
+                self._status_state["uploading"] = None
                 if ok:
                     uploaded += len(_cur_batch)
                     uploaded_bytes += sum(s for _, _, s in _cur_batch)
@@ -1001,8 +1009,12 @@ class ARCHIVEManager:
             batch = [(fp, p, sz) for fp, p, sz in batch if not _cache_lookup(fp)]
             if batch:
                 _cur_batch = batch
+                _batch_mb_pre = sum(s for _, _, s in _cur_batch) / 1024 / 1024
+                self._status_state["uploading"] = f"{len(_cur_batch)} file(s), {_batch_mb_pre:.0f}MB"
+                await _post_status(self.bot, chan, self._status_state)
                 _t0 = time.time()
                 ok = await self._send_batch(chan, _cur_batch)
+                self._status_state["uploading"] = None
                 if ok:
                     uploaded += len(_cur_batch)
                     uploaded_bytes += sum(s for _, _, s in _cur_batch)

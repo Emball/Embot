@@ -746,8 +746,11 @@ class ARCHIVEManager:
                 cached = c.execute("SELECT COUNT(*) FROM song_cache").fetchone()[0]
             self._status_state.update({"indexed": indexed, "cached": cached, "activity": "Initializing..."})
 
-            # Clear any stale backfill_active flag from a previous crash/reload
+            # Clear transient backfill_active flag; check persistent enabled flag
             _meta_del("backfill_active")
+            if _meta_get("backfill_enabled") == "1":
+                self.bot.logger.log(MODULE_NAME, "backfill_enabled flag set — resuming backfill")
+                asyncio.create_task(self.backfill_cache())
 
             # Post status embed on startup (edit in place if already exists)
             chan = discord.utils.get(self.bot.get_all_channels(), name=CACHE_CHANNEL_NAME)
@@ -850,11 +853,13 @@ class ARCHIVEManager:
         self.backfill_active = True
         self._shutdown_flag = False
         _meta_set("backfill_active", "1")
+        _meta_set("backfill_enabled", "1")
         try:
             await self._backfill_cache(chan)
         finally:
             self.backfill_active = False
             _meta_del("backfill_active")
+            _meta_del("backfill_enabled")
 
     async def _backfill_cache(self, chan):
         max_bytes = 95 * 1024 * 1024  # guild supports 100MB; leave 5MB headroom
@@ -1212,14 +1217,43 @@ def setup(bot):
             bot.logger.error(MODULE_NAME, "Index rebuild failed", e)
             await interaction.followup.send("Failed to rebuild index.", ephemeral=True)
 
-    @bot.tree.command(name="cache_backfill",
-                      description="[Owner only] Pre-upload all uncached songs to the CDN cache")
-    async def cache_backfill(interaction: discord.Interaction):
+    @bot.tree.command(name="backfill_start", description="[Owner only] Start the song cache backfill (persists across restarts)")
+    async def backfill_start(interaction: discord.Interaction):
         if not is_owner(interaction.user):
-            await interaction.response.send_message("This command is restricted to owners.", ephemeral=True)
+            await interaction.response.send_message("Owner only.", ephemeral=True)
             return
-        await interaction.response.send_message(
-            "Starting cache backfill in the background. Check the bot logs for progress.", ephemeral=True)
+        if ARCHIVE_manager.backfill_active:
+            await interaction.response.send_message("Backfill is already running.", ephemeral=True)
+            return
+        await interaction.response.send_message("Backfill started — will resume automatically after any restart.", ephemeral=True)
         asyncio.create_task(ARCHIVE_manager.backfill_cache())
+
+    @bot.tree.command(name="backfill_stop", description="[Owner only] Stop the song cache backfill and clear the resume flag")
+    async def backfill_stop(interaction: discord.Interaction):
+        if not is_owner(interaction.user):
+            await interaction.response.send_message("Owner only.", ephemeral=True)
+            return
+        _meta_del("backfill_enabled")
+        if ARCHIVE_manager.backfill_active:
+            ARCHIVE_manager._shutdown_flag = True
+            if ARCHIVE_manager._backfill_task and not ARCHIVE_manager._backfill_task.done():
+                ARCHIVE_manager._backfill_task.cancel()
+            await interaction.response.send_message("Backfill stopped and resume flag cleared.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Backfill wasn't running — resume flag cleared.", ephemeral=True)
+
+    @bot.tree.command(name="clear_cache_db", description="[Owner only] Wipe the song cache DB (song_cache, fails, meta)")
+    async def clear_cache_db(interaction: discord.Interaction):
+        if not is_owner(interaction.user):
+            await interaction.response.send_message("Owner only.", ephemeral=True)
+            return
+        with _db_conn() as c:
+            c.execute("DELETE FROM song_cache")
+            c.execute("DELETE FROM song_cache_fails")
+            c.execute("DELETE FROM cache_meta")
+        ARCHIVE_manager.backfill_active = False
+        ARCHIVE_manager._shutdown_flag = False
+        bot.logger.log(MODULE_NAME, f"Cache DB wiped by {interaction.user}")
+        await interaction.response.send_message("Cache DB wiped — song_cache, fails, and meta are clear.", ephemeral=True)
 
     bot.logger.log(MODULE_NAME, "ARCHIVE module setup complete")

@@ -304,7 +304,7 @@ Signature changed to keyword-only: `send_bot_log(ms, guild, *, text, title=None,
 
 ### Exceptions — still uses V1 `ui.View` with `content=`
 
-Three message types still use V1 Views for interactive buttons and cannot use pure LayoutView (V2 `ActionRow` buttons don't support callbacks):
+Three message types still use V1 Views for interactive buttons and cannot use pure LayoutView. Note: V2 `ActionRow` **does** support interactive callbacks for both buttons and select menus — these exceptions exist because they need `content=` text alongside the buttons, which V2 doesn't allow:
 - **`mod_actions.py` ban DM** — `BanAppealView` with submit button
 - **`mod_appeals.py` appeal messages** — `AppealVoteView` with Yes/No buttons
 - **`mod_oversight.py` action review** — `ActionReviewView` with Approve/Revert/View Chat buttons

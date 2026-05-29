@@ -991,7 +991,7 @@ def run_db_exec(db_name: str, sql: str) -> tuple[int | None, str | None]:
         return None, str(e)
 
 
-
+async def run_exec(cmd, timeout=60):
     """Returns (stdout, stderr, exit_code) or raises TimeoutError."""
     proc = await asyncio.create_subprocess_shell(
         cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,

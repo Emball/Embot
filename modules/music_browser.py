@@ -83,6 +83,9 @@ class FormatSelect(ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
+        if _is_fed(interaction):
+            await interaction.response.send_message("Something went wrong loading the archive. Try again later.", ephemeral=True)
+            return
         fmt = self.values[0]
         categories = await asyncio.get_event_loop().run_in_executor(None, _get_categories, fmt)
         if not categories:
@@ -163,14 +166,10 @@ class SongSelectView(ui.View):
 
 async def _deliver(interaction: discord.Interaction, fmt: str, file_path: str):
     from music_archive import (
-        _cache_lookup, _cache_refresh_url, _get_or_upload_cache,
-        _log_delivery, LARGE_FILE_MSG, _is_fed
+        _cache_lookup, _get_or_upload_cache,
+        _log_delivery, LARGE_FILE_MSG,
     )
     bot = interaction.client
-
-    if _is_fed(interaction):
-        await interaction.followup.send("Failed to retrieve song.", ephemeral=True)
-        return
 
     p = Path(file_path)
     cached = _cache_lookup(file_path)

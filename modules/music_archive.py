@@ -903,8 +903,14 @@ class ARCHIVEManager:
                         None
                     )
                     if fp and not _cache_lookup(fp):
+                        try:
+                            disk_size = Path(fp).stat().st_size
+                            was_transcoded = 1 if att.size < disk_size * 0.85 else 0
+                        except Exception:
+                            disk_size = att.size
+                            was_transcoded = 0
                         _cache_store(fp, att.url, str(msg.id), str(chan.id),
-                                     Path(fp).name, att.size)
+                                     Path(fp).name, att.size, transcoded=was_transcoded)
                         recovered += 1
         except Exception as e:
             self.bot.logger.log(MODULE_NAME, f"Channel recovery scan error: {e}", "WARNING")

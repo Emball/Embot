@@ -306,7 +306,8 @@ CREATE TABLE IF NOT EXISTS song_cache (
 CREATE TABLE IF NOT EXISTS song_cache_fails (
     file_path   TEXT PRIMARY KEY,
     failed_at   TEXT NOT NULL,
-    reason      TEXT NOT NULL
+    reason      TEXT NOT NULL,
+    fail_count  INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS cache_meta (
@@ -402,7 +403,11 @@ async def _cache_refresh_url(bot, file_path: str, entry: dict) -> Optional[str]:
 def _cache_fail(file_path: str, reason: str) -> None:
     with _db_conn() as c:
         c.execute(
-            "INSERT OR REPLACE INTO song_cache_fails (file_path, failed_at, reason) VALUES (?,?,?)",
+            """INSERT INTO song_cache_fails (file_path, failed_at, reason, fail_count) VALUES (?,?,?,1)
+               ON CONFLICT(file_path) DO UPDATE SET
+                   failed_at=excluded.failed_at,
+                   reason=excluded.reason,
+                   fail_count=fail_count+1""",
             (str(Path(file_path)), _now().isoformat(), reason)
         )
         c.commit()
@@ -1083,7 +1088,7 @@ class ARCHIVEManager:
         cached = 0
         with _db_conn() as c:
             live_ids = {r[0] for r in c.execute("SELECT message_id FROM song_cache").fetchall()}
-            failed_paths = {r[0] for r in c.execute("SELECT file_path FROM song_cache_fails").fetchall()}
+            failed_paths = {r[0] for r in c.execute("SELECT file_path FROM song_cache_fails WHERE fail_count >= 5").fetchall()}
         for fp in sorted(seen):
             if fp in failed_paths:
                 continue

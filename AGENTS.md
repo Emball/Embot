@@ -232,6 +232,10 @@ Prefer `config-write`/`config-patch` over `shell` for config changes. Prefer `sc
 - **Starboard V2 edits** — mixing `content=` with a LayoutView edit raises `400 IS_COMPONENTS_V2`. Treat as `NotFound` — delete and repost. Always pass `allowed_mentions=discord.AllowedMentions.none()` on send/edit; also neutralise mentions inline with a zero-width space after `<@`.
 - **`CommandRegistrationError: ban already registered`** — appears in logs during `mod_core` reloads. Pre-existing quirk, not a regression. Bot recovers cleanly.
 - **Network error suppression** — `NetworkState` in `_utils.py` tracks connectivity. Check `NetworkState.is_online()` before logging network errors; call `NetworkState.suppress()` instead when offline. `Embot.py` flips state via `on_disconnect`/`on_resumed`.
+- **`music_archive` — multiple files per message** — `song_cache` uses `file_path` as sole PRIMARY KEY. Multiple files in one batch share the same `message_id` — this is intentional and correct. Never add a UNIQUE constraint on `message_id`.
+- **`music_archive` — filename matching** — Discord CDN attachment filenames mangle spaces and special chars to underscores. Always use `normalize_title(Path(filename).stem)` on both sides when matching attachment filenames against song index keys. Plain `replace(' ', '_')` is not sufficient.
+- **`music_archive` — orphan/reconcile system removed** — the bot never deletes bot messages with attachments from the songcache channel. Only non-bot messages and the status embed are ever cleaned up. Do not reintroduce automatic deletion of audio messages.
+- **`music_archive` — `cdn_url` column** — stored but never read. `_cache_refresh_url` always does a live `fetch_message` to get a fresh URL since Discord CDN URLs expire.
 
 ## Components V2 (discord.py LayoutView)
 

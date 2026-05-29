@@ -84,13 +84,13 @@ class FormatSelect(ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         fmt = self.values[0]
-        await interaction.response.defer(ephemeral=True, thinking=True)
         categories = await asyncio.get_event_loop().run_in_executor(None, _get_categories, fmt)
         if not categories:
-            await interaction.followup.send("No songs indexed yet — try again after the archive loads.", ephemeral=True)
+            await interaction.response.send_message(
+                "No songs indexed yet — try again after the archive loads.", ephemeral=True)
             return
         view = AlbumSelectView(fmt, categories)
-        await interaction.followup.send(
+        await interaction.response.send_message(
             f"**{fmt}** selected — now pick an album:",
             view=view, ephemeral=True
         )
@@ -118,14 +118,13 @@ class AlbumSelectView(ui.View):
     def _make_callback(self, fmt: str):
         async def callback(interaction: discord.Interaction):
             category = interaction.data["values"][0]
-            await interaction.response.defer(ephemeral=True, thinking=True)
             songs = await asyncio.get_event_loop().run_in_executor(None, _get_songs, fmt, category)
             if not songs:
-                await interaction.followup.send("No songs found in that album.", ephemeral=True)
+                await interaction.response.send_message("No songs found in that album.", ephemeral=True)
                 return
             view = SongSelectView(fmt, category, songs)
             label = category[:50] + ("…" if len(category) > 50 else "")
-            await interaction.followup.send(
+            await interaction.response.send_message(
                 f"**{fmt} / {label}** — pick a song:",
                 view=view, ephemeral=True
             )

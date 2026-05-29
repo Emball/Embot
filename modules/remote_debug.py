@@ -124,10 +124,12 @@ class RemoteDebugServer:
         self._app.router.add_get("/logs/{name}", self._handle_logs_file)
         self._app.router.add_get("/db/{name}", self._handle_db_download)
         self._app.router.add_get("/db/{name}/query", self._handle_db_query)
+        self._app.router.add_post("/db/{name}/exec", self._handle_db_exec)
         self._app.router.add_get("/config/{name}", self._handle_config)
         self._app.router.add_post("/update", self._handle_update)
         self._app.router.add_post("/restart", self._handle_restart)
         self._app.router.add_post("/shell", self._handle_shell)
+        self._app.router.add_post("/bot-exec", self._handle_bot_exec)
 
     def _check_auth(self, request) -> bool:
         req_token = request.headers.get("X-Debug-Token", "")
@@ -377,6 +379,43 @@ class RemoteDebugServer:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
+    async def _handle_bot_exec(self, request):
+        if not self._check_auth(request) or not self._check_ip(request):
+            return self._fail()
+        try:
+            body = await request.json()
+        except Exception:
+            return self._fail("invalid JSON", 400)
+        code = body.get("code", "").strip()
+        if not code:
+            return self._fail("missing 'code'", 400)
+        timeout = min(int(body.get("timeout", 15)), 60)
+        import __main__
+        output, err = await __main__.run_bot_exec(code, timeout=timeout)
+        return web.json_response({"output": output, "error": err})
+
+    async def _handle_db_exec(self, request):
+        if not self._check_auth(request) or not self._check_ip(request):
+            return self._fail()
+        name = request.match_info["name"]
+        if not self._sanitize_name(name):
+            return self._fail("invalid db name", 400)
+        try:
+            body = await request.json()
+        except Exception:
+            return self._fail("invalid JSON", 400)
+        sql = body.get("sql", "").strip()
+        if not sql:
+            return self._fail("missing 'sql'", 400)
+        if not body.get("confirm"):
+            return self._fail("missing 'confirm': true", 400)
+        import __main__
+        rows, err = __main__.run_db_exec(name, sql)
+        if err:
+            status = 404 if "not found" in err else 500
+            return web.json_response({"error": err}, status=status)
+        return web.json_response({"rows_affected": rows})
+
     async def _delayed_restart(self):
         await asyncio.sleep(1)
         await self.bot.close()
@@ -514,7 +553,7 @@ class ClaudeBridgeListener:
                     command = cmd.get("command", "")
                     args = cmd.get("args", [])
                     payload = None
-                    if command in ("script-exec", "config-write", "config-patch"):
+                    if command in ("script-exec", "config-write", "config-patch", "bot-exec", "db-exec"):
                         try:
                             import base64 as _b64
                             raw = await asyncio.get_event_loop().run_in_executor(
@@ -594,7 +633,9 @@ class ClaudeBridgeListener:
                 output = f"{len(data['files'])} log files"
             elif search:
                 try:
-                    data = __main__.get_logs_data(search=search, search_max=max_r)
+                    # comma-separated patterns → any match (OR logic); each compiled case-insensitive
+                    patterns = [p.strip() for p in search.split(",") if p.strip()]
+                    data = __main__.get_logs_data(search=patterns[0] if len(patterns) == 1 else "|".join(f"(?:{p})" for p in patterns), search_max=max_r)
                 except re.error as e:
                     return f"invalid regex: {e}", {}
                 artifacts["logs/search.json"] = {"pattern": search, "matches": data["matches"]}
@@ -678,6 +719,27 @@ class ClaudeBridgeListener:
                 return f"config '{name}' not found", {}
             except Exception as e:
                 return f"patch failed: {e}", {}
+
+        elif command == "bot-exec":
+            code = payload if payload is not None else (" ".join(args) if args else "")
+            if not code:
+                return "missing code", {}
+            import __main__
+            out, err = await __main__.run_bot_exec(code, timeout=30)
+            output = out if out else "(no output)"
+            if err:
+                output = f"[ERROR] {err}\n{output}".strip()
+
+        elif command == "db-exec":
+            # Usage: db-exec <name> <sql>  (requires explicit confirm via payload or --confirm flag)
+            if len(args) < 2:
+                return "usage: db-exec <name> <sql>", {}
+            sql = payload if payload is not None else " ".join(args[1:])
+            import __main__
+            rows_affected, err = __main__.run_db_exec(args[0], sql)
+            if err:
+                return err, {}
+            output = f"{rows_affected} row(s) affected"
 
         elif command == "shell":
             cmd_str = " ".join(args) if args else ""
@@ -1027,8 +1089,8 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
         p = work / name
         return p.read_text() if p.exists() else None
 
-    # Commands whose payload must not travel through args — write to payload.txt instead
-    PAYLOAD_COMMANDS = {"script-exec", "config-write", "config-patch"}
+    # commands whose payload must not travel through args — write to payload.txt instead
+    PAYLOAD_COMMANDS = {"script-exec", "config-write", "config-patch", "bot-exec", "db-exec"}
 
     work = None
     try:
@@ -1041,11 +1103,11 @@ def _cmd_bridge(bridge_cfg, command, args, timeout=45):
         payload = None
         safe_args = list(args)
         if command in PAYLOAD_COMMANDS and args:
-            if command == "script-exec":
+            if command in ("script-exec", "bot-exec"):
                 payload = " ".join(args)
                 safe_args = []
-            elif command in ("config-write", "config-patch"):
-                safe_args = args[:1]  # keep config name only
+            elif command in ("config-write", "config-patch", "db-exec"):
+                safe_args = args[:1]  # keep config/db name only
                 payload = " ".join(args[1:]) if len(args) > 1 else ""
 
         new_cmd = {"seq": seq, "command": command, "args": safe_args}
@@ -1187,6 +1249,14 @@ def main():
     config_w.add_argument("name", help="Config name (without .json)")
     config_w.add_argument("json_data", help="JSON string to write")
 
+    bot_exec_p = sub.add_parser("bot-exec", help="Run Python inside the live bot process")
+    bot_exec_p.add_argument("code", nargs="?", default=None, help="Python code (omit to read from stdin)")
+    bot_exec_p.add_argument("--timeout", type=int, default=15)
+
+    db_exec_p = sub.add_parser("db-exec", help="Run a write SQL statement on a database")
+    db_exec_p.add_argument("name", help="DB name (without .db)")
+    db_exec_p.add_argument("sql", help="SQL statement")
+
     exec_p = sub.add_parser("shell", help="Run a shell command on the server")
     exec_p.add_argument("cmd", nargs="?", default=None, help="Command to run (omit to read from stdin)")
     exec_p.add_argument("--timeout", type=int, default=15, help="Timeout in seconds")
@@ -1224,6 +1294,15 @@ def main():
         _cmd_db_query(cfg, args.name, args.query)
     elif args.command == "config":
         _cmd_config(cfg, args.name)
+    elif args.command == "bot-exec":
+        code = args.code
+        if not code:
+            code = sys.stdin.read().strip()
+        bridge_cfg = cfg.get("claude_bridge", {})
+        _cmd_bridge(bridge_cfg, "bot-exec", [code] if code else [], timeout=45)
+    elif args.command == "db-exec":
+        bridge_cfg = cfg.get("claude_bridge", {})
+        _cmd_bridge(bridge_cfg, "db-exec", [args.name, args.sql], timeout=30)
     elif args.command == "shell":
         _cmd_exec(cfg, args.cmd, args.timeout)
     elif args.command == "update":

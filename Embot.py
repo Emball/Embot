@@ -950,7 +950,47 @@ def run_db_query(db_name, sql):
     except Exception as e:
         return None, str(e)
 
-async def run_exec(cmd, timeout=60):
+async def run_bot_exec(code: str, timeout: float = 15) -> tuple[str, str]:
+    """Run Python code inside the bot process. Returns (output, error). Never raises."""
+    import io, contextlib, traceback as _tb
+    stdout_buf = io.StringIO()
+    error = ""
+    ns = {"bot": bot, "asyncio": asyncio}
+    try:
+        # Wrap in async def so await works; capture stdout
+        wrapped = f"async def _exec_fn():\n" + "\n".join(f"    {l}" for l in code.splitlines())
+        exec(compile(wrapped, "<bot-exec>", "exec"), ns)
+        with contextlib.redirect_stdout(stdout_buf):
+            coro = ns["_exec_fn"]()
+            await asyncio.wait_for(coro, timeout=timeout)
+    except asyncio.TimeoutError:
+        error = f"timed out after {timeout}s"
+    except Exception:
+        error = _tb.format_exc().strip()
+    return stdout_buf.getvalue(), error
+
+
+def run_db_exec(db_name: str, sql: str) -> tuple[int | None, str | None]:
+    """Run a write SQL statement. Returns (rows_affected, error). Raises nothing."""
+    import sqlite3 as _sqlite3
+    if not re.match(r'^[a-zA-Z0-9_\-]+$', db_name):
+        return None, 'invalid db name'
+    db_path = script_dir / 'db' / f'{db_name}.db'
+    if not db_path.exists():
+        return None, f"db '{db_name}' not found"
+    try:
+        conn = _sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+        cur.execute(sql)
+        conn.commit()
+        affected = cur.rowcount
+        conn.close()
+        return affected, None
+    except Exception as e:
+        return None, str(e)
+
+
+
     """Returns (stdout, stderr, exit_code) or raises TimeoutError."""
     proc = await asyncio.create_subprocess_shell(
         cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,

@@ -180,11 +180,13 @@ The GitHub token is in Claude's user preferences (`GitHub Access Token: ghp_...`
 | `status` | ✓ | ✓ | Bot vitals |
 | `modules` | ✓ | ✓ | Loaded modules |
 | `guilds` | — | ✓ | Guild list |
-| `logs [--tail N] [--file F] [--session N] [--search P]` | ✓ | ✓ | Fetch logs |
+| `logs [--tail N] [--file F] [--session N] [--search P1,P2] [--max N]` | ✓ | ✓ | Fetch logs. `--search` accepts comma-separated patterns (OR logic), always case-insensitive |
 | `logs-list` | — | ✓ | All log files |
 | `config <name>` | ✓ | ✓ | View config file |
 | `config-write <name> <json>` | ✓ | — | Write config atomically |
 | `config-patch <name> <json>` | ✓ | — | Atomic read-modify-write on config |
+| `bot-exec <python>` | ✓ | ✓ | Run Python inside the bot process — `bot`, `asyncio`, and the event loop available; stdout captured; exceptions returned as output, never crash the bot |
+| `db-exec <name> "<SQL>"` | ✓ | ✓ | Write SQL on a database — no SELECT restriction; use with care |
 | `db-query <name> "<SQL>"` | ✓ | ✓ | Read-only SQL query |
 | `db-download <name>` | ✓ | ✓ | Download .db to temp/ |
 | `shell <cmd>` | ✓ | ✓ | Shell command — inner strings use single quotes |

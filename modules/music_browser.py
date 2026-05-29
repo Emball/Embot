@@ -15,7 +15,7 @@ MODULE_NAME = "MUSIC BROWSER"
 CHANNEL_NAME = "info-test"
 STATE_PATH = script_dir() / "config" / "music_browser_state.json"
 
-PAGE_SIZE = 25  # Discord select option limit
+PAGE_SIZE = 25
 
 
 def _load_panel_id() -> str | None:
@@ -38,7 +38,7 @@ def _is_fed(interaction: discord.Interaction) -> bool:
     return False
 
 
-# ── DB helpers (sync — run via executor) ──────────────────────────────────────
+# ── DB helpers ────────────────────────────────────────────────────────────────
 
 def _get_categories(fmt: str) -> list[str]:
     from music_archive import _db_conn
@@ -66,7 +66,6 @@ async def _deliver(interaction: discord.Interaction, fmt: str, file_path: str):
     from music_archive import _cache_lookup, _get_or_upload_cache, _log_delivery, LARGE_FILE_MSG
     bot = interaction.client
     p = Path(file_path)
-
     url = await _get_or_upload_cache(bot, file_path)
     if url == "FILE_TOO_LARGE":
         await interaction.edit_original_response(content=LARGE_FILE_MSG)
@@ -74,123 +73,83 @@ async def _deliver(interaction: discord.Interaction, fmt: str, file_path: str):
     if not url:
         await interaction.edit_original_response(content="Failed to retrieve that song.")
         return
-
     entry = _cache_lookup(file_path)
     note = "\n-# Served transcoded — source exceeds Discord's upload limit" if entry and entry.get("transcoded") else ""
     await interaction.edit_original_response(content=f"[{p.name}]({url}){note}")
-
     candidate = {"path": file_path, "original_title": p.stem, "metadata": {"title": p.stem}}
     await _log_delivery(bot, interaction.user, candidate, source="browser")
     bot.logger.log(MODULE_NAME, f"Delivered '{p.name}' via browser to {interaction.user}")
 
 
-# ── Paginated song select ─────────────────────────────────────────────────────
+# ── Song paginator ────────────────────────────────────────────────────────────
 
-class SongPageView(ui.View):
-    """Single select of 25 songs with ◀ ▶ navigation buttons."""
+class _SongSelect(ui.Select):
+    def __init__(self, fmt: str, chunk: list[dict], page: int, total_pages: int):
+        super().__init__(
+            placeholder=f"Pick a song… (page {page + 1}/{total_pages})",
+            options=[discord.SelectOption(label=s["title"][:100], value=s["path"]) for s in chunk],
+            row=0,
+        )
+        self.fmt = fmt
 
-    def __init__(self, fmt: str, songs: list[dict], album_label: str, page: int = 0):
-        super().__init__(timeout=120)
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(content="Fetching…", view=None)
+        await _deliver(interaction, self.fmt, self.values[0])
+
+
+class _SongPrev(ui.Button):
+    def __init__(self, fmt: str, songs: list[dict], album_label: str, page: int, disabled: bool):
+        super().__init__(label="◀", style=discord.ButtonStyle.secondary, disabled=disabled, row=1)
         self.fmt = fmt
         self.songs = songs
         self.album_label = album_label
         self.page = page
-        self.total_pages = max(1, (len(songs) + PAGE_SIZE - 1) // PAGE_SIZE)
-        self._build()
 
-    def _build(self):
-        self.clear_items()
-        start = self.page * PAGE_SIZE
-        chunk = self.songs[start:start + PAGE_SIZE]
-
-        select = ui.Select(
-            placeholder=f"Pick a song… (page {self.page + 1}/{self.total_pages})",
-            options=[discord.SelectOption(label=s["title"][:100], value=s["path"]) for s in chunk],
-            row=0,
-        )
-        select.callback = self._song_callback
-        self.add_item(select)
-
-        prev_btn = ui.Button(label="◀", style=discord.ButtonStyle.secondary,
-                             disabled=(self.page == 0), row=1)
-        prev_btn.callback = self._prev
-        self.add_item(prev_btn)
-
-        page_btn = ui.Button(
-            label=f"{self.page + 1} / {self.total_pages}",
-            style=discord.ButtonStyle.secondary,
-            disabled=True, row=1,
-        )
-        self.add_item(page_btn)
-
-        next_btn = ui.Button(label="▶", style=discord.ButtonStyle.secondary,
-                             disabled=(self.page >= self.total_pages - 1), row=1)
-        next_btn.callback = self._next
-        self.add_item(next_btn)
-
-    async def _song_callback(self, interaction: discord.Interaction):
-        file_path = interaction.data["values"][0]
-        await interaction.response.edit_message(content="Fetching…", view=None)
-        await _deliver(interaction, self.fmt, file_path)
-
-    async def _prev(self, interaction: discord.Interaction):
-        self.page -= 1
-        self._build()
+    async def callback(self, interaction: discord.Interaction):
+        view = SongPageView(self.fmt, self.songs, self.album_label, self.page - 1)
         await interaction.response.edit_message(
-            content=f"**{self.fmt} / {self.album_label}** — pick a song:", view=self)
-
-    async def _next(self, interaction: discord.Interaction):
-        self.page += 1
-        self._build()
-        await interaction.response.edit_message(
-            content=f"**{self.fmt} / {self.album_label}** — pick a song:", view=self)
+            content=f"**{self.fmt} / {self.album_label}** — pick a song:", view=view)
 
 
-# ── Paginated album select ────────────────────────────────────────────────────
-
-class AlbumPageView(ui.View):
-    """Single select of 25 albums with ◀ ▶ navigation buttons."""
-
-    def __init__(self, fmt: str, categories: list[str], page: int = 0):
-        super().__init__(timeout=120)
+class _SongNext(ui.Button):
+    def __init__(self, fmt: str, songs: list[dict], album_label: str, page: int, total_pages: int, disabled: bool):
+        super().__init__(label="▶", style=discord.ButtonStyle.secondary, disabled=disabled, row=1)
         self.fmt = fmt
-        self.categories = categories
+        self.songs = songs
+        self.album_label = album_label
         self.page = page
-        self.total_pages = max(1, (len(categories) + PAGE_SIZE - 1) // PAGE_SIZE)
-        self._build()
+        self.total_pages = total_pages
 
-    def _build(self):
-        self.clear_items()
-        start = self.page * PAGE_SIZE
-        chunk = self.categories[start:start + PAGE_SIZE]
+    async def callback(self, interaction: discord.Interaction):
+        view = SongPageView(self.fmt, self.songs, self.album_label, self.page + 1)
+        await interaction.response.edit_message(
+            content=f"**{self.fmt} / {self.album_label}** — pick a song:", view=view)
 
-        select = ui.Select(
-            placeholder=f"Pick an album… (page {self.page + 1}/{self.total_pages})",
+
+class SongPageView(ui.View):
+    def __init__(self, fmt: str, songs: list[dict], album_label: str, page: int = 0):
+        super().__init__(timeout=120)
+        total_pages = max(1, (len(songs) + PAGE_SIZE - 1) // PAGE_SIZE)
+        chunk = songs[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+        self.add_item(_SongSelect(fmt, chunk, page, total_pages))
+        self.add_item(_SongPrev(fmt, songs, album_label, page, disabled=(page == 0)))
+        self.add_item(ui.Button(label=f"{page + 1} / {total_pages}", style=discord.ButtonStyle.secondary, disabled=True, row=1))
+        self.add_item(_SongNext(fmt, songs, album_label, page, total_pages, disabled=(page >= total_pages - 1)))
+
+
+# ── Album paginator ───────────────────────────────────────────────────────────
+
+class _AlbumSelect(ui.Select):
+    def __init__(self, fmt: str, chunk: list[str], page: int, total_pages: int):
+        super().__init__(
+            placeholder=f"Pick an album… (page {page + 1}/{total_pages})",
             options=[discord.SelectOption(label=c[:100], value=c) for c in chunk],
             row=0,
         )
-        select.callback = self._album_callback
-        self.add_item(select)
+        self.fmt = fmt
 
-        prev_btn = ui.Button(label="◀", style=discord.ButtonStyle.secondary,
-                             disabled=(self.page == 0), row=1)
-        prev_btn.callback = self._prev
-        self.add_item(prev_btn)
-
-        page_btn = ui.Button(
-            label=f"{self.page + 1} / {self.total_pages}",
-            style=discord.ButtonStyle.secondary,
-            disabled=True, row=1,
-        )
-        self.add_item(page_btn)
-
-        next_btn = ui.Button(label="▶", style=discord.ButtonStyle.secondary,
-                             disabled=(self.page >= self.total_pages - 1), row=1)
-        next_btn.callback = self._next
-        self.add_item(next_btn)
-
-    async def _album_callback(self, interaction: discord.Interaction):
-        category = interaction.data["values"][0]
+    async def callback(self, interaction: discord.Interaction):
+        category = self.values[0]
         loop = asyncio.get_running_loop()
         songs = await loop.run_in_executor(None, _get_songs, self.fmt, category)
         if not songs:
@@ -202,24 +161,48 @@ class AlbumPageView(ui.View):
             view=SongPageView(self.fmt, songs, label),
         )
 
-    async def _prev(self, interaction: discord.Interaction):
-        self.page -= 1
-        self._build()
+
+class _AlbumPrev(ui.Button):
+    def __init__(self, fmt: str, categories: list[str], page: int, disabled: bool):
+        super().__init__(label="◀", style=discord.ButtonStyle.secondary, disabled=disabled, row=1)
+        self.fmt = fmt
+        self.categories = categories
+        self.page = page
+
+    async def callback(self, interaction: discord.Interaction):
+        view = AlbumPageView(self.fmt, self.categories, self.page - 1)
         await interaction.response.edit_message(
-            content=f"**{self.fmt}** — pick an album:", view=self)
+            content=f"**{self.fmt}** — pick an album:", view=view)
 
-    async def _next(self, interaction: discord.Interaction):
-        self.page += 1
-        self._build()
+
+class _AlbumNext(ui.Button):
+    def __init__(self, fmt: str, categories: list[str], page: int, total_pages: int, disabled: bool):
+        super().__init__(label="▶", style=discord.ButtonStyle.secondary, disabled=disabled, row=1)
+        self.fmt = fmt
+        self.categories = categories
+        self.page = page
+        self.total_pages = total_pages
+
+    async def callback(self, interaction: discord.Interaction):
+        view = AlbumPageView(self.fmt, self.categories, self.page + 1)
         await interaction.response.edit_message(
-            content=f"**{self.fmt}** — pick an album:", view=self)
+            content=f"**{self.fmt}** — pick an album:", view=view)
 
 
-# ── Format select — proper subclass ───────────────────────────────────────────
+class AlbumPageView(ui.View):
+    def __init__(self, fmt: str, categories: list[str], page: int = 0):
+        super().__init__(timeout=120)
+        total_pages = max(1, (len(categories) + PAGE_SIZE - 1) // PAGE_SIZE)
+        chunk = categories[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+        self.add_item(_AlbumSelect(fmt, chunk, page, total_pages))
+        self.add_item(_AlbumPrev(fmt, categories, page, disabled=(page == 0)))
+        self.add_item(ui.Button(label=f"{page + 1} / {total_pages}", style=discord.ButtonStyle.secondary, disabled=True, row=1))
+        self.add_item(_AlbumNext(fmt, categories, page, total_pages, disabled=(page >= total_pages - 1)))
+
+
+# ── Format select ─────────────────────────────────────────────────────────────
 
 class _FormatSelect(ui.Select):
-    """Lives inside the V2 BrowserPanelView ActionRow."""
-
     def __init__(self):
         super().__init__(
             placeholder="Select a format…",
@@ -293,7 +276,6 @@ async def _post_panel(bot, channel) -> discord.Message:
 
 
 def setup(bot):
-    from discord import app_commands
     from mod_core import is_owner
 
     bot.logger.log(MODULE_NAME, "Setting up music browser")
@@ -313,7 +295,7 @@ def setup(bot):
 
         chan = discord.utils.get(bot.get_all_channels(), name=CHANNEL_NAME)
         if not chan:
-            bot.logger.log(MODULE_NAME, f"#{CHANNEL_NAME} not found — create it to enable the browser", "WARNING")
+            bot.logger.log(MODULE_NAME, f"#{CHANNEL_NAME} not found", "WARNING")
             return
 
         await _post_panel(bot, chan)

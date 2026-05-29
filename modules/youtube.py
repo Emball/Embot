@@ -2,6 +2,7 @@ import discord
 import asyncio
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 from discord import app_commands
@@ -38,7 +39,7 @@ def save_config(cfg):
 
 async def run_yt_dlp(*args):
     proc = await asyncio.create_subprocess_exec(
-        "yt-dlp", *args,
+        sys.executable, "-m", "yt_dlp", *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )

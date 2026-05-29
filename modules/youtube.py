@@ -62,7 +62,6 @@ async def _cookies_args(cfg: dict) -> list:
     return ["--cookies", p] if p and Path(p).exists() else []
 
 async def extract_ogg(url: str, out_dir: str, cfg: dict = None) -> tuple[str | None, str | None]:
-    await update_yt_dlp()
     out_template = os.path.join(out_dir, "%(title)s.%(ext)s")
     cookies = await _cookies_args(cfg or {})
     code, stdout, stderr = await run_yt_dlp(
@@ -72,7 +71,7 @@ async def extract_ogg(url: str, out_dir: str, cfg: dict = None) -> tuple[str | N
         "--embed-thumbnail",
         "--extractor-retries", "3",
         "--no-check-certificates",
-        "--extractor-args", "youtube:player_client=android_vr",
+        "--extractor-args", "youtube:player_client=web,tv",
         *cookies,
         "-o", out_template,
         "--no-playlist",
@@ -99,7 +98,7 @@ async def get_latest_video(channel_id: str, cfg: dict = None) -> tuple[str | Non
         "--print", "%(id)s|%(title)s",
         "--no-warnings",
         "--no-check-certificates",
-        "--extractor-args", "youtube:player_client=android_vr",
+        "--extractor-args", "youtube:player_client=web,tv",
         *cookies,
     )
     if code != 0 or not stdout.strip():

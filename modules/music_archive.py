@@ -882,6 +882,7 @@ class ARCHIVEManager:
 
     async def _backfill_cache(self, chan):
         max_bytes = 95 * 1024 * 1024  # guild supports 100MB; leave 5MB headroom
+        per_file_limit = 50 * 1024 * 1024  # Discord rejects single files over ~50MB
 
         # Recover any uploads that made it to Discord but weren't stored (e.g. mid-upload disconnect)
         status_id = _meta_get("status_msg_id")
@@ -968,10 +969,10 @@ class ARCHIVEManager:
             except (OSError, asyncio.TimeoutError):
                 self.bot.logger.log(MODULE_NAME, f"Skipping {p.name} — stat timed out", "WARNING")
                 continue
-            if sz > max_bytes:
+            if sz > per_file_limit:
                 ds_path, ds_sz, transcoded = await loop.run_in_executor(
-                    METADATA_EXECUTOR, _downsample_flac, fp, max_bytes)
-                if ds_path and ds_sz and ds_sz <= max_bytes:
+                    METADATA_EXECUTOR, _downsample_flac, fp, per_file_limit)
+                if ds_path and ds_sz and ds_sz <= per_file_limit:
                     ok = await self._send_batch(chan, [(fp, Path(ds_path), ds_sz)], source_path=fp, transcoded=transcoded)
                     try:
                         Path(ds_path).unlink(missing_ok=True)
@@ -1088,10 +1089,7 @@ class ARCHIVEManager:
         cached = 0
         with _db_conn() as c:
             live_ids = {r[0] for r in c.execute("SELECT message_id FROM song_cache").fetchall()}
-            failed_paths = {r[0] for r in c.execute("SELECT file_path FROM song_cache_fails WHERE fail_count >= 5").fetchall()}
         for fp in sorted(seen):
-            if fp in failed_paths:
-                continue
             try:
                 entry = _cache_lookup(fp)
                 if entry and entry.get("message_id") in live_ids:

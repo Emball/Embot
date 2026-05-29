@@ -14,6 +14,20 @@
 - **Be brief in your explanations.** This file takes up vital context in every agents session.
 - **This is a living document.** Feel free to iterate on it any way you see fit during coding, post-confirmation.
 
+## Syncing AGENTS.md
+
+When Michael says **"sync AGENTS.md"**, follow this protocol exactly — do not improvise:
+
+1. **Gather all available context** — the current session, any pasted prior session transcripts, and the current state of the codebase. If multiple sessions are available, treat them all as input.
+2. **Read the current AGENTS.md in full** before touching it.
+3. **For each section**, ask: does anything from the sessions contradict, extend, or obsolete what's here? If yes, update it. If no, leave it alone.
+4. **What to add:** architecture changes, new modules, new DB tables, new config keys, new known quirks, new commands, confirmed workflow changes. Only add things that are now permanently true of the codebase.
+5. **What NOT to add:** session-specific events, debugging blow-by-blow, transient bugs that were fixed, anything that's already implied by the code itself, anything unconfirmed.
+6. **Apply the editing etiquette rules** (below) to every change — one place per fact, state only, no backstory, cut before adding.
+7. **Bump the version and commit** in the same commit as the AGENTS.md update.
+
+The goal: a future agent reading only AGENTS.md should have an accurate picture of the codebase as it stands right now, informed by everything that has happened across all known sessions.
+
 ## Code Style
 
 - Brief comments only. Good code explains itself.
@@ -85,7 +99,7 @@ Modules sharing a prefix form a family. The `_core` file owns the DB, config, an
 
 | Module | Description |
 |---|---|
-| `music_archive.py` | SMB-compatible Eminem music archive. FLAC/MP3 scan, SQLite index, in-server CDN cache. Posts a persistent status embed to the songcache channel (delete-and-repost, change-detected to avoid unnecessary flashing). `cache_meta` table stores `status_msg_id` so reconcile never nukes it as an orphan. |
+| `music_archive.py` | SMB-compatible Eminem music archive. FLAC/MP3 scan, SQLite index, in-server CDN cache. Backfill uploads files to a songcache Discord channel in batches up to 95MB. Files exceeding the per-file threshold are transcoded before upload (`transcoded=1` flag set in DB). Status embed is always delete-and-repost — never edit-in-place — so it stays pinned at the bottom of the channel. Backfill is manual-start only (`/backfill_start`) and never auto-starts on restart unless `backfill_enabled` is set in `cache_meta`. `/backfill_stop` clears the flag gracefully. `/clear_cache` wipes DB and recreates the channel with a confirmation prompt. Recovery scan at backfill start walks the channel and registers any uploads that landed but weren't stored — infers `transcoded` flag by comparing attachment size vs disk size. `song_cache_fails` logs failed uploads but does NOT block retries — all pending files are always retried on next backfill. |
 | `music_player.py` | VC playback for archive files and YouTube/SoundCloud |
 
 **Standalone features**

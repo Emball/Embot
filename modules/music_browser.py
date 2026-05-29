@@ -15,6 +15,8 @@ MODULE_NAME = "MUSIC BROWSER"
 CHANNEL_NAME = "info-test"
 STATE_PATH = script_dir() / "config" / "music_browser_state.json"
 
+PAGE_SIZE = 25  # Discord select option limit
+
 
 def _load_panel_id() -> str | None:
     try:
@@ -82,120 +84,141 @@ async def _deliver(interaction: discord.Interaction, fmt: str, file_path: str):
     bot.logger.log(MODULE_NAME, f"Delivered '{p.name}' via browser to {interaction.user}")
 
 
-# ── Song select — proper subclass ─────────────────────────────────────────────
+# ── Paginated song select ─────────────────────────────────────────────────────
 
-class _SongSelect(ui.Select):
-    """One chunk of songs. Bound correctly as a View item subclass."""
+class SongPageView(ui.View):
+    """Single select of 25 songs with ◀ ▶ navigation buttons."""
 
-    def __init__(self, fmt: str, songs_chunk: list[dict], placeholder: str, row: int):
-        options = [
-            discord.SelectOption(label=s["title"][:100], value=s["path"])
-            for s in songs_chunk
-        ]
-        super().__init__(placeholder=placeholder, options=options, row=row)
+    def __init__(self, fmt: str, songs: list[dict], album_label: str, page: int = 0):
+        super().__init__(timeout=120)
         self.fmt = fmt
+        self.songs = songs
+        self.album_label = album_label
+        self.page = page
+        self.total_pages = max(1, (len(songs) + PAGE_SIZE - 1) // PAGE_SIZE)
+        self._build()
 
-    async def callback(self, interaction: discord.Interaction):
-        file_path = self.values[0]
+    def _build(self):
+        self.clear_items()
+        start = self.page * PAGE_SIZE
+        chunk = self.songs[start:start + PAGE_SIZE]
+
+        select = ui.Select(
+            placeholder=f"Pick a song… (page {self.page + 1}/{self.total_pages})",
+            options=[discord.SelectOption(label=s["title"][:100], value=s["path"]) for s in chunk],
+            row=0,
+        )
+        select.callback = self._song_callback
+        self.add_item(select)
+
+        prev_btn = ui.Button(label="◀", style=discord.ButtonStyle.secondary,
+                             disabled=(self.page == 0), row=1)
+        prev_btn.callback = self._prev
+        self.add_item(prev_btn)
+
+        page_btn = ui.Button(
+            label=f"{self.page + 1} / {self.total_pages}",
+            style=discord.ButtonStyle.secondary,
+            disabled=True, row=1,
+        )
+        self.add_item(page_btn)
+
+        next_btn = ui.Button(label="▶", style=discord.ButtonStyle.secondary,
+                             disabled=(self.page >= self.total_pages - 1), row=1)
+        next_btn.callback = self._next
+        self.add_item(next_btn)
+
+    async def _song_callback(self, interaction: discord.Interaction):
+        file_path = interaction.data["values"][0]
         await interaction.response.edit_message(content="Fetching…", view=None)
         await _deliver(interaction, self.fmt, file_path)
 
+    async def _prev(self, interaction: discord.Interaction):
+        self.page -= 1
+        self._build()
+        await interaction.response.edit_message(
+            content=f"**{self.fmt} / {self.album_label}** — pick a song:", view=self)
 
-SONGS_PER_VIEW = 125  # 5 rows × 25 options
+    async def _next(self, interaction: discord.Interaction):
+        self.page += 1
+        self._build()
+        await interaction.response.edit_message(
+            content=f"**{self.fmt} / {self.album_label}** — pick a song:", view=self)
 
 
-def _make_song_view(fmt: str, songs: list[dict]) -> ui.View:
-    if len(songs) <= SONGS_PER_VIEW:
-        return SongSelectView(fmt, songs)
-    return SongPageSelectView(fmt, songs)
+# ── Paginated album select ────────────────────────────────────────────────────
 
+class AlbumPageView(ui.View):
+    """Single select of 25 albums with ◀ ▶ navigation buttons."""
 
-class SongSelectView(ui.View):
-    def __init__(self, fmt: str, songs: list[dict]):
+    def __init__(self, fmt: str, categories: list[str], page: int = 0):
         super().__init__(timeout=120)
-        chunks = [songs[i:i+25] for i in range(0, len(songs), 25)]
-        for chunk_idx, chunk in enumerate(chunks[:5]):
-            placeholder = (
-                f"Pick a song… ({chunk_idx*25+1}–{chunk_idx*25+len(chunk)})"
-                if len(chunks) > 1 else "Pick a song…"
-            )
-            self.add_item(_SongSelect(fmt, chunk, placeholder, row=chunk_idx))
+        self.fmt = fmt
+        self.categories = categories
+        self.page = page
+        self.total_pages = max(1, (len(categories) + PAGE_SIZE - 1) // PAGE_SIZE)
+        self._build()
 
+    def _build(self):
+        self.clear_items()
+        start = self.page * PAGE_SIZE
+        chunk = self.categories[start:start + PAGE_SIZE]
 
-class _SongPageSelect(ui.Select):
-    """Shown when album has >125 songs — lets user pick a 125-song page first."""
-
-    def __init__(self, fmt: str, all_songs: list[dict], pages: list[list[dict]]):
-        options = [
-            discord.SelectOption(
-                label=f"Songs {i*SONGS_PER_VIEW+1}–{i*SONGS_PER_VIEW+len(p)}",
-                value=str(i),
-                description=f"{p[0]['title'][:50]}…" if p else "",
-            )
-            for i, p in enumerate(pages)
-        ]
-        super().__init__(
-            placeholder=f"Pick a range… ({len(all_songs)} songs total)",
-            options=options,
+        select = ui.Select(
+            placeholder=f"Pick an album… (page {self.page + 1}/{self.total_pages})",
+            options=[discord.SelectOption(label=c[:100], value=c) for c in chunk],
             row=0,
         )
-        self.fmt = fmt
-        self.pages = pages
+        select.callback = self._album_callback
+        self.add_item(select)
 
-    async def callback(self, interaction: discord.Interaction):
-        page = self.pages[int(self.values[0])]
-        await interaction.response.edit_message(
-            content=f"Pick a song:",
-            view=SongSelectView(self.fmt, page),
+        prev_btn = ui.Button(label="◀", style=discord.ButtonStyle.secondary,
+                             disabled=(self.page == 0), row=1)
+        prev_btn.callback = self._prev
+        self.add_item(prev_btn)
+
+        page_btn = ui.Button(
+            label=f"{self.page + 1} / {self.total_pages}",
+            style=discord.ButtonStyle.secondary,
+            disabled=True, row=1,
         )
+        self.add_item(page_btn)
 
+        next_btn = ui.Button(label="▶", style=discord.ButtonStyle.secondary,
+                             disabled=(self.page >= self.total_pages - 1), row=1)
+        next_btn.callback = self._next
+        self.add_item(next_btn)
 
-class SongPageSelectView(ui.View):
-    def __init__(self, fmt: str, songs: list[dict]):
-        super().__init__(timeout=120)
-        pages = [songs[i:i+SONGS_PER_VIEW] for i in range(0, len(songs), SONGS_PER_VIEW)]
-        self.add_item(_SongPageSelect(fmt, songs, pages))
-
-
-# ── Album select — proper subclass ────────────────────────────────────────────
-
-class _AlbumSelect(ui.Select):
-    """One chunk of albums. Bound correctly as a View item subclass."""
-
-    def __init__(self, fmt: str, categories_chunk: list[str], placeholder: str, row: int):
-        options = [discord.SelectOption(label=c[:100], value=c) for c in categories_chunk]
-        super().__init__(placeholder=placeholder, options=options, row=row)
-        self.fmt = fmt
-
-    async def callback(self, interaction: discord.Interaction):
-        category = self.values[0]
+    async def _album_callback(self, interaction: discord.Interaction):
+        category = interaction.data["values"][0]
         loop = asyncio.get_running_loop()
         songs = await loop.run_in_executor(None, _get_songs, self.fmt, category)
         if not songs:
             await interaction.response.edit_message(content="No songs found in that album.", view=None)
             return
-        view = _make_song_view(self.fmt, songs)
         label = category[:60] + ("…" if len(category) > 60 else "")
         await interaction.response.edit_message(
-            content=f"**{self.fmt} / {label}** — pick a song:", view=view)
+            content=f"**{self.fmt} / {label}** — pick a song:",
+            view=SongPageView(self.fmt, songs, label),
+        )
 
+    async def _prev(self, interaction: discord.Interaction):
+        self.page -= 1
+        self._build()
+        await interaction.response.edit_message(
+            content=f"**{self.fmt}** — pick an album:", view=self)
 
-class AlbumSelectView(ui.View):
-    def __init__(self, fmt: str, categories: list[str]):
-        super().__init__(timeout=120)
-        chunks = [categories[i:i+25] for i in range(0, len(categories), 25)]
-        for chunk_idx, chunk in enumerate(chunks[:5]):
-            placeholder = (
-                f"Pick an album… ({chunk_idx*25+1}–{chunk_idx*25+len(chunk)})"
-                if len(chunks) > 1 else "Pick an album…"
-            )
-            self.add_item(_AlbumSelect(fmt, chunk, placeholder, row=chunk_idx))
+    async def _next(self, interaction: discord.Interaction):
+        self.page += 1
+        self._build()
+        await interaction.response.edit_message(
+            content=f"**{self.fmt}** — pick an album:", view=self)
 
 
 # ── Format select — proper subclass ───────────────────────────────────────────
 
 class _FormatSelect(ui.Select):
-    """Lives inside the V2 BrowserPanelView ActionRow. Proper subclass callback."""
+    """Lives inside the V2 BrowserPanelView ActionRow."""
 
     def __init__(self):
         super().__init__(
@@ -219,16 +242,16 @@ class _FormatSelect(ui.Select):
             await interaction.response.send_message(
                 "No songs indexed yet — try again after the archive loads.", ephemeral=True)
             return
-        view = AlbumSelectView(fmt, categories)
         await interaction.response.send_message(
-            f"**{fmt}** — pick an album:", view=view, ephemeral=True)
+            f"**{fmt}** — pick an album:",
+            view=AlbumPageView(fmt, categories),
+            ephemeral=True,
+        )
 
 
 # ── Persistent V2 panel ───────────────────────────────────────────────────────
 
 class BrowserPanelView(ui.LayoutView):
-    """Persistent panel. _FormatSelect lives in an ActionRow inside a Container."""
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._format_select = _FormatSelect()
@@ -275,7 +298,6 @@ def setup(bot):
 
     bot.logger.log(MODULE_NAME, "Setting up music browser")
 
-    # Register persistent view so the format select callback survives restarts
     persistent = BrowserPanelView(timeout=None)
     persistent.build()
     bot.add_view(persistent)
@@ -311,7 +333,6 @@ def setup(bot):
                 "Archive is still loading — try again in a moment.", ephemeral=True)
             return
 
-        # Inline format select for /browse — same flow, proper subclass
         class _BrowseFormatSelect(ui.Select):
             def __init__(self_inner):
                 super().__init__(
@@ -330,7 +351,7 @@ def setup(bot):
                     return
                 await inter.response.edit_message(
                     content=f"**{fmt}** — pick an album:",
-                    view=AlbumSelectView(fmt, categories)
+                    view=AlbumPageView(fmt, categories),
                 )
 
         view = ui.View(timeout=120)

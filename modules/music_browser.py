@@ -101,8 +101,17 @@ class _SongSelect(ui.Select):
         await _deliver(interaction, self.fmt, file_path)
 
 
+SONGS_PER_VIEW = 125  # 5 rows × 25 options
+
+
+def _make_song_view(fmt: str, songs: list[dict]) -> ui.View:
+    if len(songs) <= SONGS_PER_VIEW:
+        return SongSelectView(fmt, songs)
+    return SongPageSelectView(fmt, songs)
+
+
 class SongSelectView(ui.View):
-    def __init__(self, fmt: str, category: str, songs: list[dict]):
+    def __init__(self, fmt: str, songs: list[dict]):
         super().__init__(timeout=120)
         chunks = [songs[i:i+25] for i in range(0, len(songs), 25)]
         for chunk_idx, chunk in enumerate(chunks[:5]):
@@ -111,6 +120,41 @@ class SongSelectView(ui.View):
                 if len(chunks) > 1 else "Pick a song…"
             )
             self.add_item(_SongSelect(fmt, chunk, placeholder, row=chunk_idx))
+
+
+class _SongPageSelect(ui.Select):
+    """Shown when album has >125 songs — lets user pick a 125-song page first."""
+
+    def __init__(self, fmt: str, all_songs: list[dict], pages: list[list[dict]]):
+        options = [
+            discord.SelectOption(
+                label=f"Songs {i*SONGS_PER_VIEW+1}–{i*SONGS_PER_VIEW+len(p)}",
+                value=str(i),
+                description=f"{p[0]['title'][:50]}…" if p else "",
+            )
+            for i, p in enumerate(pages)
+        ]
+        super().__init__(
+            placeholder=f"Pick a range… ({len(all_songs)} songs total)",
+            options=options,
+            row=0,
+        )
+        self.fmt = fmt
+        self.pages = pages
+
+    async def callback(self, interaction: discord.Interaction):
+        page = self.pages[int(self.values[0])]
+        await interaction.response.edit_message(
+            content=f"Pick a song:",
+            view=SongSelectView(self.fmt, page),
+        )
+
+
+class SongPageSelectView(ui.View):
+    def __init__(self, fmt: str, songs: list[dict]):
+        super().__init__(timeout=120)
+        pages = [songs[i:i+SONGS_PER_VIEW] for i in range(0, len(songs), SONGS_PER_VIEW)]
+        self.add_item(_SongPageSelect(fmt, songs, pages))
 
 
 # ── Album select — proper subclass ────────────────────────────────────────────
@@ -130,7 +174,7 @@ class _AlbumSelect(ui.Select):
         if not songs:
             await interaction.response.edit_message(content="No songs found in that album.", view=None)
             return
-        view = SongSelectView(self.fmt, category, songs)
+        view = _make_song_view(self.fmt, songs)
         label = category[:60] + ("…" if len(category) > 60 else "")
         await interaction.response.edit_message(
             content=f"**{self.fmt} / {label}** — pick a song:", view=view)

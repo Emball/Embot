@@ -36,7 +36,7 @@ def _is_fed(interaction: discord.Interaction) -> bool:
     return False
 
 
-# ── DB helpers ────────────────────────────────────────────────────────────────
+# ── DB helpers (sync — run via executor) ──────────────────────────────────────
 
 def _get_categories(fmt: str) -> list[str]:
     from music_archive import _db_conn
@@ -58,103 +58,7 @@ def _get_songs(fmt: str, category: str) -> list[dict]:
     return [{"path": r[0], "title": r[1]} for r in rows]
 
 
-# ── Persistent panel — full V2 LayoutView with ActionRow select ───────────────
-
-class BrowserPanelView(ui.LayoutView):
-    """Persistent panel message. Format select lives inside an ActionRow in V2."""
-
-    format_row: ui.ActionRow["BrowserPanelView"] = ui.ActionRow()
-
-    @format_row.select(
-        placeholder="Select a format…",
-        options=[
-            discord.SelectOption(label="FLAC", description="Lossless — highest quality"),
-            discord.SelectOption(label="MP3",  description="Compressed — smaller files"),
-        ],
-        custom_id="browser:format",
-    )
-    async def format_select(self, interaction: discord.Interaction, select: ui.Select):
-        if _is_fed(interaction):
-            await interaction.response.send_message(
-                "Something went wrong loading the archive. Try again later.", ephemeral=True)
-            return
-        fmt = select.values[0]
-        categories = await asyncio.get_event_loop().run_in_executor(None, _get_categories, fmt)
-        if not categories:
-            await interaction.response.send_message(
-                "No songs indexed yet — try again after the archive loads.", ephemeral=True)
-            return
-        view = AlbumSelectView(fmt, categories)
-        await interaction.response.send_message(
-            f"**{fmt}** — pick an album:", view=view, ephemeral=True)
-
-    def build(self) -> "BrowserPanelView":
-        self.add_item(ui.Container(
-            ui.TextDisplay(
-                "## 📂 Archive Browser\n"
-                "Browse and download songs directly from Eminem's archive.\n\n"
-                "**How to use**\n"
-                "Pick a format below — then choose an album and song. "
-                "Your download link appears just for you."
-            ),
-            ui.Separator(spacing=discord.SeparatorSpacing.small),
-            self.format_row,
-            ui.Separator(spacing=discord.SeparatorSpacing.small, visible=False),
-            ui.TextDisplay("-# Use `/archive [format] [song]` for direct lookup by name."),
-            accent_color=0x1a1a2e,
-        ))
-        return self
-
-
-# ── Ephemeral album + song selects — edit in place ────────────────────────────
-
-class AlbumSelectView(ui.View):
-    def __init__(self, fmt: str, categories: list[str]):
-        super().__init__(timeout=120)
-        self.fmt = fmt
-        chunks = [categories[i:i+25] for i in range(0, len(categories), 25)]
-        for chunk_idx, chunk in enumerate(chunks[:5]):
-            options = [discord.SelectOption(label=c[:100], value=c) for c in chunk]
-            placeholder = f"Pick an album… ({chunk_idx*25+1}–{chunk_idx*25+len(chunk)})" if len(chunks) > 1 else "Pick an album…"
-            sel = ui.Select(placeholder=placeholder, options=options, row=chunk_idx)
-            sel.callback = self._make_callback(fmt)
-            self.add_item(sel)
-
-    def _make_callback(self, fmt: str):
-        async def callback(interaction: discord.Interaction):
-            category = interaction.data["values"][0]
-            songs = await asyncio.get_event_loop().run_in_executor(None, _get_songs, fmt, category)
-            if not songs:
-                await interaction.response.edit_message(content="No songs found in that album.", view=None)
-                return
-            view = SongSelectView(fmt, category, songs)
-            label = category[:60] + ("…" if len(category) > 60 else "")
-            await interaction.response.edit_message(
-                content=f"**{fmt} / {label}** — pick a song:", view=view)
-        return callback
-
-
-class SongSelectView(ui.View):
-    def __init__(self, fmt: str, category: str, songs: list[dict]):
-        super().__init__(timeout=120)
-        chunks = [songs[i:i+25] for i in range(0, len(songs), 25)]
-        for chunk_idx, chunk in enumerate(chunks[:5]):
-            options = [
-                discord.SelectOption(label=s["title"][:100], value=s["path"])
-                for s in chunk
-            ]
-            placeholder = f"Pick a song… ({chunk_idx*25+1}–{chunk_idx*25+len(chunk)})" if len(chunks) > 1 else "Pick a song…"
-            sel = ui.Select(placeholder=placeholder, options=options, row=chunk_idx)
-            sel.callback = self._make_callback(fmt)
-            self.add_item(sel)
-
-    def _make_callback(self, fmt: str):
-        async def callback(interaction: discord.Interaction):
-            file_path = interaction.data["values"][0]
-            await interaction.response.edit_message(content="Fetching…", view=None)
-            await _deliver(interaction, fmt, file_path)
-        return callback
-
+# ── Delivery ──────────────────────────────────────────────────────────────────
 
 async def _deliver(interaction: discord.Interaction, fmt: str, file_path: str):
     from music_archive import _cache_lookup, _get_or_upload_cache, _log_delivery, LARGE_FILE_MSG
@@ -176,6 +80,132 @@ async def _deliver(interaction: discord.Interaction, fmt: str, file_path: str):
     candidate = {"path": file_path, "original_title": p.stem, "metadata": {"title": p.stem}}
     await _log_delivery(bot, interaction.user, candidate, source="browser")
     bot.logger.log(MODULE_NAME, f"Delivered '{p.name}' via browser to {interaction.user}")
+
+
+# ── Song select — proper subclass ─────────────────────────────────────────────
+
+class _SongSelect(ui.Select):
+    """One chunk of songs. Bound correctly as a View item subclass."""
+
+    def __init__(self, fmt: str, songs_chunk: list[dict], placeholder: str, row: int):
+        options = [
+            discord.SelectOption(label=s["title"][:100], value=s["path"])
+            for s in songs_chunk
+        ]
+        super().__init__(placeholder=placeholder, options=options, row=row)
+        self.fmt = fmt
+
+    async def callback(self, interaction: discord.Interaction):
+        file_path = self.values[0]
+        await interaction.response.edit_message(content="Fetching…", view=None)
+        await _deliver(interaction, self.fmt, file_path)
+
+
+class SongSelectView(ui.View):
+    def __init__(self, fmt: str, category: str, songs: list[dict]):
+        super().__init__(timeout=120)
+        chunks = [songs[i:i+25] for i in range(0, len(songs), 25)]
+        for chunk_idx, chunk in enumerate(chunks[:5]):
+            placeholder = (
+                f"Pick a song… ({chunk_idx*25+1}–{chunk_idx*25+len(chunk)})"
+                if len(chunks) > 1 else "Pick a song…"
+            )
+            self.add_item(_SongSelect(fmt, chunk, placeholder, row=chunk_idx))
+
+
+# ── Album select — proper subclass ────────────────────────────────────────────
+
+class _AlbumSelect(ui.Select):
+    """One chunk of albums. Bound correctly as a View item subclass."""
+
+    def __init__(self, fmt: str, categories_chunk: list[str], placeholder: str, row: int):
+        options = [discord.SelectOption(label=c[:100], value=c) for c in categories_chunk]
+        super().__init__(placeholder=placeholder, options=options, row=row)
+        self.fmt = fmt
+
+    async def callback(self, interaction: discord.Interaction):
+        category = self.values[0]
+        loop = asyncio.get_running_loop()
+        songs = await loop.run_in_executor(None, _get_songs, self.fmt, category)
+        if not songs:
+            await interaction.response.edit_message(content="No songs found in that album.", view=None)
+            return
+        view = SongSelectView(self.fmt, category, songs)
+        label = category[:60] + ("…" if len(category) > 60 else "")
+        await interaction.response.edit_message(
+            content=f"**{self.fmt} / {label}** — pick a song:", view=view)
+
+
+class AlbumSelectView(ui.View):
+    def __init__(self, fmt: str, categories: list[str]):
+        super().__init__(timeout=120)
+        chunks = [categories[i:i+25] for i in range(0, len(categories), 25)]
+        for chunk_idx, chunk in enumerate(chunks[:5]):
+            placeholder = (
+                f"Pick an album… ({chunk_idx*25+1}–{chunk_idx*25+len(chunk)})"
+                if len(chunks) > 1 else "Pick an album…"
+            )
+            self.add_item(_AlbumSelect(fmt, chunk, placeholder, row=chunk_idx))
+
+
+# ── Format select — proper subclass ───────────────────────────────────────────
+
+class _FormatSelect(ui.Select):
+    """Lives inside the V2 BrowserPanelView ActionRow. Proper subclass callback."""
+
+    def __init__(self):
+        super().__init__(
+            placeholder="Select a format…",
+            options=[
+                discord.SelectOption(label="FLAC", description="Lossless — highest quality"),
+                discord.SelectOption(label="MP3",  description="Compressed — smaller files"),
+            ],
+            custom_id="browser:format",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if _is_fed(interaction):
+            await interaction.response.send_message(
+                "Something went wrong loading the archive. Try again later.", ephemeral=True)
+            return
+        fmt = self.values[0]
+        loop = asyncio.get_running_loop()
+        categories = await loop.run_in_executor(None, _get_categories, fmt)
+        if not categories:
+            await interaction.response.send_message(
+                "No songs indexed yet — try again after the archive loads.", ephemeral=True)
+            return
+        view = AlbumSelectView(fmt, categories)
+        await interaction.response.send_message(
+            f"**{fmt}** — pick an album:", view=view, ephemeral=True)
+
+
+# ── Persistent V2 panel ───────────────────────────────────────────────────────
+
+class BrowserPanelView(ui.LayoutView):
+    """Persistent panel. _FormatSelect lives in an ActionRow inside a Container."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._format_select = _FormatSelect()
+        self._action_row = ui.ActionRow(self._format_select)
+
+    def build(self) -> "BrowserPanelView":
+        self.add_item(ui.Container(
+            ui.TextDisplay(
+                "## 📂 Archive Browser\n"
+                "Browse and download songs directly from Eminem's archive.\n\n"
+                "**How to use**\n"
+                "Pick a format below — then choose an album and song. "
+                "Your download link appears just for you."
+            ),
+            ui.Separator(spacing=discord.SeparatorSpacing.small),
+            self._action_row,
+            ui.Separator(spacing=discord.SeparatorSpacing.small, visible=False),
+            ui.TextDisplay("-# Use `/archive [format] [song]` for direct lookup by name."),
+            accent_color=0x1a1a2e,
+        ))
+        return self
 
 
 # ── Panel post + setup ────────────────────────────────────────────────────────
@@ -236,27 +266,31 @@ def setup(bot):
             await interaction.response.send_message(
                 "Archive is still loading — try again in a moment.", ephemeral=True)
             return
-        # Reuse the same flow as the panel — send a fresh ephemeral format select
+
+        # Inline format select for /browse — same flow, proper subclass
+        class _BrowseFormatSelect(ui.Select):
+            def __init__(self_inner):
+                super().__init__(
+                    placeholder="Select a format…",
+                    options=[
+                        discord.SelectOption(label="FLAC", description="Lossless — highest quality"),
+                        discord.SelectOption(label="MP3",  description="Compressed — smaller files"),
+                    ],
+                )
+            async def callback(self_inner, inter: discord.Interaction):
+                fmt = self_inner.values[0]
+                loop = asyncio.get_running_loop()
+                categories = await loop.run_in_executor(None, _get_categories, fmt)
+                if not categories:
+                    await inter.response.edit_message(content="No songs indexed yet.", view=None)
+                    return
+                await inter.response.edit_message(
+                    content=f"**{fmt}** — pick an album:",
+                    view=AlbumSelectView(fmt, categories)
+                )
+
         view = ui.View(timeout=120)
-        sel = ui.Select(
-            placeholder="Select a format…",
-            options=[
-                discord.SelectOption(label="FLAC", description="Lossless — highest quality"),
-                discord.SelectOption(label="MP3",  description="Compressed — smaller files"),
-            ],
-        )
-        async def _fmt_callback(inter: discord.Interaction):
-            fmt = inter.data["values"][0]
-            categories = await asyncio.get_event_loop().run_in_executor(None, _get_categories, fmt)
-            if not categories:
-                await inter.response.edit_message(content="No songs indexed yet.", view=None)
-                return
-            await inter.response.edit_message(
-                content=f"**{fmt}** — pick an album:",
-                view=AlbumSelectView(fmt, categories)
-            )
-        sel.callback = _fmt_callback
-        view.add_item(sel)
+        view.add_item(_BrowseFormatSelect())
         await interaction.response.send_message("Pick a format:", view=view, ephemeral=True)
 
     @bot.tree.command(name="refresh_browser", description="[Owner only] Repost the archive browser panel")

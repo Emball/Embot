@@ -230,6 +230,7 @@ def load_modules():
         "remote_debug",
         "music_archive",
         "music_player",
+        "music_browser",
         "community",
         "starboard",
         "youtube",

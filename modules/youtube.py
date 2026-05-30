@@ -72,14 +72,16 @@ async def extract_ogg(url: str, out_dir: str, cfg: dict = None) -> tuple[str | N
         "--embed-thumbnail",
         "--extractor-retries", "3",
         "--no-check-certificates",
-        "--extractor-args", "youtube:player_client=web,tv",
+        "--extractor-args", "youtube:player_client=ios,web",
         *cookies,
         "-o", out_template,
         "--no-playlist",
         url,
     )
     if code != 0:
-        return None, stderr.strip()
+        # Extract just the ERROR line, not the full stderr with warnings
+        error_line = next((l for l in stderr.splitlines() if l.startswith("ERROR:")), stderr.strip())
+        return None, error_line
     for f in os.listdir(out_dir):
         if f.endswith((".opus", ".ogg", ".webm")):
             path = os.path.join(out_dir, f)
@@ -99,7 +101,7 @@ async def get_latest_video(channel_id: str, cfg: dict = None) -> tuple[str | Non
         "--print", "%(id)s|%(title)s",
         "--no-warnings",
         "--no-check-certificates",
-        "--extractor-args", "youtube:player_client=web,tv",
+        "--extractor-args", "youtube:player_client=ios,web",
         *cookies,
     )
     if code != 0 or not stdout.strip():

@@ -125,7 +125,13 @@ def setup(bot):
             filepath, err = await extract_ogg(url, tmp, cfg)
             if err or not filepath:
                 bot.logger.log(MODULE_NAME, f"yt-dlp error: {err}")
-                await interaction.followup.send(f"Failed to extract audio: `{err}`")
+                if "Video unavailable" in (err or ""):
+                    msg = "That video is unavailable (region-blocked, private, or removed)."
+                elif "Sign in" in (err or "") or "confirm your age" in (err or ""):
+                    msg = "That video requires sign-in or age verification."
+                else:
+                    msg = f"Failed to extract audio: `{err}`"
+                await interaction.followup.send(msg)
                 return
 
             size_mb = os.path.getsize(filepath) / (1024 * 1024)

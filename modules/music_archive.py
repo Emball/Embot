@@ -155,6 +155,7 @@ def handle_special_folder(file_path, metadata, folder_name):
 
 def normalize_title(title):
     t = title.replace('_', ' ')
+    t = re.sub(r'^\(?\d{4}\)?\s*', '', t)
     t = re.sub(r'^(\d+\s*-\s*)?\d+\s+', '', t)
     t = re.sub(r'[({\[].*?[)}\]](?=\s*$)', '', t)
     t = re.sub(r'\b(?:feat\.?|ft\.?|with)\s+.*', '', t, flags=re.IGNORECASE)

@@ -1291,6 +1291,38 @@ def setup(bot):
         else:
             await interaction.response.send_message("Backfill wasn't running — resume flag cleared.", ephemeral=True)
 
+    @bot.tree.command(name="cache_list", description="[Owner only] List every file in the songcache channel")
+    @app_commands.describe(search="Optional filter — returns only filenames containing this string")
+    async def cache_list(interaction: discord.Interaction, search: str = ""):
+        if not is_owner(interaction.user):
+            await interaction.response.send_message("Owner only.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        chan = discord.utils.get(interaction.guild.text_channels, name=CACHE_CHANNEL_NAME)
+        if not chan:
+            await interaction.followup.send("songcache channel not found.", ephemeral=True)
+            return
+        names = []
+        async for msg in chan.history(limit=None):
+            for att in msg.attachments:
+                names.append(att.filename)
+        names.sort()
+        if search:
+            names = [n for n in names if search.lower() in n.lower()]
+        if not names:
+            await interaction.followup.send(
+                f"No files found{f' matching `{search}`' if search else ''}.", ephemeral=True)
+            return
+        text = f"# Songcache — {len(names)} file(s){f' matching `{search}`' if search else ''}\n\n"
+        text += "\n".join(names)
+        buf = text.encode()
+        import io
+        await interaction.followup.send(
+            f"**{len(names)} file(s)** in channel{f' matching `{search}`' if search else ''}.",
+            file=discord.File(io.BytesIO(buf), filename="cache_list.txt"),
+            ephemeral=True)
+        bot.logger.log(MODULE_NAME, f"cache_list: {len(names)} files returned to {interaction.user}")
+
     class ClearCacheConfirmView(discord.ui.View):
         def __init__(self):
             super().__init__(timeout=30)

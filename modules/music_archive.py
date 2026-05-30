@@ -887,7 +887,7 @@ class ARCHIVEManager:
 
     async def _backfill_cache(self, chan):
         max_bytes = 95 * 1024 * 1024  # guild supports 100MB; leave 5MB headroom
-        per_file_limit = 90 * 1024 * 1024  # single-file limit; leave headroom under batch max
+        per_file_limit = 50 * 1024 * 1024  # single-file limit; matches current boost tier
 
         # Recover any uploads that made it to Discord but weren't stored (e.g. mid-upload disconnect)
         status_id = _meta_get("status_msg_id")

@@ -128,6 +128,16 @@ class EventLogger:
                     return
                 rehosted_files = verdict.safe_files
 
+            MAX_UPLOAD = 24 * 1024 * 1024
+            total_size = sum(len(f['data']) for f in rehosted_files)
+            if total_size > MAX_UPLOAD:
+                view = _layout(_section_with_avatar(
+                    f"{header}\n\n{body}\n*(Attachment too large to rehost — {total_size // (1024 * 1024)}MB)*\n{footer}",
+                    message.author.display_avatar.url
+                ))
+                await self._send(channel, view)
+                return
+
             discord_files = [
                 discord.File(fp=io.BytesIO(f['data']), filename=f['filename'])
                 for f in rehosted_files

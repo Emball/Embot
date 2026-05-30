@@ -573,10 +573,10 @@ class ClaudeBridgeListener:
                 from _utils import NetworkState
                 if not NetworkState.is_online():
                     NetworkState.suppress()
+                elif consecutive_errors == 1:
+                    self.bot.logger.error(MODULE_NAME, f"[bridge] poll error, retrying (backoff up to {BACKOFF_MAX:.0f}s)", e)
                 elif backoff >= DEAF_THRESHOLD:
                     self.bot.logger.log(MODULE_NAME, f"[bridge] poll backoff {backoff:.0f}s — bridge effectively deaf to new commands (error #{consecutive_errors}: {e})", "WARNING")
-                else:
-                    self.bot.logger.error(MODULE_NAME, f"[bridge] poll error #{consecutive_errors}, retrying in {backoff:.0f}s", e)
                 await asyncio.sleep(backoff)
 
     async def _execute(self, command, args, payload=None):

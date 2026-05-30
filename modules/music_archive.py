@@ -1166,9 +1166,16 @@ class ARCHIVEManager:
         except Exception as e:
             self.bot.logger.log(MODULE_NAME, f"Batch upload error ({len(batch)} files): {e}", "WARNING")
             return False
+        # match attachments by normalized filename — Discord doesn't guarantee order
+        att_map = {normalize_title(Path(a.filename).stem): a for a in msg.attachments}
         ok = True
-        for i, ((fp, name, data, sz), att) in enumerate(zip(file_data, msg.attachments)):
+        for i, (fp, name, data, sz) in enumerate(file_data):
             actual_path = source_path if source_path and len(batch) == 1 else fp
+            att = att_map.get(normalize_title(Path(name).stem))
+            if att is None:
+                self.bot.logger.log(MODULE_NAME, f"No attachment match for {name}", "WARNING")
+                ok = False
+                continue
             self.bot.logger.log(MODULE_NAME, f"Storing {i+1}/{len(batch)}: {name} att={att.filename}")
             try:
                 checksum = await loop.run_in_executor(UPLOAD_EXECUTOR, _file_checksum, actual_path)

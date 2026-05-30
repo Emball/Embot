@@ -887,7 +887,7 @@ class ARCHIVEManager:
 
     async def _backfill_cache(self, chan):
         max_bytes = 95 * 1024 * 1024  # guild supports 100MB; leave 5MB headroom
-        per_file_limit = 50 * 1024 * 1024  # Discord rejects single files over ~50MB
+        per_file_limit = 90 * 1024 * 1024  # single-file limit; leave headroom under batch max
 
         # Recover any uploads that made it to Discord but weren't stored (e.g. mid-upload disconnect)
         status_id = _meta_get("status_msg_id")
@@ -981,6 +981,12 @@ class ARCHIVEManager:
                 self.bot.logger.log(MODULE_NAME, f"Skipping {p.name} — stat timed out", "WARNING")
                 continue
             if sz > per_file_limit:
+                if p.suffix.lower() != '.flac':
+                    self.bot.logger.log(MODULE_NAME, f"Skipping {p.name} — non-FLAC over {per_file_limit // (1024*1024)}MB, cannot transcode", "WARNING")
+                    errors += 1
+                    sent_batches += 1
+                    await asyncio.sleep(3)
+                    continue
                 ds_path, ds_sz, transcoded = await loop.run_in_executor(
                     METADATA_EXECUTOR, _downsample_flac, fp, per_file_limit)
                 if ds_path and ds_sz and ds_sz <= per_file_limit:

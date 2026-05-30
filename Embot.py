@@ -677,6 +677,9 @@ async def on_ready():
 
         bot.auto_update_task = bot.loop.create_task(_auto_update_loop(bot))
 
+        from _utils import run_network_probe
+        bot.network_probe_task = bot.loop.create_task(run_network_probe(bot.logger))
+
         load_modules()
 
         await asyncio.sleep(2)
@@ -702,16 +705,17 @@ async def on_disconnect():
     from _utils import NetworkState
     if NetworkState.is_online():
         NetworkState.set_offline()
-        bot.logger.log("MAIN", "Network connection lost — suppressing connectivity errors until restored", "WARNING")
+        bot.logger.log("MAIN", "Discord disconnected — suppressing connectivity errors", "WARNING")
 
 @bot.event
 async def on_resumed():
     from _utils import NetworkState
-    dropped = NetworkState.set_online()
-    msg = "Network connection restored"
-    if dropped:
-        msg += f" ({dropped} error(s) suppressed during outage)"
-    bot.logger.log("MAIN", msg)
+    if not NetworkState.is_online():
+        dropped = NetworkState.set_online()
+        msg = "Discord reconnected"
+        if dropped:
+            msg += f" — {dropped} error(s) suppressed during outage"
+        bot.logger.log("MAIN", msg)
 
 async def monitor_heartbeat():
     await bot.wait_until_ready()

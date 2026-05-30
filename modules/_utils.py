@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import tempfile
@@ -31,6 +32,52 @@ class NetworkState:
     def suppress(cls):
         """Call instead of logging a network error while offline."""
         cls._suppressed += 1
+
+
+async def _probe_once(host="1.1.1.1", port=53, timeout=3.0) -> bool:
+    """Non-blocking TCP probe. Returns True if reachable."""
+    try:
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=timeout
+        )
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+async def run_network_probe(logger, module="NETWORK", interval=5.0):
+    """
+    Proactively polls network reachability every `interval` seconds.
+    Flips NetworkState before Discord's WebSocket notices an outage.
+    Start as a long-lived task after bot is ready.
+    """
+    consecutive_fails = 0
+    FAIL_THRESHOLD = 2  # mark offline after 2 consecutive misses (~10s)
+
+    while True:
+        reachable = await _probe_once()
+
+        if reachable:
+            if not NetworkState.is_online():
+                dropped = NetworkState.set_online()
+                msg = "Network restored (probe)"
+                if dropped:
+                    msg += f" — {dropped} error(s) suppressed during outage"
+                logger.log(module, msg)
+            consecutive_fails = 0
+        else:
+            consecutive_fails += 1
+            if NetworkState.is_online() and consecutive_fails >= FAIL_THRESHOLD:
+                NetworkState.set_offline()
+                logger.log(module, "Network unreachable — suppressing connectivity errors", "WARNING")
+
+        await asyncio.sleep(interval)
+
 
 def atomic_json_write(filepath, data, indent=2, ensure_ascii=False):
     path = Path(filepath)

@@ -209,7 +209,11 @@ def setup(bot):
         try:
             vid_id, title, url = await get_latest_video(yt_channel, cfg)
         except Exception as e:
-            bot.logger.error(MODULE_NAME, "Failed to fetch latest video", e)
+            from _utils import NetworkState
+            if NetworkState.is_online():
+                bot.logger.error(MODULE_NAME, "Failed to fetch latest video", e)
+            else:
+                NetworkState.suppress()
             return
 
         if not vid_id or vid_id == cfg.get("last_video_id"):

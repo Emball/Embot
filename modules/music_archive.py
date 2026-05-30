@@ -681,27 +681,31 @@ async def send_bot_log(bot, log_data):
         bot.logger.error(MODULE_NAME, "Failed to send log", e)
 
 
+def _probe_audio(source_path: str):
+    import subprocess, json as _json
+    try:
+        r = subprocess.run(
+            ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', source_path],
+            capture_output=True, timeout=30)
+        s = _json.loads(r.stdout)['streams'][0]
+        rate = int(s.get('sample_rate', 44100))
+        bits = int(s.get('bits_per_raw_sample') or s.get('bits_per_sample') or 16)
+        return rate, bits
+    except Exception:
+        return 44100, 16
+
+
 def _downsample_flac(source_path: str, max_bytes: int = 95 * 1024 * 1024):
     import subprocess
     p = Path(source_path)
     tmp_path = script_dir() / 'temp' / p.name
-
-    def _probe_sample_rate():
-        try:
-            r = subprocess.run(
-                ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', source_path],
-                capture_output=True, timeout=30)
-            import json as _json
-            return int(_json.loads(r.stdout)['streams'][0]['sample_rate'])
-        except Exception:
-            return 48000
 
     def _run(args):
         result = subprocess.run(
             ['ffmpeg', '-y', '-i', source_path,
              '-c:a', 'flac', '-compression_level', '8', '-map_metadata', '0']
             + args + [str(tmp_path)],
-            capture_output=True, timeout=180)
+            capture_output=True, timeout=300)
         if result.returncode != 0:
             tmp_path.unlink(missing_ok=True)
             return None, None
@@ -712,18 +716,21 @@ def _downsample_flac(source_path: str, max_bytes: int = 95 * 1024 * 1024):
         return str(tmp_path), sz
 
     try:
-        src_rate = _probe_sample_rate()
-        rate_args = ['-af', 'aresample=resampler=soxr:precision=28', '-ar', '48000'] if src_rate > 48000 else []
+        src_rate, src_bits = _probe_audio(source_path)
+        args = []
 
-        # first pass: resample if needed, keep bit depth
-        path, sz = _run(rate_args)
-        if path and sz:
-            return path, sz, True
+        # step 1: resample if above 44.1kHz
+        if src_rate > 44100:
+            args += ['-af', 'aresample=resampler=soxr:precision=28', '-ar', '44100']
 
-        # second pass: also reduce to 16-bit
-        path, sz = _run(rate_args + ['-sample_fmt', 's16'])
-        if path and sz:
-            return path, sz, True
+        # step 2: reduce bit depth if 24-bit or higher
+        if src_bits > 16:
+            args += ['-sample_fmt', 's16']
+
+        if args:
+            path, sz = _run(args)
+            if path and sz:
+                return path, sz, True
 
         return None, None, False
     except Exception:

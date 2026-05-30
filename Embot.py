@@ -22,6 +22,10 @@ script_dir = Path(__file__).parent.absolute()
 data_dir = script_dir / "logs"
 data_dir.mkdir(exist_ok=True)
 
+_modules_dir = str(script_dir / "modules")
+if _modules_dir not in sys.path:
+    sys.path.insert(0, _modules_dir)
+
 _CONFIG_PATH = script_dir / "config"/ "embot.json"
 _CONFIG_DEFAULTS = {
     "command_prefixes":           ["!", "?"],

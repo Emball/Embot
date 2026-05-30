@@ -154,7 +154,10 @@ def handle_special_folder(file_path, metadata, folder_name):
     return metadata
 
 def normalize_title(title):
+    import unicodedata
     t = title.replace('_', ' ')
+    t = unicodedata.normalize('NFD', t)
+    t = ''.join(c for c in t if unicodedata.category(c) != 'Mn')
     t = re.sub(r'^\(?\d{4}\)?\s*', '', t)
     t = re.sub(r'^(\d+\s*-\s*)?\d+\s+', '', t)
     t = re.sub(r'\b(?:feat\.?[,]?|ft\.?|with)\s+.*', '', t, flags=re.IGNORECASE)

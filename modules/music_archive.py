@@ -903,12 +903,11 @@ class ARCHIVEManager:
                 if msg.author != self.bot.user or not msg.attachments:
                     continue
                 for att in msg.attachments:
-                    # Strip extension, then normalize the same way song_index keys are built
                     att_key = normalize_title(Path(att.filename).stem)
                     fp = next(
-                        (e['path'] for fmt in FORMATS
-                         for entries in self.song_index.get(fmt, {}).values()
-                         for e in entries if normalize_title(Path(e['path']).stem) == att_key),
+                        (entries[0]['path'] for fmt in FORMATS
+                         for key, entries in self.song_index.get(fmt, {}).items()
+                         if key == att_key),
                         None
                     )
                     if fp and not _cache_lookup(fp):

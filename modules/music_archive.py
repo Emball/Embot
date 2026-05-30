@@ -717,18 +717,16 @@ def _downsample_flac(source_path: str, max_bytes: int = 95 * 1024 * 1024):
 
     try:
         src_rate, src_bits = _probe_audio(source_path)
-        args = []
 
-        # step 1: resample if above 44.1kHz
+        # pass 1: resample if above 44.1kHz
         if src_rate > 44100:
-            args += ['-af', 'aresample=resampler=soxr:precision=28', '-ar', '44100']
+            path, sz = _run(['-af', 'aresample=resampler=soxr:precision=28', '-ar', '44100'])
+            if path and sz:
+                return path, sz, True
 
-        # step 2: reduce bit depth if 24-bit or higher
+        # pass 2: reduce to 16-bit if still (or already) 44.1kHz but 24-bit+
         if src_bits > 16:
-            args += ['-sample_fmt', 's16']
-
-        if args:
-            path, sz = _run(args)
+            path, sz = _run(['-sample_fmt', 's16'])
             if path and sz:
                 return path, sz, True
 

@@ -13,6 +13,7 @@ from mutagen.flac import FLAC
 from mutagen.id3 import ID3
 from mutagen.mp3 import MP3
 import asyncio
+import unicodedata
 import difflib
 from discord import app_commands
 import discord
@@ -154,7 +155,6 @@ def handle_special_folder(file_path, metadata, folder_name):
     return metadata
 
 def normalize_title(title):
-    import unicodedata
     t = title.replace('_', ' ')
     t = unicodedata.normalize('NFD', t)
     t = ''.join(c for c in t if unicodedata.category(c) != 'Mn')

@@ -162,6 +162,8 @@ All configs are gitignored.
 - Always stage `_version.py` in the same commit as the code change.
 - `_version.py` never triggers a bot restart.
 - Keep `requirements.txt` synced. Temp/test code goes in `/temp` (gitignored).
+- **Auto-updater triggers on version string change.** It fetches `FETCH_HEAD:_version.py` and compares numerically to the local version. If the version string is identical, no update fires — even if commits differ. Always ensure the version is bumped above the current live version.
+- **Session start: sync the local clone first.** Run `bridge shell "cd /home/embis/Documents/Embot && git log --oneline -1"` to get the live server's current commit, then `git pull` the local clone to match before making any changes. Committing from a stale clone risks version collisions that silently block auto-update.
 
 ## Claude Bridge
 

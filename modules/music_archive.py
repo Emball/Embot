@@ -159,7 +159,7 @@ def normalize_title(title):
     t = re.sub(r'[({\[].*?[)}\]](?=\s*$)', '', t)
     t = re.sub(r'\b(?:feat\.?|ft\.?|with)\s+.*', '', t, flags=re.IGNORECASE)
     t = re.sub(r'[^\w\s]', '', t)
-    t = re.sub(r'\s+', '', t).strip()
+    t = re.sub(r'\s+', ' ', t).strip()
     return t.casefold()
 
 async def build_song_index(bot):

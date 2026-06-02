@@ -539,6 +539,8 @@ class ClaudeBridgeListener:
         consecutive_errors = 0
         BACKOFF_MAX = 60.0
         DEAF_THRESHOLD = 45.0  # warn if delay exceeds client timeout
+        ERROR_NOTIFY_COOLDOWN = 1800.0  # DM at most once per 30 min for transient network errors
+        _last_error_notify = 0.0
         while True:
             try:
                 cmd, _ = await asyncio.get_event_loop().run_in_executor(
@@ -573,10 +575,16 @@ class ClaudeBridgeListener:
                 from _utils import NetworkState
                 if not NetworkState.is_online():
                     NetworkState.suppress()
-                elif consecutive_errors == 1:
-                    self.bot.logger.error(MODULE_NAME, f"[bridge] poll error, retrying (backoff up to {BACKOFF_MAX:.0f}s)", e)
                 elif backoff >= DEAF_THRESHOLD:
+                    # Bridge has been failing long enough to miss commands — always notify
                     self.bot.logger.log(MODULE_NAME, f"[bridge] poll backoff {backoff:.0f}s — bridge effectively deaf to new commands (error #{consecutive_errors}: {e})", "WARNING")
+                else:
+                    now = time.time()
+                    if now - _last_error_notify >= ERROR_NOTIFY_COOLDOWN:
+                        self.bot.logger.error(MODULE_NAME, f"[bridge] poll error, retrying (backoff up to {BACKOFF_MAX:.0f}s)", e)
+                        _last_error_notify = now
+                    else:
+                        self.bot.logger.log(MODULE_NAME, f"[bridge] poll error (suppressed, cooldown): {e}")
                 await asyncio.sleep(backoff)
 
     async def _execute(self, command, args, payload=None):

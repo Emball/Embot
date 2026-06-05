@@ -3,7 +3,7 @@ import discord
 import pytz
 from datetime import datetime, timedelta
 from typing import Optional
-from _utils import _now
+from _utils import _now, script_dir
 from mod_core import (
     MODULE_NAME, ModContext,
     ERROR_NO_PERMISSION,
@@ -621,6 +621,41 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
                 await asyncio.sleep(2)
             return False
 
+        # Query VMS transcript DB for matching voice messages from target users
+        vms_to_delete: list[tuple[int, int]] = []  # (message_id, channel_id)
+        try:
+            vms_db = script_dir() / "db" / "vms.db"
+            if vms_db.exists():
+                import sqlite3 as _sq
+                with _sq.connect(str(vms_db)) as _vc:
+                    placeholders = ",".join("?" * len(user_ids))
+                    kw_clauses   = " OR ".join("LOWER(transcript) LIKE ?" for _ in keywords)
+                    kw_params    = [f"%{kw}%" for kw in keywords]
+                    rows = _vc.execute(
+                        f"SELECT discord_message_id, discord_channel_id FROM vms "
+                        f"WHERE CAST(guild_id AS INTEGER) IN ({placeholders}) "
+                        f"AND discord_message_id IS NOT NULL "
+                        f"AND deleted_at IS NULL "
+                        f"AND transcript IS NOT NULL "
+                        f"AND ({kw_clauses})",
+                        [*user_ids, *kw_params]
+                    ).fetchall()
+                # Filter by user — VMS doesn't store author_id, so fetch message author
+                for (msg_id_str, ch_id_str) in rows:
+                    try:
+                        ch = ctx.guild.get_channel(int(ch_id_str))
+                        if not ch:
+                            continue
+                        msg = await ch.fetch_message(int(msg_id_str))
+                        if msg.author.id in user_ids:
+                            vms_to_delete.append((int(msg_id_str), int(ch_id_str)))
+                    except Exception:
+                        pass
+                ctx.bot.logger.log(MODULE_NAME,
+                    f"Sweep VMS: found {len(vms_to_delete)} matching voice message(s)")
+        except Exception as e:
+            ctx.bot.logger.error(MODULE_NAME, "Sweep VMS query failed", e)
+
         # Scan in 200-message chunks oldest_first with a cursor so we can resume on disconnect
         for idx, channel in enumerate(scan_channels, 1):
             count = 0
@@ -675,14 +710,37 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
                 channels_hit[channel.id] = count
 
         ctx.bot.logger.log(MODULE_NAME,
-            f"Sweep scan complete — {total_scanned:,} messages scanned, {len(to_delete)} matches")
+            f"Sweep scan complete — {total_scanned:,} messages scanned, {len(to_delete)} matches, "
+            f"{len(vms_to_delete)} VM(s)")
 
-        if not to_delete:
+        if not to_delete and not vms_to_delete:
             await _update_status(
                 f"**Users** {user_mentions}\n**Keywords** {kw_display}\n"
                 f"**Scanned** {total_scanned:,} messages\n**Result** No matching messages found.",
                 color=0x2ecc71, title=f"## {prefix}Sweep Complete")
             return
+
+        vms_deleted = 0
+        vms_failed  = 0
+        if not fake and vms_to_delete:
+            await _update_status(
+                f"**Users** {user_mentions}\n**Keywords** {kw_display}\n"
+                f"**Scanned** {total_scanned:,} messages\n"
+                f"**Deleting** {len(vms_to_delete)} voice message(s)...")
+            for (vm_msg_id, vm_ch_id) in vms_to_delete:
+                try:
+                    ch  = ctx.guild.get_channel(vm_ch_id)
+                    msg = await ch.fetch_message(vm_msg_id)
+                    await msg.delete()
+                    vms_deleted += 1
+                except discord.NotFound:
+                    vms_deleted += 1
+                except Exception as e:
+                    vms_failed += 1
+                    ctx.bot.logger.error(MODULE_NAME, f"Sweep VM delete failed {vm_msg_id}", e)
+                await asyncio.sleep(0.75)
+        elif fake:
+            vms_deleted = len(vms_to_delete)
 
         total = len(to_delete)
         deleted = 0
@@ -694,10 +752,11 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
             by_channel.setdefault(m.channel.id, []).append(m)
 
         def _status_body(extra: str = "") -> str:
+            vm_part = f" · {vms_deleted} VM(s)" if vms_deleted else ""
             return (
                 f"**Users** {user_mentions}\n**Keywords** {kw_display}\n"
                 f"**Scanned** {total_scanned:,} messages\n"
-                f"**Progress** {deleted}/{total} deleted"
+                f"**Progress** {deleted}/{total} deleted{vm_part}"
                 + (f" · {failed} failed" if failed else "")
                 + (f"\n{extra}" if extra else "")
             )
@@ -748,12 +807,13 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
                 channels_hit, ctx.guild, fake=fake)
 
         result_body = (
-            f"**Deleted** {deleted} message(s){' (simulated)' if fake else ''}\n"
+            f"**Deleted** {deleted} message(s){' (simulated)' if fake else ''}"
+            + (f" + {vms_deleted} VM(s)" if vms_deleted else "") + "\n"
             f"**Users** {user_mentions}\n"
             f"**Keywords** {kw_display}\n"
             f"**Scanned** {total_scanned:,} messages total\n"
             f"**Channels Hit** {len(channels_hit)}"
-            + (f"\n**Failed** {failed} (permissions or age)" if failed else "")
+            + (f"\n**Failed** {failed + vms_failed} (permissions or age)" if failed + vms_failed else "")
         )
         await _update_status(result_body, color=0x2ecc71, title=f"## {prefix}Sweep Complete")
 

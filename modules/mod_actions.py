@@ -502,27 +502,39 @@ async def _do_purge(ctx: ModContext, ms, amount: int, target: Optional[discord.M
         ctx.bot.logger.error(MODULE_NAME, "Purge failed", e)
 
 
+def _build_sweep_view(title: str, body: str, color: int) -> discord.ui.LayoutView:
+    v = discord.ui.LayoutView(timeout=None)
+    v.add_item(discord.ui.Container(discord.ui.TextDisplay(f"{title}\n\n{body}"), accent_color=color))
+    return v
+
+
 async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
                     channels_raw: str = None, after_raw: str = None,
                     before_raw: str = None, limit: int = 500, fake: bool = False):
     if not has_elevated_role(ctx.author, ms.cfg):
         return await ctx.error(ERROR_NO_PERMISSION)
 
-    # Parse users
+    # Parse users — accept IDs, <@id>, <@!id>, or resolve display/usernames
     user_ids = []
     for part in users_raw.split():
-        uid = part.strip("<@!> ")
-        if uid.isdigit():
-            user_ids.append(int(uid))
+        stripped = part.strip("<@!> ")
+        if stripped.isdigit():
+            user_ids.append(int(stripped))
+        else:
+            name_lower = part.lower()
+            match = discord.utils.find(
+                lambda m: m.name.lower() == name_lower or (m.nick or "").lower() == name_lower,
+                ctx.guild.members)
+            if match:
+                user_ids.append(match.id)
+    user_ids = list(dict.fromkeys(user_ids))
     if not user_ids:
-        return await ctx.error("No valid user IDs provided.")
+        return await ctx.error("No valid users provided.")
 
-    # Parse keywords (case-insensitive)
     keywords = [k.strip().lower() for k in keywords_raw.split(",") if k.strip()]
     if not keywords:
         return await ctx.error("No valid keywords provided.")
 
-    # Parse date filters
     after_dt = before_dt = None
     try:
         if after_raw:
@@ -532,7 +544,6 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
     except ValueError:
         return await ctx.error("Invalid date format. Use YYYY-MM-DD.")
 
-    # Resolve target channels
     if not channels_raw or channels_raw.strip().lower() == "all":
         scan_channels = [c for c in ctx.guild.text_channels
                          if c.permissions_for(ctx.guild.me).read_message_history
@@ -550,51 +561,72 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
 
     limit = max(1, min(limit, 10000))
 
-    user_mentions = " ".join(f"<@{uid}>" for uid in user_ids)
+    user_mentions = " ".join(f"<@\u200b{uid}>" for uid in user_ids)
     kw_display = ", ".join(f"`{k}`" for k in keywords)
-    ch_display = "all channels" if (not channels_raw or channels_raw.strip().lower() == "all") \
-        else " ".join(f"<#{c.id}>" for c in scan_channels)
+    ch_display = ("all channels" if (not channels_raw or channels_raw.strip().lower() == "all")
+                  else " ".join(f"<#{c.id}>" for c in scan_channels))
     date_range = ""
     if after_dt:
         date_range += f" after {after_raw}"
     if before_dt:
         date_range += f" before {before_raw}"
 
-    confirm_text = (
-        f"**{'[FAKE] ' if fake else ''}Sweep Confirmation**\n\n"
+    prefix = "[FAKE] " if fake else ""
+    confirm_body = (
         f"**Users** {user_mentions}\n"
         f"**Keywords** {kw_display}\n"
         f"**Channels** {ch_display}\n"
         f"**Limit** {limit} messages per channel{date_range}\n\n"
         f"This will scan and delete matching messages. Confirm?"
     )
-
     confirm_view = _SweepConfirmView(ctx.author.id)
+    confirm_content = f"**{prefix}Sweep Confirmation**\n\n{confirm_body}"
     interaction = ctx._source if isinstance(ctx._source, discord.Interaction) else None
     if interaction:
-        await interaction.response.send_message(confirm_text, view=confirm_view, ephemeral=True)
+        await interaction.response.send_message(confirm_content, view=confirm_view, ephemeral=True)
         ctx._replied = True
     else:
-        await ctx.reply(confirm_text, ephemeral=True)
+        await ctx.reply(confirm_content, view=confirm_view, ephemeral=True)
 
     await confirm_view.wait()
     if not confirm_view.confirmed:
         return await ctx.followup("Sweep cancelled.", ephemeral=True)
 
-    await ctx.followup(f"Scanning {len(scan_channels)} channel(s)... This may take a moment.", ephemeral=True)
+    # Post persistent public status message
+    status_body = (
+        f"**Users** {user_mentions}\n"
+        f"**Keywords** {kw_display}\n"
+        f"**Channels** {ch_display}\n"
+        f"**Status** Scanning {len(scan_channels)} channel(s)..."
+    )
+    status_msg = await ctx.channel.send(
+        view=_build_sweep_view(f"## {prefix}Sweep in Progress", status_body, 0x3498db),
+        allowed_mentions=discord.AllowedMentions.none())
 
-    # Scan and collect
+    async def _update_status(body: str, color: int = 0x3498db, title: str = None):
+        try:
+            await status_msg.edit(
+                view=_build_sweep_view(
+                    title or f"## {prefix}Sweep in Progress", body, color),
+                allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            pass
+
+    # Scan
     to_delete: list[discord.Message] = []
     channels_hit: dict[int, int] = {}
 
-    for channel in scan_channels:
+    for idx, channel in enumerate(scan_channels, 1):
         count = 0
+        await _update_status(
+            f"**Users** {user_mentions}\n**Keywords** {kw_display}\n"
+            f"**Status** Scanning {channel.mention} ({idx}/{len(scan_channels)})...")
         try:
-            async for message in channel.history(limit=limit, after=after_dt, before=before_dt, oldest_first=False):
+            async for message in channel.history(
+                    limit=limit, after=after_dt, before=before_dt, oldest_first=False):
                 if message.author.id not in user_ids:
                     continue
-                content_lower = message.content.lower()
-                if any(kw in content_lower for kw in keywords):
+                if any(kw in message.content.lower() for kw in keywords):
                     to_delete.append(message)
                     count += 1
         except discord.Forbidden:
@@ -605,14 +637,13 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
             channels_hit[channel.id] = count
 
     if not to_delete:
-        empty = discord.ui.LayoutView(timeout=None)
-        empty.add_item(discord.ui.Container(
-            discord.ui.TextDisplay("## Sweep Complete\n\nNo matching messages found."),
-            accent_color=0x2ecc71
-        ))
-        return await ctx.followup(view=empty, ephemeral=True)
+        await _update_status(
+            f"**Users** {user_mentions}\n**Keywords** {kw_display}\n"
+            f"**Result** No matching messages found.",
+            color=0x2ecc71, title=f"## {prefix}Sweep Complete")
+        return
 
-    # Delete in bulk where possible (≤14 days), one-by-one for older
+    total = len(to_delete)
     deleted = 0
     failed = 0
     cutoff = _now() - timedelta(days=14)
@@ -621,6 +652,14 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
     for m in to_delete:
         by_channel.setdefault(m.channel.id, []).append(m)
 
+    def _status_body(extra: str = "") -> str:
+        return (
+            f"**Users** {user_mentions}\n**Keywords** {kw_display}\n"
+            f"**Progress** {deleted}/{total} deleted"
+            + (f" · {failed} failed" if failed else "")
+            + (f"\n{extra}" if extra else "")
+        )
+
     if not fake:
         for channel in scan_channels:
             msgs = by_channel.get(channel.id, [])
@@ -628,7 +667,6 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
                 continue
             bulk = [m for m in msgs if m.created_at.replace(tzinfo=pytz.utc) > cutoff]
             old  = [m for m in msgs if m.created_at.replace(tzinfo=pytz.utc) <= cutoff]
-            # Bulk delete in chunks of 100
             for i in range(0, len(bulk), 100):
                 chunk = bulk[i:i+100]
                 try:
@@ -637,8 +675,8 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
                 except Exception as e:
                     failed += len(chunk)
                     ctx.bot.logger.error(MODULE_NAME, f"Sweep bulk delete error in #{channel.name}", e)
+                await _update_status(_status_body(f"**Channel** {channel.mention}"))
                 await asyncio.sleep(0.5)
-            # One-by-one for old messages
             for m in old:
                 try:
                     await m.delete()
@@ -646,10 +684,10 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
                 except Exception:
                     failed += 1
                 await asyncio.sleep(0.3)
+            await _update_status(_status_body(f"**Channel** {channel.mention} ✓"))
     else:
-        deleted = len(to_delete)
+        deleted = total
 
-    # Summary
     ctx.bot.logger.log(MODULE_NAME,
         f"{'[FAKE] ' if fake else ''}{ctx.author} swept {deleted} messages "
         f"from {len(user_ids)} user(s) across {len(channels_hit)} channel(s)")
@@ -660,21 +698,14 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
             ctx.guild, ctx.author, user_ids, keywords, deleted,
             channels_hit, ctx.guild, fake=fake)
 
-    result_text = (
-        f"## {'[FAKE] ' if fake else ''}Sweep Complete\n\n"
+    result_body = (
         f"**Deleted** {deleted} message(s){' (simulated)' if fake else ''}\n"
         f"**Users** {user_mentions}\n"
         f"**Keywords** {kw_display}\n"
         f"**Channels Hit** {len(channels_hit)}"
+        + (f"\n**Failed** {failed} (permissions or age)" if failed else "")
     )
-    if failed:
-        result_text += f"\n**Failed** {failed} (permissions or age)"
-    result = discord.ui.LayoutView(timeout=None)
-    result.add_item(discord.ui.Container(
-        discord.ui.TextDisplay(result_text),
-        accent_color=0x2ecc71
-    ))
-    await ctx.followup(view=result, ephemeral=True)
+    await _update_status(result_body, color=0x2ecc71, title=f"## {prefix}Sweep Complete")
 
 
 class _SweepConfirmView(discord.ui.View):

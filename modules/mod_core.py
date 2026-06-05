@@ -915,21 +915,20 @@ def setup(bot):
                           user: Optional[discord.Member] = None, fake: bool = False):
         await _do_purge(ModContext(interaction), mod_system, amount, user, fake=fake)
 
-    @bot.tree.command(name="sweep", description="[Mod] Bulk-delete messages from users matching keywords")
+    @bot.tree.command(name="sweep", description="[Mod] Scan full message history and delete messages matching keywords")
     @app_commands.describe(
         users="Space-separated user IDs or mentions",
         keywords="Comma-separated keywords to match (case-insensitive)",
         channels="Space-separated channel mentions/IDs, or 'all' (default: all)",
         after="Only scan messages after this date (YYYY-MM-DD)",
         before="Only scan messages before this date (YYYY-MM-DD)",
-        limit="Max messages to scan per channel (default: 500, max: 10000)",
         fake="Simulate without deleting"
     )
     async def slash_sweep(interaction: discord.Interaction, users: str, keywords: str,
                           channels: str = None, after: str = None, before: str = None,
-                          limit: int = 500, fake: bool = False):
+                          fake: bool = False):
         await _do_sweep(ModContext(interaction), mod_system, users, keywords,
-                        channels, after, before, limit, fake=fake)
+                        channels, after, before, fake=fake)
 
     @bot.tree.command(name="slowmode", description="[Mod] Set slowmode delay for this channel")
     @app_commands.describe(seconds="Slowmode delay in seconds (0 to disable)",

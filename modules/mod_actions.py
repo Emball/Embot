@@ -592,129 +592,130 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
     if not confirm_view.confirmed:
         return await ctx.followup("Sweep cancelled.", ephemeral=True)
 
-    # Post persistent public status message
-    status_body = (
-        f"**Users** {user_mentions}\n"
-        f"**Keywords** {kw_display}\n"
-        f"**Channels** {ch_display}\n"
-        f"**Status** Scanning {len(scan_channels)} channel(s)..."
-    )
     try:
+        # Post persistent public status message
+        status_body = (
+            f"**Users** {user_mentions}\n"
+            f"**Keywords** {kw_display}\n"
+            f"**Channels** {ch_display}\n"
+            f"**Status** Scanning {len(scan_channels)} channel(s)..."
+        )
         status_msg = await ctx.channel.send(
             view=_build_sweep_view(f"## {prefix}Sweep in Progress", status_body, 0x3498db),
             allowed_mentions=discord.AllowedMentions.none())
-    except Exception as e:
-        ctx.bot.logger.error(MODULE_NAME, "Sweep: failed to post status message", e)
-        return await ctx.followup("Sweep failed to start — couldn't post status message.", ephemeral=True)
 
-    async def _update_status(body: str, color: int = 0x3498db, title: str = None):
-        try:
-            await status_msg.edit(
-                view=_build_sweep_view(
-                    title or f"## {prefix}Sweep in Progress", body, color),
-                allowed_mentions=discord.AllowedMentions.none())
-        except Exception as e:
-            ctx.bot.logger.error(MODULE_NAME, f"Sweep status update failed", e)
+        async def _update_status(body: str, color: int = 0x3498db, title: str = None):
+            try:
+                await status_msg.edit(
+                    view=_build_sweep_view(
+                        title or f"## {prefix}Sweep in Progress", body, color),
+                    allowed_mentions=discord.AllowedMentions.none())
+            except Exception as e:
+                ctx.bot.logger.error(MODULE_NAME, "Sweep status update failed", e)
 
-    # Scan
-    to_delete: list[discord.Message] = []
-    channels_hit: dict[int, int] = {}
+        # Scan
+        to_delete: list[discord.Message] = []
+        channels_hit: dict[int, int] = {}
 
-    for idx, channel in enumerate(scan_channels, 1):
-        count = 0
-        await _update_status(
-            f"**Users** {user_mentions}\n**Keywords** {kw_display}\n"
-            f"**Status** Scanning {channel.mention} ({idx}/{len(scan_channels)})...")
-        try:
-            async for message in channel.history(
-                    limit=limit, after=after_dt, before=before_dt, oldest_first=False):
-                if message.author.id not in user_ids:
+        for idx, channel in enumerate(scan_channels, 1):
+            count = 0
+            await _update_status(
+                f"**Users** {user_mentions}\n**Keywords** {kw_display}\n"
+                f"**Status** Scanning {channel.mention} ({idx}/{len(scan_channels)})...")
+            try:
+                async for message in channel.history(
+                        limit=limit, after=after_dt, before=before_dt, oldest_first=False):
+                    if message.author.id not in user_ids:
+                        continue
+                    if any(kw in message.content.lower() for kw in keywords):
+                        to_delete.append(message)
+                        count += 1
+            except discord.Forbidden:
+                ctx.bot.logger.log(MODULE_NAME, f"Sweep: no access to #{channel.name}")
+            except Exception as e:
+                ctx.bot.logger.error(MODULE_NAME, f"Sweep scan error in #{channel.name}", e)
+            if count:
+                channels_hit[channel.id] = count
+
+        if not to_delete:
+            await _update_status(
+                f"**Users** {user_mentions}\n**Keywords** {kw_display}\n"
+                f"**Result** No matching messages found.",
+                color=0x2ecc71, title=f"## {prefix}Sweep Complete")
+            return
+
+        total = len(to_delete)
+        deleted = 0
+        failed = 0
+        cutoff = _now() - timedelta(days=14)
+
+        by_channel: dict[int, list[discord.Message]] = {}
+        for m in to_delete:
+            by_channel.setdefault(m.channel.id, []).append(m)
+
+        def _status_body(extra: str = "") -> str:
+            return (
+                f"**Users** {user_mentions}\n**Keywords** {kw_display}\n"
+                f"**Progress** {deleted}/{total} deleted"
+                + (f" · {failed} failed" if failed else "")
+                + (f"\n{extra}" if extra else "")
+            )
+
+        if not fake:
+            for channel in scan_channels:
+                msgs = by_channel.get(channel.id, [])
+                if not msgs:
                     continue
-                if any(kw in message.content.lower() for kw in keywords):
-                    to_delete.append(message)
-                    count += 1
-        except discord.Forbidden:
-            ctx.bot.logger.log(MODULE_NAME, f"Sweep: no access to #{channel.name}")
-        except Exception as e:
-            ctx.bot.logger.error(MODULE_NAME, f"Sweep scan error in #{channel.name}", e)
-        if count:
-            channels_hit[channel.id] = count
+                bulk = [m for m in msgs if m.created_at.replace(tzinfo=pytz.utc) > cutoff]
+                old  = [m for m in msgs if m.created_at.replace(tzinfo=pytz.utc) <= cutoff]
+                for i in range(0, len(bulk), 100):
+                    chunk = bulk[i:i+100]
+                    try:
+                        await channel.delete_messages(chunk)
+                        deleted += len(chunk)
+                    except Exception as e:
+                        failed += len(chunk)
+                        ctx.bot.logger.error(MODULE_NAME, f"Sweep bulk delete error in #{channel.name}", e)
+                    await _update_status(_status_body(f"**Channel** {channel.mention}"))
+                    await asyncio.sleep(0.5)
+                for m in old:
+                    try:
+                        await m.delete()
+                        deleted += 1
+                    except Exception:
+                        failed += 1
+                    await asyncio.sleep(0.3)
+                await _update_status(_status_body(f"**Channel** {channel.mention} ✓"))
+        else:
+            deleted = total
 
-    if not to_delete:
-        await _update_status(
-            f"**Users** {user_mentions}\n**Keywords** {kw_display}\n"
-            f"**Result** No matching messages found.",
-            color=0x2ecc71, title=f"## {prefix}Sweep Complete")
-        return
+        ctx.bot.logger.log(MODULE_NAME,
+            f"{'[FAKE] ' if fake else ''}{ctx.author} swept {deleted} messages "
+            f"from {len(user_ids)} user(s) across {len(channels_hit)} channel(s)")
 
-    total = len(to_delete)
-    deleted = 0
-    failed = 0
-    cutoff = _now() - timedelta(days=14)
+        el = get_event_logger(ctx.bot)
+        if el:
+            await el.log_sweep(
+                ctx.guild, ctx.author, user_ids, keywords, deleted,
+                channels_hit, ctx.guild, fake=fake)
 
-    by_channel: dict[int, list[discord.Message]] = {}
-    for m in to_delete:
-        by_channel.setdefault(m.channel.id, []).append(m)
-
-    def _status_body(extra: str = "") -> str:
-        return (
-            f"**Users** {user_mentions}\n**Keywords** {kw_display}\n"
-            f"**Progress** {deleted}/{total} deleted"
-            + (f" · {failed} failed" if failed else "")
-            + (f"\n{extra}" if extra else "")
+        result_body = (
+            f"**Deleted** {deleted} message(s){' (simulated)' if fake else ''}\n"
+            f"**Users** {user_mentions}\n"
+            f"**Keywords** {kw_display}\n"
+            f"**Channels Hit** {len(channels_hit)}"
+            + (f"\n**Failed** {failed} (permissions or age)" if failed else "")
         )
+        await _update_status(result_body, color=0x2ecc71, title=f"## {prefix}Sweep Complete")
 
-    if not fake:
-        for channel in scan_channels:
-            msgs = by_channel.get(channel.id, [])
-            if not msgs:
-                continue
-            bulk = [m for m in msgs if m.created_at.replace(tzinfo=pytz.utc) > cutoff]
-            old  = [m for m in msgs if m.created_at.replace(tzinfo=pytz.utc) <= cutoff]
-            for i in range(0, len(bulk), 100):
-                chunk = bulk[i:i+100]
-                try:
-                    await channel.delete_messages(chunk)
-                    deleted += len(chunk)
-                except Exception as e:
-                    failed += len(chunk)
-                    ctx.bot.logger.error(MODULE_NAME, f"Sweep bulk delete error in #{channel.name}", e)
-                await _update_status(_status_body(f"**Channel** {channel.mention}"))
-                await asyncio.sleep(0.5)
-            for m in old:
-                try:
-                    await m.delete()
-                    deleted += 1
-                except Exception:
-                    failed += 1
-                await asyncio.sleep(0.3)
-            await _update_status(_status_body(f"**Channel** {channel.mention} ✓"))
-    else:
-        deleted = total
-
-    ctx.bot.logger.log(MODULE_NAME,
-        f"{'[FAKE] ' if fake else ''}{ctx.author} swept {deleted} messages "
-        f"from {len(user_ids)} user(s) across {len(channels_hit)} channel(s)")
-
-    el = get_event_logger(ctx.bot)
-    if el:
-        await el.log_sweep(
-            ctx.guild, ctx.author, user_ids, keywords, deleted,
-            channels_hit, ctx.guild, fake=fake)
-
-    result_body = (
-        f"**Deleted** {deleted} message(s){' (simulated)' if fake else ''}\n"
-        f"**Users** {user_mentions}\n"
-        f"**Keywords** {kw_display}\n"
-        f"**Channels Hit** {len(channels_hit)}"
-        + (f"\n**Failed** {failed} (permissions or age)" if failed else "")
-    )
-    await _update_status(result_body, color=0x2ecc71, title=f"## {prefix}Sweep Complete")
+    except Exception as e:
+        ctx.bot.logger.error(MODULE_NAME, "Sweep execution failed", e)
+        await ctx.followup("Sweep failed — check bot logs.", ephemeral=True)
 
 
 class _SweepConfirmView(discord.ui.View):
     def __init__(self, author_id: int):
-        super().__init__(timeout=60)
+        super().__init__(timeout=120)
         self.author_id = author_id
         self.confirmed = False
 

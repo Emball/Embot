@@ -515,6 +515,7 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
         return await ctx.error(ERROR_NO_PERMISSION)
 
     # Parse users — accept IDs, <@id>, <@!id>, or resolve display/usernames
+    ctx.bot.logger.log(MODULE_NAME, f"Sweep users_raw: {repr(users_raw)}")
     user_ids = []
     for part in users_raw.split():
         stripped = part.strip("<@!> ")
@@ -561,7 +562,7 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
 
     limit = max(1, min(limit, 10000))
 
-    user_mentions = " ".join(f"<@\u200b{uid}>" for uid in user_ids)
+    user_mentions = " ".join(f"<@{uid}>" for uid in user_ids)
     kw_display = ", ".join(f"`{k}`" for k in keywords)
     ch_display = ("all channels" if (not channels_raw or channels_raw.strip().lower() == "all")
                   else " ".join(f"<#{c.id}>" for c in scan_channels))

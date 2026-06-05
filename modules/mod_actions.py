@@ -599,9 +599,13 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
         f"**Channels** {ch_display}\n"
         f"**Status** Scanning {len(scan_channels)} channel(s)..."
     )
-    status_msg = await ctx.channel.send(
-        view=_build_sweep_view(f"## {prefix}Sweep in Progress", status_body, 0x3498db),
-        allowed_mentions=discord.AllowedMentions.none())
+    try:
+        status_msg = await ctx.channel.send(
+            view=_build_sweep_view(f"## {prefix}Sweep in Progress", status_body, 0x3498db),
+            allowed_mentions=discord.AllowedMentions.none())
+    except Exception as e:
+        ctx.bot.logger.error(MODULE_NAME, "Sweep: failed to post status message", e)
+        return await ctx.followup("Sweep failed to start — couldn't post status message.", ephemeral=True)
 
     async def _update_status(body: str, color: int = 0x3498db, title: str = None):
         try:
@@ -609,8 +613,8 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
                 view=_build_sweep_view(
                     title or f"## {prefix}Sweep in Progress", body, color),
                 allowed_mentions=discord.AllowedMentions.none())
-        except Exception:
-            pass
+        except Exception as e:
+            ctx.bot.logger.error(MODULE_NAME, f"Sweep status update failed", e)
 
     # Scan
     to_delete: list[discord.Message] = []

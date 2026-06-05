@@ -611,34 +611,60 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
         channels_hit: dict[int, int] = {}
         total_scanned = 0
 
-        # Scan full history — throttle every 200 messages to avoid hammering the API
+        async def _wait_for_session():
+            for _ in range(60):
+                try:
+                    if not ctx.bot.http._HTTPClient__session.closed:
+                        return True
+                except Exception:
+                    pass
+                await asyncio.sleep(2)
+            return False
+
+        # Scan in 200-message chunks oldest_first with a cursor so we can resume on disconnect
         for idx, channel in enumerate(scan_channels, 1):
             count = 0
             scanned = 0
+            cursor = after_dt
             await _update_status(
                 f"**Users** {user_mentions}\n**Keywords** {kw_display}\n"
                 f"**Scanning** {channel.mention} ({idx}/{len(scan_channels)}) "
-                f"— {total_scanned} messages scanned so far...")
+                f"— {total_scanned:,} messages scanned so far...")
             try:
-                _first_logged = False
-                async for message in channel.history(
-                        limit=None, after=after_dt, before=before_dt, oldest_first=False):
-                    scanned += 1
-                    total_scanned += 1
-                    if not _first_logged:
-                        ctx.bot.logger.log(MODULE_NAME, f"Sweep sample author id: {message.author.id} (type={type(message.author.id).__name__}), user_ids types: {[type(x).__name__ for x in user_ids]}")
-                        _first_logged = True
-                    if message.author.id in user_ids and any(
-                            kw in message.content.lower() for kw in keywords):
-                        to_delete.append(message)
-                        count += 1
-                    # Yield to event loop every 200 messages to stay responsive
-                    if scanned % 200 == 0:
-                        await asyncio.sleep(0.1)
+                while True:
+                    chunk_count = 0
+                    try:
+                        async for message in channel.history(
+                                limit=200, after=cursor, before=before_dt, oldest_first=True):
+                            chunk_count += 1
+                            scanned += 1
+                            total_scanned += 1
+                            cursor = message
+                            if message.author.id in user_ids and any(
+                                    kw in message.content.lower() for kw in keywords):
+                                to_delete.append(message)
+                                count += 1
+                        break  # chunk exhausted — channel done
+                    except RuntimeError as e:
+                        if "Session is closed" in str(e):
+                            ctx.bot.logger.log(MODULE_NAME,
+                                f"Sweep: session closed mid-scan #{channel.name}, waiting to reconnect...")
+                            await _update_status(
+                                f"**Users** {user_mentions}\n**Keywords** {kw_display}\n"
+                                f"**Scanning** {channel.mention} ({idx}/{len(scan_channels)}) "
+                                f"— ⚠ Reconnecting... ({total_scanned:,} scanned, {len(to_delete)} matches)")
+                            if not await _wait_for_session():
+                                raise RuntimeError("Bot session did not recover in time")
+                            await asyncio.sleep(3)
+                            ctx.bot.logger.log(MODULE_NAME, f"Sweep: session recovered, resuming #{channel.name}")
+                            continue
+                        raise
+                    if chunk_count > 0:
                         await _update_status(
                             f"**Users** {user_mentions}\n**Keywords** {kw_display}\n"
                             f"**Scanning** {channel.mention} ({idx}/{len(scan_channels)}) "
                             f"— {total_scanned:,} messages scanned, {len(to_delete)} matches...")
+                    await asyncio.sleep(0.1)
             except discord.Forbidden:
                 ctx.bot.logger.log(MODULE_NAME, f"Sweep: no access to #{channel.name}")
             except Exception as e:

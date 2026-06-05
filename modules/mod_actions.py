@@ -608,7 +608,7 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
                 await status_msg.edit(
                     view=_build_sweep_view(title or f"## {prefix}Sweep in Progress", body, color),
                     allowed_mentions=discord.AllowedMentions.none())
-            except discord.NotFound:
+            except (discord.NotFound, discord.DiscordServerError):
                 _status_gone = True
             except Exception as e:
                 ctx.bot.logger.error(MODULE_NAME, "Sweep status update failed", e)
@@ -687,17 +687,13 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
                                 count += 1
                         if chunk_count < 200:
                             break  # got less than a full chunk — channel exhausted
-                    except RuntimeError as e:
-                        if "Session is closed" in str(e):
+                    except (RuntimeError, discord.DiscordServerError) as e:
+                        if isinstance(e, discord.DiscordServerError) or "Session is closed" in str(e):
                             ctx.bot.logger.log(MODULE_NAME,
-                                f"Sweep: session closed mid-scan #{channel.name}, waiting to reconnect...")
-                            await _update_status(
-                                f"**Users** {user_mentions}\n**Keywords** {kw_display}\n"
-                                f"**Scanning** {channel.mention} ({idx}/{len(scan_channels)}) "
-                                f"— ⚠ Reconnecting... ({total_scanned:,} scanned, {len(to_delete)} matches)")
-                            if not await _wait_for_session():
-                                raise RuntimeError("Bot session did not recover in time")
-                            await asyncio.sleep(3)
+                                f"Sweep: transient error mid-scan #{channel.name}, retrying in 10s...")
+                            await asyncio.sleep(10)
+                            continue
+                        raise
                             ctx.bot.logger.log(MODULE_NAME, f"Sweep: session recovered, resuming #{channel.name}")
                             continue
                         raise

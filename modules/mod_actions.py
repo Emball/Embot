@@ -599,11 +599,17 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
                 0x3498db),
             allowed_mentions=discord.AllowedMentions.none())
 
+        _status_gone = False
         async def _update_status(body: str, color: int = 0x3498db, title: str = None):
+            nonlocal _status_gone
+            if _status_gone:
+                return
             try:
                 await status_msg.edit(
                     view=_build_sweep_view(title or f"## {prefix}Sweep in Progress", body, color),
                     allowed_mentions=discord.AllowedMentions.none())
+            except discord.NotFound:
+                _status_gone = True
             except Exception as e:
                 ctx.bot.logger.error(MODULE_NAME, "Sweep status update failed", e)
 

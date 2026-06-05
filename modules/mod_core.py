@@ -1582,25 +1582,27 @@ def setup(bot):
     # Wrap bot.logger.error to DM owner on every error/traceback
     import traceback as _tb, time as _time
     _orig_logger_error = bot.logger.error
-    _dm_last_sent: dict = {}  # (module, message_prefix) -> timestamp
-    _DM_COOLDOWN = 300  # seconds between identical DMs
-    def _error_with_dm(module_name, message, exception=None):
+    _err_last_sent: dict = {}  # (module, message_prefix) -> timestamp
+    _ERR_COOLDOWN = 300  # seconds between identical bot-log errors
+    def _error_with_botlog(module_name, message, exception=None):
         _orig_logger_error(module_name, message, exception)
         dedup_key = (module_name, message[:80])
         now = _time.time()
-        if now - _dm_last_sent.get(dedup_key, 0) < _DM_COOLDOWN:
+        if now - _err_last_sent.get(dedup_key, 0) < _ERR_COOLDOWN:
             return
-        _dm_last_sent[dedup_key] = now
-        async def _dm():
+        _err_last_sent[dedup_key] = now
+        async def _post():
             try:
-                owner_id = mod_system.cfg.owner_id
-                if not owner_id:
+                guild = next(iter(bot.guilds), None)
+                if not guild:
+                    return
+                from mod_oversight import bot_logs_channel
+                ch = bot_logs_channel(mod_system, guild)
+                if not ch:
                     return
                 body = f"[{module_name}] {message}"
                 if exception:
                     body += "\n\n" + "".join(_tb.format_exception(type(exception), exception, exception.__traceback__))
-                user = await bot.fetch_user(owner_id)
-                dm = await user.create_dm()
                 for i, chunk in enumerate([body[j:j+1800] for j in range(0, len(body), 1800)]):
                     view = discord.ui.LayoutView(timeout=None)
                     view.add_item(discord.ui.Container(
@@ -1609,13 +1611,13 @@ def setup(bot):
                         discord.ui.TextDisplay(f"-# <t:{int(_time.time())}:R>"),
                         accent_color=0xe74c3c,
                     ))
-                    await dm.send(view=view)
+                    await ch.send(view=view)
             except Exception:
                 pass
         try:
-            asyncio.get_running_loop().create_task(_dm())
+            asyncio.get_running_loop().create_task(_post())
         except RuntimeError:
             pass
-    bot.logger.error = _error_with_dm
+    bot.logger.error = _error_with_botlog
 
     bot.logger.log(MODULE_NAME, "Moderation setup complete")

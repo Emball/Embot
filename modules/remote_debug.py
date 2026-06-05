@@ -573,10 +573,17 @@ class ClaudeBridgeListener:
                 consecutive_errors += 1
                 backoff = min(backoff * 2, BACKOFF_MAX)
                 from _utils import NetworkState
+                # Network errors (SSL, DNS, connection) are silent — just log, never DM
+                _is_network_err = any(t in type(e).__name__ or t in str(e) for t in (
+                    "URLError", "SSLError", "SSLEOFError", "gaierror",
+                    "RemoteDisconnected", "TimeoutError", "ConnectionError"
+                ))
                 if not NetworkState.is_online():
                     NetworkState.suppress()
+                elif _is_network_err:
+                    # Network blip — log silently, no DM
+                    self.bot.logger.log(MODULE_NAME, f"[bridge] network error (backoff {backoff:.0f}s, #{consecutive_errors}): {e}")
                 elif backoff >= DEAF_THRESHOLD:
-                    # Bridge has been failing long enough to miss commands — always notify
                     self.bot.logger.log(MODULE_NAME, f"[bridge] poll backoff {backoff:.0f}s — bridge effectively deaf to new commands (error #{consecutive_errors}: {e})", "WARNING")
                 else:
                     now = time.time()

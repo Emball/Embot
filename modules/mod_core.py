@@ -744,6 +744,12 @@ class ModerationSystem:
 def setup(bot):
     import mod_core as _self
 
+    # Remove prefix commands before re-registering to avoid CommandRegistrationError on reload
+    for _cmd in ("ban", "multiban", "unban", "kick", "timeout", "untimeout",
+                 "mute", "unmute", "softban", "warn", "warnings", "clearwarnings",
+                 "purge", "slowmode", "lock", "unlock"):
+        bot.remove_command(_cmd)
+
     mod_system = ModerationSystem(bot)
     bot._mod_system = mod_system
     bot.moderation  = mod_system

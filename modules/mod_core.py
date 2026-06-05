@@ -756,7 +756,7 @@ def setup(bot):
         _do_ban, _do_unban, _do_kick, _do_timeout, _do_untimeout,
         _do_mute, _do_unmute, _do_softban,
         _do_warn, _do_warnings, _do_clearwarnings,
-        _do_purge, _do_slowmode, _do_lock, _do_unlock,
+        _do_purge, _do_slowmode, _do_lock, _do_unlock, _do_sweep,
     )
     from mod_rules import RulesManager
     from mod_suspicion import _setup_suspicion
@@ -914,6 +914,22 @@ def setup(bot):
     async def slash_purge(interaction: discord.Interaction, amount: int,
                           user: Optional[discord.Member] = None, fake: bool = False):
         await _do_purge(ModContext(interaction), mod_system, amount, user, fake=fake)
+
+    @bot.tree.command(name="sweep", description="[Mod] Bulk-delete messages from users matching keywords")
+    @app_commands.describe(
+        users="Space-separated user IDs or mentions",
+        keywords="Comma-separated keywords to match (case-insensitive)",
+        channels="Space-separated channel mentions/IDs, or 'all' (default: all)",
+        after="Only scan messages after this date (YYYY-MM-DD)",
+        before="Only scan messages before this date (YYYY-MM-DD)",
+        limit="Max messages to scan per channel (default: 500, max: 10000)",
+        fake="Simulate without deleting"
+    )
+    async def slash_sweep(interaction: discord.Interaction, users: str, keywords: str,
+                          channels: str = None, after: str = None, before: str = None,
+                          limit: int = 500, fake: bool = False):
+        await _do_sweep(ModContext(interaction), mod_system, users, keywords,
+                        channels, after, before, limit, fake=fake)
 
     @bot.tree.command(name="slowmode", description="[Mod] Set slowmode delay for this channel")
     @app_commands.describe(seconds="Slowmode delay in seconds (0 to disable)",

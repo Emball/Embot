@@ -1,4 +1,6 @@
+import asyncio
 import discord
+import pytz
 from datetime import datetime, timedelta
 from typing import Optional
 from _utils import _now
@@ -498,6 +500,203 @@ async def _do_purge(ctx: ModContext, ms, amount: int, target: Optional[discord.M
         await ctx.followup("An error occurred while trying to purge messages.",
                            ephemeral=True)
         ctx.bot.logger.error(MODULE_NAME, "Purge failed", e)
+
+
+async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
+                    channels_raw: str = None, after_raw: str = None,
+                    before_raw: str = None, limit: int = 500, fake: bool = False):
+    if not has_elevated_role(ctx.author, ms.cfg):
+        return await ctx.error(ERROR_NO_PERMISSION)
+
+    # Parse users
+    user_ids = []
+    for part in users_raw.split():
+        uid = part.strip("<@!> ")
+        if uid.isdigit():
+            user_ids.append(int(uid))
+    if not user_ids:
+        return await ctx.error("No valid user IDs provided.")
+
+    # Parse keywords (case-insensitive)
+    keywords = [k.strip().lower() for k in keywords_raw.split(",") if k.strip()]
+    if not keywords:
+        return await ctx.error("No valid keywords provided.")
+
+    # Parse date filters
+    after_dt = before_dt = None
+    try:
+        if after_raw:
+            after_dt = datetime.strptime(after_raw, "%Y-%m-%d").replace(tzinfo=pytz.utc)
+        if before_raw:
+            before_dt = datetime.strptime(before_raw, "%Y-%m-%d").replace(tzinfo=pytz.utc)
+    except ValueError:
+        return await ctx.error("Invalid date format. Use YYYY-MM-DD.")
+
+    # Resolve target channels
+    if not channels_raw or channels_raw.strip().lower() == "all":
+        scan_channels = [c for c in ctx.guild.text_channels
+                         if c.permissions_for(ctx.guild.me).read_message_history
+                         and c.permissions_for(ctx.guild.me).manage_messages]
+    else:
+        scan_channels = []
+        for part in channels_raw.split():
+            cid = part.strip("<#> ")
+            if cid.isdigit():
+                ch = ctx.guild.get_channel(int(cid))
+                if ch:
+                    scan_channels.append(ch)
+        if not scan_channels:
+            return await ctx.error("No valid channels found.")
+
+    limit = max(1, min(limit, 10000))
+
+    user_mentions = " ".join(f"<@{uid}>" for uid in user_ids)
+    kw_display = ", ".join(f"`{k}`" for k in keywords)
+    ch_display = "all channels" if (not channels_raw or channels_raw.strip().lower() == "all") \
+        else " ".join(f"<#{c.id}>" for c in scan_channels)
+    date_range = ""
+    if after_dt:
+        date_range += f" after {after_raw}"
+    if before_dt:
+        date_range += f" before {before_raw}"
+
+    confirm_text = (
+        f"**{'[FAKE] ' if fake else ''}Sweep Confirmation**\n\n"
+        f"**Users** {user_mentions}\n"
+        f"**Keywords** {kw_display}\n"
+        f"**Channels** {ch_display}\n"
+        f"**Limit** {limit} messages per channel{date_range}\n\n"
+        f"This will scan and delete matching messages. Confirm?"
+    )
+
+    confirm_view = _SweepConfirmView(ctx.author.id)
+    interaction = ctx._source if isinstance(ctx._source, discord.Interaction) else None
+    if interaction:
+        await interaction.response.send_message(confirm_text, view=confirm_view, ephemeral=True)
+        ctx._replied = True
+    else:
+        await ctx.reply(confirm_text, ephemeral=True)
+
+    await confirm_view.wait()
+    if not confirm_view.confirmed:
+        return await ctx.followup("Sweep cancelled.", ephemeral=True)
+
+    await ctx.followup(f"Scanning {len(scan_channels)} channel(s)... This may take a moment.", ephemeral=True)
+
+    # Scan and collect
+    to_delete: list[discord.Message] = []
+    channels_hit: dict[int, int] = {}
+
+    for channel in scan_channels:
+        count = 0
+        try:
+            async for message in channel.history(limit=limit, after=after_dt, before=before_dt, oldest_first=False):
+                if message.author.id not in user_ids:
+                    continue
+                content_lower = message.content.lower()
+                if any(kw in content_lower for kw in keywords):
+                    to_delete.append(message)
+                    count += 1
+        except discord.Forbidden:
+            ctx.bot.logger.log(MODULE_NAME, f"Sweep: no access to #{channel.name}")
+        except Exception as e:
+            ctx.bot.logger.error(MODULE_NAME, f"Sweep scan error in #{channel.name}", e)
+        if count:
+            channels_hit[channel.id] = count
+
+    if not to_delete:
+        empty = discord.ui.LayoutView(timeout=None)
+        empty.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("## Sweep Complete\n\nNo matching messages found."),
+            accent_color=0x2ecc71
+        ))
+        return await ctx.followup(view=empty, ephemeral=True)
+
+    # Delete in bulk where possible (≤14 days), one-by-one for older
+    deleted = 0
+    failed = 0
+    cutoff = _now() - timedelta(days=14)
+
+    by_channel: dict[int, list[discord.Message]] = {}
+    for m in to_delete:
+        by_channel.setdefault(m.channel.id, []).append(m)
+
+    if not fake:
+        for channel in scan_channels:
+            msgs = by_channel.get(channel.id, [])
+            if not msgs:
+                continue
+            bulk = [m for m in msgs if m.created_at.replace(tzinfo=pytz.utc) > cutoff]
+            old  = [m for m in msgs if m.created_at.replace(tzinfo=pytz.utc) <= cutoff]
+            # Bulk delete in chunks of 100
+            for i in range(0, len(bulk), 100):
+                chunk = bulk[i:i+100]
+                try:
+                    await channel.delete_messages(chunk)
+                    deleted += len(chunk)
+                except Exception as e:
+                    failed += len(chunk)
+                    ctx.bot.logger.error(MODULE_NAME, f"Sweep bulk delete error in #{channel.name}", e)
+                await asyncio.sleep(0.5)
+            # One-by-one for old messages
+            for m in old:
+                try:
+                    await m.delete()
+                    deleted += 1
+                except Exception:
+                    failed += 1
+                await asyncio.sleep(0.3)
+    else:
+        deleted = len(to_delete)
+
+    # Summary
+    ctx.bot.logger.log(MODULE_NAME,
+        f"{'[FAKE] ' if fake else ''}{ctx.author} swept {deleted} messages "
+        f"from {len(user_ids)} user(s) across {len(channels_hit)} channel(s)")
+
+    el = get_event_logger(ctx.bot)
+    if el:
+        await el.log_sweep(
+            ctx.guild, ctx.author, user_ids, keywords, deleted,
+            channels_hit, ctx.guild, fake=fake)
+
+    result_text = (
+        f"## {'[FAKE] ' if fake else ''}Sweep Complete\n\n"
+        f"**Deleted** {deleted} message(s){' (simulated)' if fake else ''}\n"
+        f"**Users** {user_mentions}\n"
+        f"**Keywords** {kw_display}\n"
+        f"**Channels Hit** {len(channels_hit)}"
+    )
+    if failed:
+        result_text += f"\n**Failed** {failed} (permissions or age)"
+    result = discord.ui.LayoutView(timeout=None)
+    result.add_item(discord.ui.Container(
+        discord.ui.TextDisplay(result_text),
+        accent_color=0x2ecc71
+    ))
+    await ctx.followup(view=result, ephemeral=True)
+
+
+class _SweepConfirmView(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=60)
+        self.author_id = author_id
+        self.confirmed = False
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("Not your sweep.", ephemeral=True)
+        self.confirmed = True
+        await interaction.response.defer()
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("Not your sweep.", ephemeral=True)
+        await interaction.response.defer()
+        self.stop()
 
 
 async def _do_slowmode(ctx: ModContext, ms, seconds: int,

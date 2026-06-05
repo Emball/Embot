@@ -580,6 +580,29 @@ class EventLogger:
         view = _layout(_section_with_avatar(text, member.display_avatar.url))
         return await self._send(channel, view)
 
+    async def log_sweep(self, guild: discord.Guild, moderator: discord.Member,
+                        user_ids: list, keywords: list, deleted: int,
+                        channels_hit: dict, target_guild: discord.Guild,
+                        fake: bool = False) -> Optional[int]:
+        channel = self.get_bot_logs_channel(guild)
+        user_mentions = " ".join(f"<@{uid}>" for uid in user_ids)
+        kw_display = ", ".join(f"`{k}`" for k in keywords)
+        ch_lines = ""
+        for ch_id, count in channels_hit.items():
+            ch = target_guild.get_channel(ch_id)
+            ch_lines += f"\n• {ch.mention if ch else f'<#{ch_id}>'}: {count} message(s)"
+        text = (
+            f"{'[FAKE] ' if fake else ''}🧹 **Keyword Sweep**\n"
+            f"**Moderator:** {moderator.mention}\n"
+            f"**Targets:** {user_mentions}\n"
+            f"**Keywords:** {kw_display}\n"
+            f"**Deleted:** {deleted} message(s)\n"
+            f"**Channels:**{ch_lines if ch_lines else ' none'}\n"
+            f"-# <@{moderator.id}>"
+        )
+        view = _layout(_section_with_avatar(text, moderator.display_avatar.url))
+        return await self._send(channel, view)
+
     async def log_lock(self, guild: discord.Guild, moderator: discord.Member,
                        reason: str, locked_channel: discord.TextChannel) -> Optional[int]:
         channel = self.get_bot_logs_channel(guild)

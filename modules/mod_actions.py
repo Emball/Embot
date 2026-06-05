@@ -529,6 +529,7 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
     user_ids = list(dict.fromkeys(user_ids))
     if not user_ids:
         return await ctx.error("No valid users provided.")
+    ctx.bot.logger.log(MODULE_NAME, f"Sweep user_ids resolved: {user_ids}")
 
     keywords = [k.strip().lower() for k in keywords_raw.split(",") if k.strip()]
     if not keywords:
@@ -619,10 +620,14 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
                 f"**Scanning** {channel.mention} ({idx}/{len(scan_channels)}) "
                 f"— {total_scanned} messages scanned so far...")
             try:
+                _first_logged = False
                 async for message in channel.history(
                         limit=None, after=after_dt, before=before_dt, oldest_first=False):
                     scanned += 1
                     total_scanned += 1
+                    if not _first_logged:
+                        ctx.bot.logger.log(MODULE_NAME, f"Sweep sample author id: {message.author.id} (type={type(message.author.id).__name__}), user_ids types: {[type(x).__name__ for x in user_ids]}")
+                        _first_logged = True
                     if message.author.id in user_ids and any(
                             kw in message.content.lower() for kw in keywords):
                         to_delete.append(message)

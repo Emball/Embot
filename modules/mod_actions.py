@@ -679,7 +679,8 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
                                     kw in message.content.lower() for kw in keywords):
                                 to_delete.append(message)
                                 count += 1
-                        break  # chunk exhausted — channel done
+                        if chunk_count < 200:
+                            break  # got less than a full chunk — channel exhausted
                     except RuntimeError as e:
                         if "Session is closed" in str(e):
                             ctx.bot.logger.log(MODULE_NAME,

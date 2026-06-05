@@ -1230,10 +1230,23 @@ def setup(bot):
                 m for m in channel_msgs if m['id'] != message.id
             ]
 
+        # Mark deleted in archive
+        if not message.author.bot:
+            msg_cache.archive_delete(message.id, _now().isoformat())
+
+    @bot.listen()
+    async def on_raw_bulk_message_delete(payload):
+        msg_cache.archive_bulk_delete(list(payload.message_ids), _now().isoformat())
+
     @bot.listen()
     async def on_message_edit(before, after):
         if not after.guild or after.author.bot:
             return
+
+        # Archive content edits
+        if before.content != after.content:
+            msg_cache.archive_edit(
+                after.id, before.content, after.content, _now().isoformat())
 
         before_att_ids = {att.id for att in before.attachments}
         after_att_ids  = {att.id for att in after.attachments}

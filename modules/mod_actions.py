@@ -694,9 +694,6 @@ async def _do_sweep(ctx: ModContext, ms, users_raw: str, keywords_raw: str,
                             await asyncio.sleep(10)
                             continue
                         raise
-                            ctx.bot.logger.log(MODULE_NAME, f"Sweep: session recovered, resuming #{channel.name}")
-                            continue
-                        raise
                     if chunk_count > 0:
                         await _update_status(
                             f"**Users** {user_mentions}\n**Keywords** {kw_display}\n"

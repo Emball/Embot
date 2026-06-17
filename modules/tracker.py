@@ -77,7 +77,7 @@ def _save_snapshot(snap: dict):
 
 
 def _fetch_sheet(sheet_name: str, api_key: str) -> list | None:
-    encoded = urllib.parse.quote(sheet_name)
+    encoded = urllib.parse.quote(sheet_name, safe='')
     url = (
         f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}"
         f"/values/{encoded}?key={api_key}"
@@ -149,7 +149,7 @@ def _build_embeds(header, old_rows, new_rows, friendly_name) -> list:
     new_keys = set(new_rows)
 
     # New entries (row indices that didn't exist before)
-    for key in sorted(new_keys - old_keys, key=int):
+    for key in sorted(new_keys - old_keys, key=lambda k: int(k) if k.isdigit() else k):
         row = new_rows[key]
         name = _display_name(row)
         notes = row.get("Notes", "").strip()
@@ -165,7 +165,7 @@ def _build_embeds(header, old_rows, new_rows, friendly_name) -> list:
         embeds.append(embed)
 
     # Removed entries
-    for key in sorted(old_keys - new_keys, key=int):
+    for key in sorted(old_keys - new_keys, key=lambda k: int(k) if k.isdigit() else k):
         row = old_rows[key]
         name = _display_name(row)
         notes = row.get("Notes", "").strip()
@@ -175,7 +175,7 @@ def _build_embeds(header, old_rows, new_rows, friendly_name) -> list:
         embeds.append(embed)
 
     # Updated entries
-    for key in sorted(old_keys & new_keys, key=int):
+    for key in sorted(old_keys & new_keys, key=lambda k: int(k) if k.isdigit() else k):
         old_row = old_rows[key]
         new_row = new_rows[key]
         changed = [f for f in header if new_row.get(f, "").strip() != old_row.get(f, "").strip()]

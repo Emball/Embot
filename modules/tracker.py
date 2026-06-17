@@ -112,23 +112,49 @@ def _truncate(val: str, field: str) -> str:
     return val
 
 
-def _sheet_to_indexed_rows(raw: list) -> tuple:
+def _row_key(row_dict: dict, idx: int) -> str:
     """
-    Returns (header, {str(row_index): row_dict}).
-    Key is row index (as string) so renames are detected as field changes, not add+remove.
+    Stable identity key: Era|||Name. Falls back to including the index only when
+    Era+Name would be empty (malformed row), making collisions impossible in practice.
+    """
+    era = row_dict.get("Era", "").strip()
+    name = row_dict.get("Name", "").strip()
+    base = f"{era}|||{name}"
+    if not era and not name:
+        base = f"__row_{idx}"
+    return base
+
+
+def _make_unique_key(base: str, seen: dict) -> str:
+    """Append a counter suffix if the same Era|||Name appears more than once."""
+    if base not in seen:
+        seen[base] = 0
+        return base
+    seen[base] += 1
+    return f"{base}__#{seen[base]}"
+
+
+def _sheet_to_keyed_rows(raw: list) -> tuple:
+    """
+    Returns (header, {key: row_dict}).
+    Key is Era|||Name (stable across row insertions/deletions).
+    Duplicate Era+Name combos get a __#N suffix so they don't clobber each other.
     """
     if not raw:
         return [], {}
 
     header = [str(c).strip() for c in raw[0]]
     rows = {}
+    seen = {}
     data_idx = 0
 
     for raw_row in raw[1:]:
         if _is_section_header(raw_row):
             continue
         row_dict = _row_to_dict(raw_row, header)
-        rows[str(data_idx)] = row_dict
+        base = _row_key(row_dict, data_idx)
+        key = _make_unique_key(base, seen)
+        rows[key] = row_dict
         data_idx += 1
 
     return header, rows
@@ -148,8 +174,7 @@ def _build_embeds(header, old_rows, new_rows, friendly_name) -> list:
     old_keys = set(old_rows)
     new_keys = set(new_rows)
 
-    # New entries (row indices that didn't exist before)
-    for key in sorted(new_keys - old_keys, key=lambda k: int(k) if k.isdigit() else k):
+    for key in sorted(new_keys - old_keys):
         row = new_rows[key]
         name = _display_name(row)
         notes = row.get("Notes", "").strip()
@@ -164,8 +189,7 @@ def _build_embeds(header, old_rows, new_rows, friendly_name) -> list:
         embed.set_footer(text=friendly_name)
         embeds.append(embed)
 
-    # Removed entries
-    for key in sorted(old_keys - new_keys, key=lambda k: int(k) if k.isdigit() else k):
+    for key in sorted(old_keys - new_keys):
         row = old_rows[key]
         name = _display_name(row)
         notes = row.get("Notes", "").strip()
@@ -174,8 +198,7 @@ def _build_embeds(header, old_rows, new_rows, friendly_name) -> list:
         embed.set_footer(text=friendly_name)
         embeds.append(embed)
 
-    # Updated entries
-    for key in sorted(old_keys & new_keys, key=lambda k: int(k) if k.isdigit() else k):
+    for key in sorted(old_keys & new_keys):
         old_row = old_rows[key]
         new_row = new_rows[key]
         changed = [f for f in header if new_row.get(f, "").strip() != old_row.get(f, "").strip()]
@@ -271,7 +294,7 @@ def setup(bot):
             raw = await _fetch_sheet_async(sheet_name, key)
             if raw is None:
                 continue
-            _, rows = _sheet_to_indexed_rows(raw)
+            _, rows = _sheet_to_keyed_rows(raw)
             new_snap[sheet_name] = rows
 
         _save_snapshot(new_snap)
@@ -292,7 +315,6 @@ def setup(bot):
         if not channel:
             return
 
-        # Always load snapshot fresh from disk — survives hot-reloads
         snapshot = _load_snapshot()
         changed = False
 
@@ -306,7 +328,7 @@ def setup(bot):
                         NetworkState.suppress()
                     continue
 
-                header, new_rows = _sheet_to_indexed_rows(raw)
+                header, new_rows = _sheet_to_keyed_rows(raw)
                 old_rows = snapshot.get(sheet_name)
 
                 if old_rows is None:
@@ -353,7 +375,7 @@ def setup(bot):
             raw = await _fetch_sheet_async(sheet_name, key)
             if raw is None:
                 continue
-            _, rows = _sheet_to_indexed_rows(raw)
+            _, rows = _sheet_to_keyed_rows(raw)
             snapshot[sheet_name] = rows
             changed = True
             bot.logger.log(MODULE_NAME, f"Auto-baselined {sheet_name} ({len(rows)} rows)")

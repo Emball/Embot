@@ -12,27 +12,25 @@ MODULE_NAME = "TRACKER"
 
 SPREADSHEET_ID = "1x9tTOOqH5WpKOoptdQzABSN_x8oZbMgzIGlGH9w1IKA"
 
-# Sheets to monitor and their friendly names for embed footers
 SHEETS = {
     "Unreleased": "Eminem Unreleased Tracker",
     "Released": "Eminem Released Tracker",
     "Recent": "Eminem Recent Tracker",
-    "🏆 Grails / 🥇 Wanted": "Eminem Grails Tracker",
-    "⭐ Best Of (Unreleased)": "Eminem Best Of Tracker",
-    "✨ Special": "Eminem Special Tracker",
-    "🗑️ Worst Of (Unreleased)": "Eminem Worst Of Tracker",
+    "\U0001f3c6 Grails / \U0001f947 Wanted": "Eminem Grails Tracker",
+    "\u2b50 Best Of (Unreleased)": "Eminem Best Of Tracker",
+    "\u2728 Special": "Eminem Special Tracker",
+    "\U0001f5d1\ufe0f Worst Of (Unreleased)": "Eminem Worst Of Tracker",
     "Misc (WIP)": "Eminem Misc (WIP) Tracker",
     "Tracklists": "Eminem Tracklists Tracker",
     "Stems": "Eminem Stems Tracker",
     "Art": "Eminem Art Tracker",
     "Remixes (WIP)": "Eminem Remixes Tracker",
     "Groupbuys": "Eminem Groupbuys Tracker",
-    "💿 Samples (WIP)": "Eminem Samples Tracker",
+    "\U0001f4bf Samples (WIP)": "Eminem Samples Tracker",
     "Fakes": "Eminem Fakes Tracker",
     "Unreleased (Production Projects) [Archived]": "Eminem Unreleased (Production) Tracker",
 }
 
-# Columns that are too long/noisy to show full diffs for — truncate them
 LONG_FIELDS = {"Notes", "Tracklist", "Info"}
 MAX_FIELD_LEN = 300
 
@@ -78,7 +76,7 @@ def _save_snapshot(snap: dict):
     atomic_json_write(str(SNAPSHOT_PATH), snap)
 
 
-def _fetch_sheet(sheet_name: str, api_key: str) -> list[list[str]] | None:
+def _fetch_sheet(sheet_name: str, api_key: str) -> list | None:
     encoded = urllib.parse.quote(sheet_name)
     url = (
         f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}"
@@ -92,28 +90,20 @@ def _fetch_sheet(sheet_name: str, api_key: str) -> list[list[str]] | None:
         return None
 
 
-def _row_key(row: list[str], header: list[str]) -> str:
-    """Stable identifier for a row: Era + Name (first two non-empty columns)."""
-    era = row[0].strip() if len(row) > 0 else ""
-    name = row[1].strip() if len(row) > 1 else ""
-    return f"{era}|||{name}"
-
-
-def _is_section_header(row: list[str], header: list[str]) -> bool:
-    """Section header rows have content only in col 0 or are summary lines."""
+def _is_section_header(row: list) -> bool:
     if not row:
         return True
-    non_empty = sum(1 for c in row if c.strip())
+    non_empty = sum(1 for c in row if str(c).strip())
     if non_empty <= 1:
         return True
-    name_col = row[1].strip() if len(row) > 1 else ""
-    if not name_col or name_col.startswith("(") or name_col.startswith("Join"):
+    name_col = str(row[1]).strip() if len(row) > 1 else ""
+    if not name_col or name_col.startswith("(") or name_col.startswith("Join") or name_col.startswith("Note:"):
         return True
     return False
 
 
-def _row_to_dict(row: list[str], header: list[str]) -> dict:
-    return {header[i]: row[i].strip() if i < len(row) else "" for i in range(len(header))}
+def _row_to_dict(row: list, header: list) -> dict:
+    return {header[i]: str(row[i]).strip() if i < len(row) else "" for i in range(len(header))}
 
 
 def _truncate(val: str, field: str) -> str:
@@ -122,116 +112,103 @@ def _truncate(val: str, field: str) -> str:
     return val
 
 
-def _sheet_to_rows(raw: list[list[str]]) -> tuple[list[str], dict[str, dict]]:
-    """Parse raw sheet values into header + keyed row dict. Skips headers/section rows."""
+def _sheet_to_indexed_rows(raw: list) -> tuple:
+    """
+    Returns (header, {str(row_index): row_dict}).
+    Key is row index (as string) so renames are detected as field changes, not add+remove.
+    """
     if not raw:
         return [], {}
 
-    header = [c.strip() for c in raw[0]]
+    header = [str(c).strip() for c in raw[0]]
     rows = {}
+    data_idx = 0
 
     for raw_row in raw[1:]:
-        if _is_section_header(raw_row, header):
+        if _is_section_header(raw_row):
             continue
-        key = _row_key(raw_row, header)
-        if not key.strip("|||"):
-            continue
-        rows[key] = _row_to_dict(raw_row, header)
+        row_dict = _row_to_dict(raw_row, header)
+        rows[str(data_idx)] = row_dict
+        data_idx += 1
 
     return header, rows
 
 
-def _hash_snapshot(rows: dict) -> str:
+def _hash_rows(rows: dict) -> str:
     return hashlib.md5(json.dumps(rows, sort_keys=True).encode()).hexdigest()
 
 
-def _build_embeds(
-    sheet_name: str,
-    header: list[str],
-    old_rows: dict,
-    new_rows: dict,
-    friendly_name: str,
-) -> list[discord.Embed]:
+def _display_name(row: dict) -> str:
+    return row.get("Name", "???").strip() or "???"
+
+
+def _build_embeds(header, old_rows, new_rows, friendly_name) -> list:
     embeds = []
 
-    # New entries
-    for key, new_row in new_rows.items():
-        if key in old_rows:
-            continue
-        name = new_row.get("Name", key.split("|||")[1])
-        embed = discord.Embed(
-            title=f"New Entry: {name}",
-            description=new_row.get("Notes", ""),
-            color=0x57F287,
-        )
+    old_keys = set(old_rows)
+    new_keys = set(new_rows)
+
+    # New entries (row indices that didn't exist before)
+    for key in sorted(new_keys - old_keys, key=int):
+        row = new_rows[key]
+        name = _display_name(row)
+        notes = row.get("Notes", "").strip()
+        embed = discord.Embed(title=f"New Entry: {name}", description=notes or None, color=0x57F287)
         embed.set_author(name="Info", icon_url="https://media.discordapp.net/attachments/1009493700738555966/1262676377157505076/OMEGA_QUESTIONN.png")
         for field in header:
             if field in ("Name", "Notes"):
                 continue
-            val = new_row.get(field, "").strip()
+            val = row.get(field, "").strip()
             if val:
                 embed.add_field(name=field, value=_truncate(val, field), inline=True)
         embed.set_footer(text=friendly_name)
         embeds.append(embed)
 
     # Removed entries
-    for key, old_row in old_rows.items():
-        if key in new_rows:
-            continue
-        name = old_row.get("Name", key.split("|||")[1])
-        embed = discord.Embed(
-            title=f"Removed Entry: {name}",
-            description=old_row.get("Notes", ""),
-            color=0xED4245,
-        )
+    for key in sorted(old_keys - new_keys, key=int):
+        row = old_rows[key]
+        name = _display_name(row)
+        notes = row.get("Notes", "").strip()
+        embed = discord.Embed(title=f"Removed Entry: {name}", description=notes or None, color=0xED4245)
         embed.set_author(name="Info", icon_url="https://media.discordapp.net/attachments/1009493700738555966/1262676377157505076/OMEGA_QUESTIONN.png")
         embed.set_footer(text=friendly_name)
         embeds.append(embed)
 
     # Updated entries
-    for key, new_row in new_rows.items():
-        if key not in old_rows:
-            continue
+    for key in sorted(old_keys & new_keys, key=int):
         old_row = old_rows[key]
-        changed_fields = [
-            f for f in header
-            if new_row.get(f, "").strip() != old_row.get(f, "").strip()
-        ]
-        if not changed_fields:
+        new_row = new_rows[key]
+        changed = [f for f in header if new_row.get(f, "").strip() != old_row.get(f, "").strip()]
+        if not changed:
             continue
 
-        name = new_row.get("Name", key.split("|||")[1])
-
-        # Group by what changed for a nicer title
-        if len(changed_fields) == 1:
-            title = f"Updated {changed_fields[0]}: {name}"
-        else:
-            title = f"Updated Entry: {name}"
-
-        notes = new_row.get("Notes", "")
-        embed = discord.Embed(title=title, description=notes if "Notes" not in changed_fields else None, color=0x5865F2)
+        name = _display_name(new_row)
+        title = f"Updated {changed[0]}: {name}" if len(changed) == 1 else f"Updated Entry: {name}"
+        notes = new_row.get("Notes", "").strip()
+        embed = discord.Embed(
+            title=title,
+            description=notes if "Notes" not in changed else None,
+            color=0x5865F2,
+        )
         embed.set_author(name="Info", icon_url="https://media.discordapp.net/attachments/1009493700738555966/1262676377157505076/OMEGA_QUESTIONN.png")
-
-        for field in changed_fields:
+        for field in changed:
             old_val = _truncate(old_row.get(field, "").strip() or "None", field)
             new_val = _truncate(new_row.get(field, "").strip() or "None", field)
             embed.add_field(name=f"Old {field}", value=old_val, inline=False)
             embed.add_field(name=f"New {field}", value=new_val, inline=True)
-
         embed.set_footer(text=friendly_name)
         embeds.append(embed)
 
     return embeds
 
 
-async def _fetch_sheet_async(sheet_name: str, api_key: str) -> list[list[str]] | None:
+async def _fetch_sheet_async(sheet_name: str, api_key: str) -> list | None:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _fetch_sheet, sheet_name, api_key)
 
 
 def setup(bot):
     cfg = _load_config()
-    snapshot = _load_snapshot()
 
     @bot.tree.command(name="tracker_setup", description="[Owner only] Configure tracker update posting")
     @app_commands.describe(
@@ -252,7 +229,6 @@ def setup(bot):
 
         nonlocal cfg
         updated = []
-
         if channel:
             cfg["channel_id"] = channel.id
             updated.append(f"Channel: {channel.mention}")
@@ -275,7 +251,7 @@ def setup(bot):
                 ephemeral=True,
             )
 
-    @bot.tree.command(name="tracker_snapshot", description="[Owner only] Reset the tracker snapshot (next poll will re-baseline, no diff posted)")
+    @bot.tree.command(name="tracker_snapshot", description="[Owner only] Reset the tracker snapshot (re-baselines, no diff posted)")
     async def tracker_snapshot_cmd(interaction: discord.Interaction):
         from mod_core import is_owner
         if not is_owner(interaction.user):
@@ -283,28 +259,29 @@ def setup(bot):
             return
 
         await interaction.response.defer(thinking=True, ephemeral=True)
-        nonlocal snapshot, cfg
-        new_snap = {}
+        nonlocal cfg
+        cfg = _load_config()
         key = cfg.get("api_key", "")
         if not key:
             await interaction.followup.send("No API key configured.", ephemeral=True)
             return
 
+        new_snap = {}
         for sheet_name in SHEETS:
             raw = await _fetch_sheet_async(sheet_name, key)
             if raw is None:
                 continue
-            header, rows = _sheet_to_rows(raw)
+            _, rows = _sheet_to_indexed_rows(raw)
             new_snap[sheet_name] = rows
 
-        snapshot = new_snap
-        _save_snapshot(snapshot)
+        _save_snapshot(new_snap)
         bot.logger.log(MODULE_NAME, "Snapshot reset manually")
-        await interaction.followup.send(f"Snapshot reset across {len(new_snap)} sheets. Next poll will baseline from current state.", ephemeral=True)
+        await interaction.followup.send(f"Snapshot reset across {len(new_snap)} sheets.", ephemeral=True)
 
     @tasks.loop(minutes=cfg.get("poll_interval_minutes", 5))
     async def poll_task():
-        nonlocal snapshot, cfg
+        nonlocal cfg
+        cfg = _load_config()
         api_key = cfg.get("api_key", "")
         channel_id = cfg.get("channel_id", 0)
 
@@ -314,6 +291,10 @@ def setup(bot):
         channel = bot.get_channel(channel_id)
         if not channel:
             return
+
+        # Always load snapshot fresh from disk — survives hot-reloads
+        snapshot = _load_snapshot()
+        changed = False
 
         for sheet_name, friendly_name in SHEETS.items():
             try:
@@ -325,25 +306,25 @@ def setup(bot):
                         NetworkState.suppress()
                     continue
 
-                header, new_rows = _sheet_to_rows(raw)
-                old_rows = snapshot.get(sheet_name, {})
+                header, new_rows = _sheet_to_indexed_rows(raw)
+                old_rows = snapshot.get(sheet_name)
 
-                # First run — just baseline, don't post
-                if sheet_name not in snapshot:
+                if old_rows is None:
                     snapshot[sheet_name] = new_rows
+                    changed = True
                     bot.logger.log(MODULE_NAME, f"Baselined {sheet_name} ({len(new_rows)} rows)")
                     continue
 
-                if _hash_snapshot(new_rows) == _hash_snapshot(old_rows):
+                if _hash_rows(new_rows) == _hash_rows(old_rows):
                     continue
 
-                embeds = _build_embeds(sheet_name, header, old_rows, new_rows, friendly_name)
-
+                embeds = _build_embeds(header, old_rows, new_rows, friendly_name)
                 for embed in embeds:
                     await channel.send(embed=embed)
                     await asyncio.sleep(0.5)
 
                 snapshot[sheet_name] = new_rows
+                changed = True
 
                 if embeds:
                     bot.logger.log(MODULE_NAME, f"{sheet_name}: posted {len(embeds)} update(s)")
@@ -351,7 +332,8 @@ def setup(bot):
             except Exception as e:
                 bot.logger.error(MODULE_NAME, f"Error processing sheet {sheet_name}", e)
 
-        _save_snapshot(snapshot)
+        if changed:
+            _save_snapshot(snapshot)
 
     @poll_task.before_loop
     async def before_poll():

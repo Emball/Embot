@@ -41,7 +41,10 @@ CONFIG_DEFAULTS = {
 }
 
 CONFIG_PATH = script_dir() / "config" / "tracker.json"
-SNAPSHOT_PATH = script_dir() / "config" / "tracker_snapshot.json"
+
+# In-memory snapshot — intentionally not persisted to disk.
+# On every startup/reload the first poll silently baselines all sheets.
+_snapshot: dict = {}
 
 
 def _load_config() -> dict:
@@ -60,20 +63,6 @@ def _load_config() -> dict:
 
 def _save_config(cfg: dict):
     atomic_json_write(str(CONFIG_PATH), cfg)
-
-
-def _load_snapshot() -> dict:
-    if SNAPSHOT_PATH.exists():
-        try:
-            with open(SNAPSHOT_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-
-def _save_snapshot(snap: dict):
-    atomic_json_write(str(SNAPSHOT_PATH), snap)
 
 
 def _fetch_sheet(sheet_name: str, api_key: str) -> list | None:
@@ -112,50 +101,35 @@ def _truncate(val: str, field: str) -> str:
     return val
 
 
-def _row_key(row_dict: dict, idx: int) -> str:
-    """
-    Stable identity key: Era|||Name. Falls back to including the index only when
-    Era+Name would be empty (malformed row), making collisions impossible in practice.
-    """
-    era = row_dict.get("Era", "").strip()
-    name = row_dict.get("Name", "").strip()
-    base = f"{era}|||{name}"
-    if not era and not name:
-        base = f"__row_{idx}"
-    return base
-
-
-def _make_unique_key(base: str, seen: dict) -> str:
-    """Append a counter suffix if the same Era|||Name appears more than once."""
-    if base not in seen:
-        seen[base] = 0
-        return base
-    seen[base] += 1
-    return f"{base}__#{seen[base]}"
-
-
 def _sheet_to_keyed_rows(raw: list) -> tuple:
     """
     Returns (header, {key: row_dict}).
-    Key is Era|||Name (stable across row insertions/deletions).
-    Duplicate Era+Name combos get a __#N suffix so they don't clobber each other.
+    Key is Era|||Name — stable across row insertions/deletions.
+    Duplicate Era+Name combos get a __#N suffix.
     """
     if not raw:
         return [], {}
 
     header = [str(c).strip() for c in raw[0]]
     rows = {}
-    seen = {}
-    data_idx = 0
+    seen: dict = {}
+    fallback_idx = 0
 
     for raw_row in raw[1:]:
         if _is_section_header(raw_row):
             continue
         row_dict = _row_to_dict(raw_row, header)
-        base = _row_key(row_dict, data_idx)
-        key = _make_unique_key(base, seen)
+        era = row_dict.get("Era", "").strip()
+        name = row_dict.get("Name", "").strip()
+        base = f"{era}|||{name}" if (era or name) else f"__row_{fallback_idx}"
+        fallback_idx += 1
+        if base not in seen:
+            seen[base] = 0
+            key = base
+        else:
+            seen[base] += 1
+            key = f"{base}__#{seen[base]}"
         rows[key] = row_dict
-        data_idx += 1
 
     return header, rows
 
@@ -170,7 +144,6 @@ def _display_name(row: dict) -> str:
 
 def _build_embeds(header, old_rows, new_rows, friendly_name) -> list:
     embeds = []
-
     old_keys = set(old_rows)
     new_keys = set(new_rows)
 
@@ -204,7 +177,6 @@ def _build_embeds(header, old_rows, new_rows, friendly_name) -> list:
         changed = [f for f in header if new_row.get(f, "").strip() != old_row.get(f, "").strip()]
         if not changed:
             continue
-
         name = _display_name(new_row)
         title = f"Updated {changed[0]}: {name}" if len(changed) == 1 else f"Updated Entry: {name}"
         notes = new_row.get("Notes", "").strip()
@@ -231,6 +203,8 @@ async def _fetch_sheet_async(sheet_name: str, api_key: str) -> list | None:
 
 
 def setup(bot):
+    global _snapshot
+    _snapshot = {}  # always start fresh — first poll baselines silently
     cfg = _load_config()
 
     @bot.tree.command(name="tracker_setup", description="[Owner only] Configure tracker update posting")
@@ -274,35 +248,20 @@ def setup(bot):
                 ephemeral=True,
             )
 
-    @bot.tree.command(name="tracker_snapshot", description="[Owner only] Reset the tracker snapshot (re-baselines, no diff posted)")
+    @bot.tree.command(name="tracker_snapshot", description="[Owner only] Force re-baseline the tracker (clears in-memory snapshot)")
     async def tracker_snapshot_cmd(interaction: discord.Interaction):
         from mod_core import is_owner
         if not is_owner(interaction.user):
             await interaction.response.send_message("Owner only.", ephemeral=True)
             return
-
-        await interaction.response.defer(thinking=True, ephemeral=True)
-        nonlocal cfg
-        cfg = _load_config()
-        key = cfg.get("api_key", "")
-        if not key:
-            await interaction.followup.send("No API key configured.", ephemeral=True)
-            return
-
-        new_snap = {}
-        for sheet_name in SHEETS:
-            raw = await _fetch_sheet_async(sheet_name, key)
-            if raw is None:
-                continue
-            _, rows = _sheet_to_keyed_rows(raw)
-            new_snap[sheet_name] = rows
-
-        _save_snapshot(new_snap)
-        bot.logger.log(MODULE_NAME, "Snapshot reset manually")
-        await interaction.followup.send(f"Snapshot reset across {len(new_snap)} sheets.", ephemeral=True)
+        global _snapshot
+        _snapshot = {}
+        bot.logger.log(MODULE_NAME, "Snapshot cleared manually — will re-baseline on next poll")
+        await interaction.response.send_message("Snapshot cleared. Will re-baseline silently on next poll.", ephemeral=True)
 
     @tasks.loop(minutes=cfg.get("poll_interval_minutes", 5))
     async def poll_task():
+        global _snapshot
         nonlocal cfg
         cfg = _load_config()
         api_key = cfg.get("api_key", "")
@@ -315,9 +274,6 @@ def setup(bot):
         if not channel:
             return
 
-        snapshot = _load_snapshot()
-        changed = False
-
         for sheet_name, friendly_name in SHEETS.items():
             try:
                 raw = await _fetch_sheet_async(sheet_name, api_key)
@@ -329,14 +285,13 @@ def setup(bot):
                     continue
 
                 header, new_rows = _sheet_to_keyed_rows(raw)
-                old_rows = snapshot.get(sheet_name)
 
-                if old_rows is None:
-                    snapshot[sheet_name] = new_rows
-                    changed = True
+                if sheet_name not in _snapshot:
+                    _snapshot[sheet_name] = new_rows
                     bot.logger.log(MODULE_NAME, f"Baselined {sheet_name} ({len(new_rows)} rows)")
                     continue
 
+                old_rows = _snapshot[sheet_name]
                 if _hash_rows(new_rows) == _hash_rows(old_rows):
                     continue
 
@@ -345,8 +300,7 @@ def setup(bot):
                     await channel.send(embed=embed)
                     await asyncio.sleep(0.5)
 
-                snapshot[sheet_name] = new_rows
-                changed = True
+                _snapshot[sheet_name] = new_rows
 
                 if embeds:
                     bot.logger.log(MODULE_NAME, f"{sheet_name}: posted {len(embeds)} update(s)")
@@ -354,33 +308,9 @@ def setup(bot):
             except Exception as e:
                 bot.logger.error(MODULE_NAME, f"Error processing sheet {sheet_name}", e)
 
-        if changed:
-            _save_snapshot(snapshot)
-
     @poll_task.before_loop
     async def before_poll():
         await bot.wait_until_ready()
-        await _auto_baseline()
-
-    async def _auto_baseline():
-        cfg = _load_config()
-        key = cfg.get("api_key", "")
-        if not key:
-            return
-        snapshot = _load_snapshot()
-        changed = False
-        for sheet_name in SHEETS:
-            if sheet_name in snapshot:
-                continue
-            raw = await _fetch_sheet_async(sheet_name, key)
-            if raw is None:
-                continue
-            _, rows = _sheet_to_keyed_rows(raw)
-            snapshot[sheet_name] = rows
-            changed = True
-            bot.logger.log(MODULE_NAME, f"Auto-baselined {sheet_name} ({len(rows)} rows)")
-        if changed:
-            _save_snapshot(snapshot)
 
     @tasks.loop(seconds=30)
     async def _sync_config():

@@ -14,15 +14,21 @@ SPREADSHEET_ID = "1x9tTOOqH5WpKOoptdQzABSN_x8oZbMgzIGlGH9w1IKA"
 
 # Sheets to monitor and their friendly names for embed footers
 SHEETS = {
-    "Unreleased":                   "Eminem Unreleased Tracker",
-    "Released":                     "Eminem Released Tracker",
-    "Stems":                        "Eminem Stems Tracker",
-    "Fakes":                        "Eminem Fakes Tracker",
-    "Misc (WIP)":                   "Eminem Misc (WIP) Tracker",
-    "Tracklists":                   "Eminem Tracklists Tracker",
-    "Remixes (WIP)":                "Eminem Remixes Tracker",
-    "Groupbuys":                    "Eminem Groupbuys Tracker",
-    "Unreleased (Production Projects": "Eminem Unreleased (Production) Tracker",
+    "Unreleased": "Eminem Unreleased Tracker",
+    "Released": "Eminem Released Tracker",
+    "Stems": "Eminem Stems Tracker",
+    "Fakes": "Eminem Fakes Tracker",
+    "Misc (WIP)": "Eminem Misc (WIP) Tracker",
+    "Tracklists": "Eminem Tracklists Tracker",
+    "Remixes (WIP)": "Eminem Remixes Tracker",
+    "Groupbuys": "Eminem Groupbuys Tracker",
+    "Unreleased (Production Projects) [Archived]": "Eminem Unreleased (Production) Tracker",
+    "Recent": "Eminem Recent Tracker",
+    "🏆 Grails  🥇 Wanted": "Eminem Grails Tracker",
+    "⭐ Best Of (Unreleased)": "Eminem Best Of Tracker",
+    "✨ Special": "Eminem Special Tracker",
+    "🗑️ Worst Of (Unreleased)": "Eminem Worst Of Tracker",
+    "💿 Samples (WIP)": "Eminem Samples Tracker",
 }
 
 # Columns that are too long/noisy to show full diffs for — truncate them

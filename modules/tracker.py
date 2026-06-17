@@ -16,19 +16,20 @@ SPREADSHEET_ID = "1x9tTOOqH5WpKOoptdQzABSN_x8oZbMgzIGlGH9w1IKA"
 SHEETS = {
     "Unreleased": "Eminem Unreleased Tracker",
     "Released": "Eminem Released Tracker",
-    "Stems": "Eminem Stems Tracker",
-    "Fakes": "Eminem Fakes Tracker",
-    "Misc (WIP)": "Eminem Misc (WIP) Tracker",
-    "Tracklists": "Eminem Tracklists Tracker",
-    "Remixes (WIP)": "Eminem Remixes Tracker",
-    "Groupbuys": "Eminem Groupbuys Tracker",
-    "Unreleased (Production Projects) [Archived]": "Eminem Unreleased (Production) Tracker",
     "Recent": "Eminem Recent Tracker",
-    "🏆 Grails  🥇 Wanted": "Eminem Grails Tracker",
+    "🏆 Grails / 🥇 Wanted": "Eminem Grails Tracker",
     "⭐ Best Of (Unreleased)": "Eminem Best Of Tracker",
     "✨ Special": "Eminem Special Tracker",
     "🗑️ Worst Of (Unreleased)": "Eminem Worst Of Tracker",
+    "Misc (WIP)": "Eminem Misc (WIP) Tracker",
+    "Tracklists": "Eminem Tracklists Tracker",
+    "Stems": "Eminem Stems Tracker",
+    "Art": "Eminem Art Tracker",
+    "Remixes (WIP)": "Eminem Remixes Tracker",
+    "Groupbuys": "Eminem Groupbuys Tracker",
     "💿 Samples (WIP)": "Eminem Samples Tracker",
+    "Fakes": "Eminem Fakes Tracker",
+    "Unreleased (Production Projects) [Archived]": "Eminem Unreleased (Production) Tracker",
 }
 
 # Columns that are too long/noisy to show full diffs for — truncate them

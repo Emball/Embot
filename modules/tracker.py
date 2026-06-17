@@ -263,7 +263,7 @@ def setup(bot):
     async def poll_task():
         global _snapshot
         nonlocal cfg
-        if is_killswitch_active(bot):
+        if is_killswitch_active(bot, "tracker"):
             return
         cfg = _load_config()
         api_key = cfg.get("api_key", "")

@@ -646,15 +646,41 @@ async def slash_dbquery(interaction: discord.Interaction, name: str, query: str)
     await _send_inline_or_file(interaction, text, "query.txt", f"{len(rows)} row(s)")
     bot.logger.log("MAIN", f"/dbquery {name} used by {interaction.user}")
 
-def _killswitch_is_active() -> bool:
-    cfg = load_config()
-    return cfg.get("killswitch", False)
+# Killswitch helpers
+# embot.json stores: killswitch_halted = ["all"] or ["tracker", "vms", ...] or []
+# Families: mod, vms, music — collapse their sub-modules into one target name.
+# Standalones: any module without a _ prefix family (tracker, youtube, etc.)
 
-def _killswitch_set(active: bool):
+_KS_FAMILIES = {
+    "mod":   {"mod_core", "mod_suspicion", "mod_actions", "mod_appeals", "mod_oversight", "mod_rules", "mod_notes", "mod_logger"},
+    "vms":   {"vms_core", "vms_transcribe", "vms_storage", "vms_playback"},
+    "music": {"music_archive", "music_player", "music_browser"},
+}
+_KS_STANDALONES = ["info", "remote_debug", "community", "starboard", "youtube", "links", "icons", "artwork", "magic_emball", "tracker"]
+_KS_ALL_TARGETS = ["all"] + sorted(_KS_FAMILIES.keys()) + sorted(_KS_STANDALONES)
+
+def _ks_load() -> list:
+    try:
+        cfg = load_config()
+        return cfg.get("killswitch_halted", [])
+    except Exception:
+        return []
+
+def _ks_save(halted: list):
     cfg = load_config()
-    cfg["killswitch"] = active
+    cfg["killswitch_halted"] = halted
     with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
+
+def _killswitch_is_active() -> bool:
+    return bool(_ks_load())
+
+def _ks_target_to_modules(target: str) -> set:
+    if target == "all":
+        return {m for ms in _KS_FAMILIES.values() for m in ms} | set(_KS_STANDALONES)
+    if target in _KS_FAMILIES:
+        return set(_KS_FAMILIES[target])
+    return {target}
 
 @bot.tree.command(name="restart", description="[Owner only] Restart the bot")
 async def slash_restart(interaction: discord.Interaction):
@@ -666,22 +692,49 @@ async def slash_restart(interaction: discord.Interaction):
     bot.logger.log("MAIN", f"/restart used by {interaction.user}")
     await _restart_async(bot)
 
-@bot.tree.command(name="killswitch", description="[Mod/Admin/Owner] Halt all module activity, or re-enable if halted")
-async def slash_killswitch(interaction: discord.Interaction):
+@bot.tree.command(name="killswitch", description="[Mod/Admin/Owner] Halt or resume a module (or all). Run again to toggle off.")
+@app_commands.describe(target="Module or family to toggle. Omit for status.")
+@app_commands.autocomplete(target=lambda interaction, current: [
+    app_commands.Choice(name=t, value=t)
+    for t in _KS_ALL_TARGETS if current.lower() in t.lower()
+][:25])
+async def slash_killswitch(interaction: discord.Interaction, target: str = None):
     from mod_core import has_elevated_role, _cfg as mod_cfg
     if not has_elevated_role(interaction.user, mod_cfg):
         return await interaction.response.send_message("Mods and above only.", ephemeral=True)
 
-    if _killswitch_is_active():
-        _killswitch_set(False)
-        bot.logger.log("MAIN", f"Kill switch DEACTIVATED by {interaction.user} — restarting")
-        await interaction.response.send_message("Kill switch deactivated — restarting now.", ephemeral=True)
-        await _restart_async(bot)
+    halted = _ks_load()
+
+    # Status report if no target given
+    if target is None:
+        if not halted:
+            return await interaction.response.send_message("✅ No kill switches active.", ephemeral=True)
+        return await interaction.response.send_message(f"⛔ Currently halted: `{'`, `'.join(halted)}`\nRun `/killswitch <target>` to toggle one off.", ephemeral=True)
+
+    if target not in _KS_ALL_TARGETS:
+        return await interaction.response.send_message(f"Unknown target `{target}`. Use autocomplete to pick a valid option.", ephemeral=True)
+
+    if target in halted:
+        # Toggle off
+        halted.remove(target)
+        _ks_save(halted)
+        needs_restart = not halted  # full restart only when clearing everything
+        log_msg = f"Kill switch CLEARED for `{target}` by {interaction.user}"
+        bot.logger.log("MAIN", log_msg)
+        if needs_restart:
+            await interaction.response.send_message(f"✅ `{target}` resumed — restarting now.", ephemeral=True)
+            await _restart_async(bot)
+        else:
+            remaining = f" Still halted: `{'`, `'.join(halted)}`" if halted else ""
+            await interaction.response.send_message(f"✅ `{target}` resumed.{remaining}", ephemeral=True)
     else:
-        _killswitch_set(True)
-        bot.logger.log("MAIN", f"Kill switch ACTIVATED by {interaction.user} — all module activity halted", "WARNING")
+        # Toggle on
+        halted.append(target)
+        _ks_save(halted)
+        desc = "all modules" if target == "all" else f"`{target}`"
+        bot.logger.log("MAIN", f"Kill switch ACTIVATED for {desc} by {interaction.user}", "WARNING")
         await interaction.response.send_message(
-            "⛔ Kill switch activated. All module activity halted.\nRun `/killswitch` again to deactivate and restart.",
+            f"⛔ `{target}` halted. Run `/killswitch {target}` again to resume.",
             ephemeral=False,
         )
 
@@ -1367,6 +1420,12 @@ def run_bot(token):
     global bot, _cfg, args, data_dir, script_dir
 
     bot.config = _cfg
+
+    # Migrate old killswitch bool to killswitch_halted list
+    if "killswitch" in _cfg:
+        _cfg["killswitch_halted"] = ["all"] if _cfg.pop("killswitch") else []
+        with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(_cfg, f, indent=2)
 
     home_guild_id = int(_cfg.get("home_guild_id") or 0)
     if not home_guild_id:

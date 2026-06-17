@@ -112,14 +112,36 @@ def script_dir() -> Path:
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
-def is_killswitch_active(bot) -> bool:
-    """Returns True if the kill switch is active. Reads from embot.json so it survives restarts."""
+_KS_FAMILIES = {
+    "mod":   {"mod_core", "mod_suspicion", "mod_actions", "mod_appeals", "mod_oversight", "mod_rules", "mod_notes", "mod_logger"},
+    "vms":   {"vms_core", "vms_transcribe", "vms_storage", "vms_playback"},
+    "music": {"music_archive", "music_player", "music_browser"},
+}
+
+def is_killswitch_active(bot, module: str = None) -> bool:
+    """
+    Returns True if activity should be halted for the given module.
+    Pass module=__name__ from any module. Omit for global check.
+    Reads from embot.json so it survives restarts.
+    """
     try:
         cfg_path = script_dir() / "config" / "embot.json"
-        if cfg_path.exists():
-            import json as _json
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                return bool(_json.load(f).get("killswitch", False))
+        if not cfg_path.exists():
+            return False
+        import json as _json
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            halted = _json.load(f).get("killswitch_halted", [])
+        if not halted:
+            return False
+        if "all" in halted:
+            return True
+        if module is None:
+            return True  # global check: something is halted
+        # Check if module's family is halted
+        for family, members in _KS_FAMILIES.items():
+            if module in members and family in halted:
+                return True
+        # Check direct name
+        return module in halted
     except Exception:
-        pass
-    return False
+        return False

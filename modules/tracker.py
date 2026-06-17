@@ -338,6 +338,27 @@ def setup(bot):
     @poll_task.before_loop
     async def before_poll():
         await bot.wait_until_ready()
+        await _auto_baseline()
+
+    async def _auto_baseline():
+        cfg = _load_config()
+        key = cfg.get("api_key", "")
+        if not key:
+            return
+        snapshot = _load_snapshot()
+        changed = False
+        for sheet_name in SHEETS:
+            if sheet_name in snapshot:
+                continue
+            raw = await _fetch_sheet_async(sheet_name, key)
+            if raw is None:
+                continue
+            _, rows = _sheet_to_indexed_rows(raw)
+            snapshot[sheet_name] = rows
+            changed = True
+            bot.logger.log(MODULE_NAME, f"Auto-baselined {sheet_name} ({len(rows)} rows)")
+        if changed:
+            _save_snapshot(snapshot)
 
     @tasks.loop(seconds=30)
     async def _sync_config():

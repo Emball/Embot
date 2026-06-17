@@ -113,5 +113,13 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 def is_killswitch_active(bot) -> bool:
-    """Returns True if the kill switch has been activated. All module loops should check this and return early."""
-    return getattr(bot, "killswitch_active", False)
+    """Returns True if the kill switch is active. Reads from embot.json so it survives restarts."""
+    try:
+        cfg_path = script_dir() / "config" / "embot.json"
+        if cfg_path.exists():
+            import json as _json
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                return bool(_json.load(f).get("killswitch", False))
+    except Exception:
+        pass
+    return False

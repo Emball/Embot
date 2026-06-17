@@ -467,6 +467,9 @@ async def _auto_update_loop(bot):
     await asyncio.sleep(interval)
     while not bot.is_closed():
         try:
+            if _killswitch_is_active():
+                await asyncio.sleep(interval)
+                continue
             if await _check_for_update(bot):
                 bot.logger.log("AUTO-UPDATE", "Update pulled — restarting...")
                 await _restart_async(bot)
@@ -478,6 +481,9 @@ async def _auto_update_loop(bot):
 async def update_cmd(interaction: discord.Interaction):
     if not _is_guild_owner(interaction):
         await interaction.response.send_message("Owner only.", ephemeral=True)
+        return
+    if _killswitch_is_active():
+        await interaction.response.send_message("⛔ Kill switch is active. Deactivate it with `/killswitch` first.", ephemeral=True)
         return
     await interaction.response.send_message("Checking for updates...", ephemeral=True)
     if not _ensure_git_for_update(bot, bot.logger):
@@ -640,27 +646,39 @@ async def slash_dbquery(interaction: discord.Interaction, name: str, query: str)
     await _send_inline_or_file(interaction, text, "query.txt", f"{len(rows)} row(s)")
     bot.logger.log("MAIN", f"/dbquery {name} used by {interaction.user}")
 
+def _killswitch_is_active() -> bool:
+    cfg = load_config()
+    return cfg.get("killswitch", False)
+
+def _killswitch_set(active: bool):
+    cfg = load_config()
+    cfg["killswitch"] = active
+    with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+
 @bot.tree.command(name="restart", description="[Owner only] Restart the bot")
 async def slash_restart(interaction: discord.Interaction):
     if not _is_guild_owner(interaction):
         return await interaction.response.send_message("Server owner only.", ephemeral=True)
+    if _killswitch_is_active():
+        return await interaction.response.send_message("⛔ Kill switch is active. Deactivate it with `/killswitch` first.", ephemeral=True)
     await interaction.response.send_message("Restarting...", ephemeral=True)
     bot.logger.log("MAIN", f"/restart used by {interaction.user}")
     await _restart_async(bot)
 
-@bot.tree.command(name="killswitch", description="[Mod/Admin/Owner] Halt all module activity and restart, or re-enable if halted")
+@bot.tree.command(name="killswitch", description="[Mod/Admin/Owner] Halt all module activity, or re-enable if halted")
 async def slash_killswitch(interaction: discord.Interaction):
     from mod_core import has_elevated_role, _cfg as mod_cfg
     if not has_elevated_role(interaction.user, mod_cfg):
         return await interaction.response.send_message("Mods and above only.", ephemeral=True)
 
-    if getattr(bot, "killswitch_active", False):
-        bot.killswitch_active = False
+    if _killswitch_is_active():
+        _killswitch_set(False)
         bot.logger.log("MAIN", f"Kill switch DEACTIVATED by {interaction.user} — restarting")
         await interaction.response.send_message("Kill switch deactivated — restarting now.", ephemeral=True)
         await _restart_async(bot)
     else:
-        bot.killswitch_active = True
+        _killswitch_set(True)
         bot.logger.log("MAIN", f"Kill switch ACTIVATED by {interaction.user} — all module activity halted", "WARNING")
         await interaction.response.send_message(
             "⛔ Kill switch activated. All module activity halted.\nRun `/killswitch` again to deactivate and restart.",

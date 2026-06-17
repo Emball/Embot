@@ -239,7 +239,7 @@ def setup(bot):
         poll_interval: int = None,
     ):
         from mod_core import is_owner
-        if not await is_owner(interaction):
+        if not is_owner(interaction.user):
             await interaction.response.send_message("Owner only.", ephemeral=True)
             return
 
@@ -271,7 +271,7 @@ def setup(bot):
     @bot.tree.command(name="tracker_snapshot", description="[Owner only] Reset the tracker snapshot (next poll will re-baseline, no diff posted)")
     async def tracker_snapshot_cmd(interaction: discord.Interaction):
         from mod_core import is_owner
-        if not await is_owner(interaction):
+        if not is_owner(interaction.user):
             await interaction.response.send_message("Owner only.", ephemeral=True)
             return
 

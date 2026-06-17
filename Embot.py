@@ -1072,10 +1072,13 @@ async def reload_module(name: str) -> tuple[bool, str]:
             if not hasattr(bot, '_module_commands'):
                 bot._module_commands = {}
             bot._module_commands[name] = new_commands
-            guild = bot.get_guild(bot.home_guild_id)
-            await bot.tree.sync(guild=guild)
-            await bot.tree.sync()
-            bot.logger.log("MAIN", f"Reloaded {name} — synced {len(new_commands)} new command(s)")
+            if bot.application_id:
+                guild = bot.get_guild(bot.home_guild_id)
+                await bot.tree.sync(guild=guild)
+                await bot.tree.sync()
+                bot.logger.log("MAIN", f"Reloaded {name} — synced {len(new_commands)} new command(s)")
+            else:
+                bot.logger.log("MAIN", f"Reloaded {name} — {len(new_commands)} new command(s) pending sync (not ready yet)", "WARNING")
         else:
             bot.logger.log("MAIN", f"Reloaded {name}")
 

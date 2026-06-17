@@ -242,6 +242,7 @@ def load_modules():
         "icons",
         "artwork",
         "magic_emball",
+        "tracker",
     ]
     # Any modules present on disk but not in _MODULE_ORDER are appended at the end.
     _known = set(_MODULE_ORDER)

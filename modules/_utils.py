@@ -111,3 +111,7 @@ def script_dir() -> Path:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+def is_killswitch_active(bot) -> bool:
+    """Returns True if the kill switch has been activated. All module loops should check this and return early."""
+    return getattr(bot, "killswitch_active", False)

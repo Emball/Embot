@@ -648,6 +648,25 @@ async def slash_restart(interaction: discord.Interaction):
     bot.logger.log("MAIN", f"/restart used by {interaction.user}")
     await _restart_async(bot)
 
+@bot.tree.command(name="killswitch", description="[Mod/Admin/Owner] Halt all module activity and restart, or re-enable if halted")
+async def slash_killswitch(interaction: discord.Interaction):
+    from mod_core import has_elevated_role, _cfg as mod_cfg
+    if not has_elevated_role(interaction.user, mod_cfg):
+        return await interaction.response.send_message("Mods and above only.", ephemeral=True)
+
+    if getattr(bot, "killswitch_active", False):
+        bot.killswitch_active = False
+        bot.logger.log("MAIN", f"Kill switch DEACTIVATED by {interaction.user} — restarting")
+        await interaction.response.send_message("Kill switch deactivated — restarting now.", ephemeral=True)
+        await _restart_async(bot)
+    else:
+        bot.killswitch_active = True
+        bot.logger.log("MAIN", f"Kill switch ACTIVATED by {interaction.user} — all module activity halted", "WARNING")
+        await interaction.response.send_message(
+            "⛔ Kill switch activated. All module activity halted.\nRun `/killswitch` again to deactivate and restart.",
+            ephemeral=False,
+        )
+
 @bot.tree.command(name="reload", description="[Owner only] Hot-reload a module without restarting")
 @app_commands.describe(module="Module name to reload (e.g. mod_logger)")
 async def slash_reload(interaction: discord.Interaction, module: str):

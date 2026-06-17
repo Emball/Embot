@@ -6,7 +6,7 @@ import urllib.parse
 import discord
 from discord import app_commands
 from discord.ext import tasks
-from _utils import script_dir, atomic_json_write, NetworkState
+from _utils import script_dir, atomic_json_write, NetworkState, is_killswitch_active
 
 MODULE_NAME = "TRACKER"
 
@@ -263,6 +263,8 @@ def setup(bot):
     async def poll_task():
         global _snapshot
         nonlocal cfg
+        if is_killswitch_active(bot):
+            return
         cfg = _load_config()
         api_key = cfg.get("api_key", "")
         channel_id = cfg.get("channel_id", 0)

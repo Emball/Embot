@@ -692,14 +692,14 @@ async def slash_restart(interaction: discord.Interaction):
     bot.logger.log("MAIN", f"/restart used by {interaction.user}")
     await _restart_async(bot)
 
-@bot.tree.command(name="killswitch", description="[Mod/Admin/Owner] Halt or resume a module (or all). Run again to toggle off.")
-@app_commands.describe(target="Module or family to toggle. Omit for status.")
 async def _ks_autocomplete(interaction: discord.Interaction, current: str):
     return [
         app_commands.Choice(name=t, value=t)
         for t in _KS_ALL_TARGETS if current.lower() in t.lower()
     ][:25]
 
+@bot.tree.command(name="killswitch", description="[Mod/Admin/Owner] Halt or resume a module (or all). Run again to toggle off.")
+@app_commands.describe(target="Module or family to toggle. Omit for status.")
 @app_commands.autocomplete(target=_ks_autocomplete)
 async def slash_killswitch(interaction: discord.Interaction, target: str = None):
     from mod_core import has_elevated_role, _cfg as mod_cfg

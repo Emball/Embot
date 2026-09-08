@@ -22,16 +22,21 @@ if %errorlevel% neq 0 (
     set "PATH=%USERPROFILE%\.cargo\bin;%USERPROFILE%\.local\bin;%PATH%"
 )
 
-:: Install dependencies
+:: Create venv if missing
+if not exist "%SCRIPT_DIR%.venv" (
+    echo [start.bat] Creating virtual environment...
+    uv venv --python 3.11 "%SCRIPT_DIR%.venv"
+)
+
+:: Install dependencies into venv
 echo [start.bat] Installing dependencies...
-cd /d "%SCRIPT_DIR%"
-uv pip install --python 3.11 --system -r "%SCRIPT_DIR%requirements.txt"
+uv pip install --python "%SCRIPT_DIR%.venv\Scripts\python.exe" -r "%SCRIPT_DIR%requirements.txt"
 
 :: Restart loop
 echo [start.bat] Starting Embot (press Ctrl+C to stop)...
 
 :restart
-uv run --python 3.11 python "%SCRIPT_DIR%Embot.py" -dev
+"%SCRIPT_DIR%.venv\Scripts\python.exe" "%SCRIPT_DIR%Embot.py" -dev
 if %errorlevel% equ 42 (
     echo [start.bat] Auto-update completed, restarting immediately...
     goto restart

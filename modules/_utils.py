@@ -99,7 +99,11 @@ def migrate_config(path, defaults):
     existing: dict = {}
     if p.exists():
         with open(p, "r", encoding="utf-8") as f:
-            existing = json.load(f)
+            raw = f.read()
+        try:
+            existing = json.loads(raw)
+        except json.JSONDecodeError:
+            existing = json.loads(raw.replace("\\", "\\\\"))
 
     merged = {k: existing.get(k, v) for k, v in defaults.items()}
 

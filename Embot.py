@@ -246,9 +246,10 @@ def load_modules():
     ]
     # Any modules present on disk but not in _MODULE_ORDER are appended at the end.
     _known = set(_MODULE_ORDER)
+    _disabled = {"tracker"}  # permanently disabled modules
     _extras = sorted(
         f[:-3] for f in os.listdir(modules_dir)
-        if f.endswith('.py') and not f.startswith('_') and f[:-3] not in _known
+        if f.endswith('.py') and not f.startswith('_') and f[:-3] not in _known and f[:-3] not in _disabled
     )
     _load_sequence = _MODULE_ORDER + _extras
 

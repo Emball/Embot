@@ -242,7 +242,7 @@ def load_modules():
         "icons",
         "artwork",
         "magic_emball",
-        "tracker",
+        # "tracker",  # disabled — superseded by external bot
     ]
     # Any modules present on disk but not in _MODULE_ORDER are appended at the end.
     _known = set(_MODULE_ORDER)
@@ -656,7 +656,7 @@ _KS_FAMILIES = {
     "vms":   {"vms_core", "vms_transcribe", "vms_storage", "vms_playback"},
     "music": {"music_archive", "music_player", "music_browser"},
 }
-_KS_STANDALONES = ["info", "remote_debug", "community", "starboard", "youtube", "links", "icons", "artwork", "magic_emball", "tracker"]
+_KS_STANDALONES = ["info", "remote_debug", "community", "starboard", "youtube", "links", "icons", "artwork", "magic_emball"]
 _KS_ALL_TARGETS = ["all"] + sorted(_KS_FAMILIES.keys()) + sorted(_KS_STANDALONES)
 
 def _ks_load() -> list:

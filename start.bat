@@ -36,7 +36,7 @@ uv pip install --python "%SCRIPT_DIR%.venv\Scripts\python.exe" -r "%SCRIPT_DIR%r
 echo [start.bat] Starting Embot (press Ctrl+C to stop)...
 
 :restart
-"%SCRIPT_DIR%.venv\Scripts\python.exe" "%SCRIPT_DIR%Embot.py" -dev
+"%SCRIPT_DIR%.venv\Scripts\python.exe" "%SCRIPT_DIR%Embot.py"
 if %errorlevel% equ 42 (
     echo [start.bat] Auto-update completed, restarting immediately...
     goto restart

@@ -29,7 +29,7 @@ config/auth.json
 
 config/*.json
 
-start.sh
+
 
 .DS_Store
 Thumbs.db

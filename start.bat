@@ -25,7 +25,7 @@ if %errorlevel% neq 0 (
 :: Install dependencies
 echo [start.bat] Installing dependencies...
 cd /d "%SCRIPT_DIR%"
-uv pip install --python 3.11 -r "%SCRIPT_DIR%requirements.txt"
+uv pip install --python 3.11 --system -r "%SCRIPT_DIR%requirements.txt"
 
 :: Restart loop
 echo [start.bat] Starting Embot (press Ctrl+C to stop)...

@@ -29,7 +29,6 @@ config/auth.json
 
 config/*.json
 
-start.bat
 start.sh
 
 .DS_Store

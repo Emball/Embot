@@ -24,6 +24,7 @@ CONFIG_DEFAULTS = {
 TYPES = ["Remaster", "Edit", "Remaster & Edit"]
 SPONSOR_KINDS = ["Sponsored by", "Paid request by"]
 VOTE_EMOJIS = ["🔥", "😐", "🗑️"]
+TEXT_LIMIT = 4000
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS releases (
@@ -38,7 +39,7 @@ CREATE TABLE IF NOT EXISTS versions (
     release_id      TEXT NOT NULL REFERENCES releases(id),
     version         TEXT NOT NULL,
     type            TEXT NOT NULL,
-    note            TEXT,
+    description     TEXT,
     changelog       TEXT,
     sponsor_id      INTEGER,
     sponsor_kind    TEXT,
@@ -88,6 +89,8 @@ class ReleaseDB:
             cols = {r["name"] for r in c.execute("PRAGMA table_info(versions)")}
             if "orig_path" not in cols:
                 c.execute("ALTER TABLE versions ADD COLUMN orig_path TEXT")
+            if "note" in cols:
+                c.execute("ALTER TABLE versions RENAME COLUMN note TO description")
 
     def _conn(self) -> sqlite3.Connection:
         c = sqlite3.connect(str(self.path))
@@ -204,7 +207,7 @@ class ReleaseError(Exception):
 
 class Draft:
     def __init__(self, *, title, version, type_, ping, thread, voting, path: Path,
-                 original=None, sponsor=None, sponsor_kind=SPONSOR_KINDS[0], note=None):
+                 original=None, sponsor=None, sponsor_kind=SPONSOR_KINDS[0], description=None):
         self.title = title.strip()
         self.version = version.strip()
         self.type = type_
@@ -217,7 +220,7 @@ class Draft:
         self.original = original
         self.sponsor = sponsor
         self.sponsor_kind = sponsor_kind
-        self.note = (note or "").strip()
+        self.description = (description or "").strip()
         self.changelog = ""
 
 
@@ -226,7 +229,8 @@ def changelog_bullets(raw: str) -> str:
     return "\n".join(f"- {ln}" for ln in lines if ln)
 
 
-def post_items(d: Draft, vid: Optional[str] = None, role_mention: Optional[str] = None) -> list:
+def post_items(d: Draft, vid: Optional[str] = None, role_mention: Optional[str] = None,
+               preview: bool = False) -> list:
     items = []
     if role_mention:
         items.append(discord.ui.TextDisplay(role_mention))
@@ -234,31 +238,33 @@ def post_items(d: Draft, vid: Optional[str] = None, role_mention: Optional[str] 
     head = [f"## {d.title}", f"**{d.type}** · **{d.version}**"]
     if d.sponsor:
         head.append(f"-# {d.sponsor_kind} {d.sponsor.mention}")
-    if d.note:
-        head.append(f"\n{d.note}")
+    if d.description:
+        head.append(f"\n{d.description}")
     bullets = changelog_bullets(d.changelog)
     if bullets:
         head.append(f"\n{bullets}")
 
     children = [discord.ui.TextDisplay("\n".join(head))]
-    if vid:
+    if vid or preview:
+        vid = vid or "preview"
         buttons = [discord.ui.Button(style=discord.ButtonStyle.primary, label=f"Download {d.type}",
-                                     emoji="⬇️", custom_id=f"rel:dl:{vid}")]
+                                     emoji="⬇️", custom_id=f"rel:dl:{vid}", disabled=preview)]
         if d.original:
-            buttons.append(discord.ui.Button(style=discord.ButtonStyle.secondary,
+            buttons.append(discord.ui.Button(style=discord.ButtonStyle.secondary, disabled=preview,
                                              label="Download Original", custom_id=f"rel:orig:{vid}"))
         children += [discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
                      discord.ui.ActionRow(*buttons)]
-    hints = []
-    if d.voting:
-        hints.append("Vote with " + " ".join(VOTE_EMOJIS))
-    if d.thread:
-        hints.append("feedback goes in the thread")
-    if hints:
-        children += [discord.ui.Separator(spacing=discord.SeparatorSpacing.small, visible=False),
-                     discord.ui.TextDisplay("-# " + " · ".join(hints))]
     items.append(discord.ui.Container(*children, accent_color=0x1a1a2e))
     return items
+
+
+def text_length(items) -> int:
+    n = 0
+    for it in items:
+        if isinstance(it, discord.ui.TextDisplay):
+            n += len(it.content)
+        n += text_length(getattr(it, "children", None) or [])
+    return n
 
 
 def _mod_cfg(bot):
@@ -311,6 +317,9 @@ async def publish(bot, db: ReleaseDB, guild: discord.Guild, d: Draft):
     role = discord.utils.get(guild.roles, name=_role_name(bot)) if d.ping else None
     if d.ping and not role:
         raise ReleaseError(f"Role **{_role_name(bot)}** not found. Turn off `ping` or create it.")
+    over = text_length(post_items(d, "x", role.mention if role else None)) - TEXT_LIMIT
+    if over > 0:
+        raise ReleaseError(f"Description and changelog are {over} characters over Discord's limit.")
 
     cache_ch = await _ensure_cache_channel(bot, guild, cfg["cache_channel_name"])
     label = f"{d.title} — {d.version}"
@@ -321,7 +330,7 @@ async def publish(bot, db: ReleaseDB, guild: discord.Guild, d: Draft):
         stored.append(main_msg)
 
         row = dict(
-            id=vid, version=d.version, type=d.type, note=d.note or None,
+            id=vid, version=d.version, type=d.type, description=d.description or None,
             changelog=d.changelog or None,
             sponsor_id=d.sponsor.id if d.sponsor else None,
             sponsor_kind=d.sponsor_kind if d.sponsor else None,
@@ -368,18 +377,18 @@ async def publish(bot, db: ReleaseDB, guild: discord.Guild, d: Draft):
     return post, thread
 
 
-class ChangelogModal(discord.ui.Modal, title="Changelog"):
-    text = discord.ui.TextInput(label="Changes (one per line)", style=discord.TextStyle.paragraph,
-                                required=False, max_length=1500,
-                                placeholder="Compression restored\nMixed the vocals properly")
-
-    def __init__(self, view: "DraftView"):
-        super().__init__()
-        self.draft_view = view
-        self.text.default = view.d.changelog or None
+class EditModal(discord.ui.Modal):
+    def __init__(self, view: "DraftView", field: str, title: str, label: str,
+                 limit: int, placeholder: str = ""):
+        super().__init__(title=title)
+        self.draft_view, self.field = view, field
+        self.text = discord.ui.TextInput(label=label, style=discord.TextStyle.paragraph,
+                                         required=False, max_length=limit, placeholder=placeholder,
+                                         default=getattr(view.d, field) or None)
+        self.add_item(self.text)
 
     async def on_submit(self, interaction: discord.Interaction):
-        self.draft_view.d.changelog = str(self.text.value or "").strip()
+        setattr(self.draft_view.d, self.field, str(self.text.value or "").strip())
         self.draft_view.error = None
         self.draft_view.render()
         await interaction.response.edit_message(view=self.draft_view)
@@ -395,13 +404,15 @@ class DraftView(discord.ui.LayoutView):
 
     def render(self):
         self.clear_items()
-        for item in post_items(self.d):
+        for item in post_items(self.d, preview=True):
             self.add_item(item)
 
+        desc = discord.ui.Button(label="Edit description", style=discord.ButtonStyle.secondary)
         edit = discord.ui.Button(label="Edit changelog", style=discord.ButtonStyle.secondary)
         post = discord.ui.Button(label="Post", style=discord.ButtonStyle.success, disabled=self.busy)
         cancel = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.danger, disabled=self.busy)
-        edit.callback, post.callback, cancel.callback = self._edit, self._post, self._cancel
+        desc.callback, edit.callback = self._edit_description, self._edit_changelog
+        post.callback, cancel.callback = self._post, self._cancel
 
         flags = (f"ping {'on' if self.d.ping else 'off'} · thread {'on' if self.d.thread else 'off'} · "
                  f"voting {'on' if self.d.voting else 'off'}")
@@ -410,11 +421,14 @@ class DraftView(discord.ui.LayoutView):
                 else "No archive match, so no Original button")
         lines = ["-# Draft preview. Nothing is posted until you press Post.",
                  f"-# {flags} · {files}", f"-# {orig}"]
+        over = text_length(post_items(self.d, preview=True)) - TEXT_LIMIT
+        if over > 0:
+            lines.insert(0, f"**Too long:** {over} characters over Discord's 4000 limit. Trim the description or changelog.")
         if self.error:
             lines.insert(0, f"**Error:** {self.error}")
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("\n".join(lines)),
-            discord.ui.ActionRow(edit, post, cancel),
+            discord.ui.ActionRow(desc, edit, post, cancel),
             accent_color=0xe74c3c if self.error else 0x5865f2))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -423,8 +437,14 @@ class DraftView(discord.ui.LayoutView):
             return False
         return True
 
-    async def _edit(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(ChangelogModal(self))
+    async def _edit_description(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(EditModal(
+            self, "description", "Description", "Description (markdown supported)", 2600))
+
+    async def _edit_changelog(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(EditModal(
+            self, "changelog", "Changelog", "Changes (one per line)", 1200,
+            "Compression restored\nMixed the vocals properly"))
 
     async def _cancel(self, interaction: discord.Interaction):
         self.stop()
@@ -611,7 +631,6 @@ def setup(bot):
         voting="Enable reaction voting",
         sponsor="Member to credit",
         sponsor_kind="How to credit the sponsor",
-        note="One-line note shown under the title",
     )
     @app_commands.choices(
         type_=[app_commands.Choice(name=t, value=t) for t in TYPES],
@@ -621,7 +640,7 @@ def setup(bot):
                       version: Optional[str] = None, type_: str = TYPES[0],
                       ping: bool = True, thread: bool = True, voting: bool = True,
                       sponsor: Optional[discord.User] = None,
-                      sponsor_kind: str = SPONSOR_KINDS[0], note: Optional[str] = None):
+                      sponsor_kind: str = SPONSOR_KINDS[0]):
         if interaction.user.id != owner_id():
             await interaction.response.send_message("Owner only.", ephemeral=True)
             return
@@ -639,7 +658,7 @@ def setup(bot):
             return
         d = Draft(title=title, version=version or db.next_version_label(title), type_=type_,
                   ping=ping, thread=thread, voting=voting, path=p,
-                  original=find_original(bot, title), sponsor=sponsor, sponsor_kind=sponsor_kind, note=note)
+                  original=find_original(bot, title), sponsor=sponsor, sponsor_kind=sponsor_kind)
         bot.logger.log(MODULE_NAME, f"Draft started: {d.title!r} {d.version} ({d.type})")
         await interaction.response.send_message(
             view=DraftView(bot, db, guild, d, interaction.user.id), ephemeral=True)

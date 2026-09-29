@@ -1,6 +1,8 @@
 import asyncio
 import json
 import os
+import shutil
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -100,10 +102,21 @@ def migrate_config(path, defaults):
     if p.exists():
         with open(p, "r", encoding="utf-8") as f:
             raw = f.read()
-        try:
-            existing = json.loads(raw)
-        except json.JSONDecodeError:
-            existing = json.loads(raw.replace("\\", "\\\\"))
+        if not raw.strip():
+            print(f"[CONFIG] {p.name} is empty - using defaults", file=sys.stderr)
+        else:
+            try:
+                existing = json.loads(raw)
+            except json.JSONDecodeError:
+                try:
+                    existing = json.loads(raw.replace("\\", "\\\\"))
+                except json.JSONDecodeError as e:
+                    backup = p.with_name(p.name + ".corrupt")
+                    shutil.copy2(p, backup)
+                    print(f"[CONFIG] {p.name} is not valid JSON ({e}) - backed up to {backup.name}, using defaults", file=sys.stderr)
+        if not isinstance(existing, dict):
+            print(f"[CONFIG] {p.name} is not a JSON object - using defaults", file=sys.stderr)
+            existing = {}
 
     merged = {k: existing.get(k, v) for k, v in defaults.items()}
 

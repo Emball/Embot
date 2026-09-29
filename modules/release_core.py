@@ -1,11 +1,13 @@
 import asyncio
 import difflib
+import io
 import re
 import sqlite3
 import uuid
 from pathlib import Path
 from typing import Optional
 
+import aiohttp
 import discord
 from discord import app_commands
 
@@ -19,6 +21,7 @@ DB_PATH = script_dir() / "db" / "release.db"
 CONFIG_DEFAULTS = {
     "releases_channel_name": "emball-remasters",
     "cache_channel_name": "release-cache",
+    "preview_max_mb": 25,
 }
 
 TYPES = ["Remaster", "Edit", "Remaster & Edit"]
@@ -515,6 +518,38 @@ async def _log_delivery(bot, guild, user, title: str, version: str, name: str, w
         bot.logger.error(MODULE_NAME, "Failed to log delivery", e)
 
 
+async def _fetch_bytes(url: str, limit: int) -> Optional[bytes]:
+    timeout = aiohttp.ClientTimeout(total=120)
+    async with aiohttp.ClientSession(timeout=timeout) as sess:
+        async with sess.get(url) as r:
+            if r.status != 200:
+                return None
+            if r.content_length and r.content_length > limit:
+                return None
+            data = await r.read()
+            return data if len(data) <= limit else None
+
+
+async def _deliver(bot, interaction: discord.Interaction, name: str, url: str):
+    limit = int(load_config().get("preview_max_mb", 25)) * 1024 * 1024
+    try:
+        data = await _fetch_bytes(url, limit)
+        if data:
+            view = discord.ui.LayoutView(timeout=None)
+            view.add_item(discord.ui.Container(
+                discord.ui.TextDisplay(f"**{name}**"),
+                discord.ui.File(discord.File(io.BytesIO(data), filename=name)),
+                discord.ui.TextDisplay(f"-# [Direct download link]({url})"),
+                accent_color=0x2ecc71))
+            await interaction.followup.send(view=view, ephemeral=True)
+            bot.logger.log(MODULE_NAME, f"Sent playable preview of {name!r}")
+            return
+        bot.logger.log(MODULE_NAME, f"Preview skipped for {name!r} (over limit or fetch failed)", "WARNING")
+    except Exception as e:
+        bot.logger.error(MODULE_NAME, f"Preview upload failed for {name!r}", e)
+    await interaction.followup.send(f"[{name}]({url})", ephemeral=True)
+
+
 async def _handle_download(bot, db: ReleaseDB, interaction: discord.Interaction, which: str, vid: str):
     await interaction.response.defer(ephemeral=True, thinking=True)
     if is_killswitch_active(bot, "release_core") or is_fed(interaction.guild_id, interaction.user.id):
@@ -538,7 +573,7 @@ async def _handle_download(bot, db: ReleaseDB, interaction: discord.Interaction,
     if not url:
         await interaction.followup.send("Failed to retrieve file.", ephemeral=True)
         return
-    await interaction.followup.send(f"[{name}]({url})", ephemeral=True)
+    await _deliver(bot, interaction, name, url)
     bot.logger.log(MODULE_NAME, f"Delivered {name!r} to {interaction.user}")
     if interaction.guild:
         await _log_delivery(bot, interaction.guild, interaction.user, v["title"], v["version"], name, which)

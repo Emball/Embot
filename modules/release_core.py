@@ -21,7 +21,8 @@ CONFIG_DEFAULTS = {
     "releases_channel_name": "emball-remasters",
     "cache_channel_name": "release-cache",
     "preview_max_mb": 25,
-    "preview_mode": "attachment",
+    "preview_workers": 2,
+    "cache_category_name": "",
 }
 
 TYPES = ["Remaster", "Edit", "Remaster & Edit"]
@@ -252,8 +253,10 @@ def post_items(d: Draft, vid: Optional[str] = None, role_mention: Optional[str] 
     children = [discord.ui.TextDisplay("\n".join(head))]
     if vid or preview:
         vid = vid or "preview"
-        buttons = [discord.ui.Button(style=discord.ButtonStyle.primary, label=f"Download {d.type}",
-                                     emoji="⬇️", custom_id=f"rel:dl:{vid}", disabled=preview)]
+        buttons = [discord.ui.Button(style=discord.ButtonStyle.primary, label="Download File",
+                                     emoji="⬇️", custom_id=f"rel:dl:{vid}", disabled=preview),
+                   discord.ui.Button(style=discord.ButtonStyle.secondary, label="Preview",
+                                     emoji="▶️", custom_id=f"rel:pv:{vid}", disabled=preview)]
         if d.original:
             buttons.append(discord.ui.Button(style=discord.ButtonStyle.secondary, disabled=preview, emoji="💿",
                                              label="Download Original File", custom_id=f"rel:orig:{vid}"))
@@ -297,13 +300,20 @@ async def _ensure_cache_channel(bot, guild: discord.Guild, name: str) -> discord
     ch = discord.utils.get(guild.text_channels, name=name)
     if ch:
         return ch
+    cfg = load_config()
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
         guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True,
                                               attach_files=True, read_message_history=True),
     }
+    mc = _mod_cfg(bot)
+    owner = guild.get_member(mc.owner_id) if mc and mc.owner_id else None
+    if owner:
+        overwrites[owner] = discord.PermissionOverwrite(view_channel=True, read_message_history=True)
+    cat_name = cfg.get("cache_category_name") or ""
+    category = discord.utils.get(guild.categories, name=cat_name) if cat_name else None
     try:
-        ch = await guild.create_text_channel(name, overwrites=overwrites,
+        ch = await guild.create_text_channel(name, overwrites=overwrites, category=category,
                                              reason="Release file storage")
     except discord.Forbidden:
         raise ReleaseError(f"#{name} doesn't exist and I lack permission to create it.")
@@ -523,6 +533,8 @@ async def _log_delivery(bot, guild, user, title: str, version: str, name: str, w
 PREVIEW_DIR = script_dir() / "cache" / "release_preview"
 PREVIEW_TTL = 7 * 86400
 _preview_locks: dict = {}
+_waiting: list = []
+_sem: Optional[asyncio.Semaphore] = None
 
 
 async def _fetch_to_disk(url: str, dest: Path, limit: int) -> bool:
@@ -562,53 +574,89 @@ async def _cached_file(key: str, name: str, url: str, limit: int) -> Optional[Pa
     return dest
 
 
-async def _deliver(bot, interaction: discord.Interaction, key: str, name: str, url: str):
-    limit = int(load_config().get("preview_max_mb", 25)) * 1024 * 1024
+def _get_sem() -> asyncio.Semaphore:
+    global _sem
+    if _sem is None:
+        _sem = asyncio.Semaphore(max(1, int(load_config().get("preview_workers", 2))))
+    return _sem
+
+
+async def _set_status(bot, interaction: discord.Interaction, text: str):
     try:
-        path = await _cached_file(key, name, url, limit)
-        if path:
-            if load_config().get("preview_mode") == "v2file":
-                view = discord.ui.LayoutView(timeout=None)
-                view.add_item(discord.ui.Container(
-                    discord.ui.File(discord.File(str(path), filename=name)),
-                    discord.ui.TextDisplay(f"-# [Direct download link]({url})"), accent_color=0x2ecc71))
-                await interaction.followup.send(view=view, ephemeral=True)
-            else:
-                await interaction.followup.send(f"-# [Direct download link]({url})",
-                                                file=discord.File(str(path), filename=name), ephemeral=True)
-            bot.logger.log(MODULE_NAME, f"Sent playable preview of {name!r}")
-            return
-        bot.logger.log(MODULE_NAME, f"Preview skipped for {name!r} (over limit or fetch failed)", "WARNING")
+        await interaction.edit_original_response(content=text)
     except Exception as e:
-        bot.logger.error(MODULE_NAME, f"Preview upload failed for {name!r}", e)
-    await interaction.followup.send(f"[{name}]({url})", ephemeral=True)
+        bot.logger.log(MODULE_NAME, f"Status update failed: {e}", "WARNING")
+
+
+async def _refresh_queue(bot):
+    waiting = list(_waiting)
+    await asyncio.gather(*[
+        _set_status(bot, i, f"⏳ Preview queued: position {k} of {len(waiting)}")
+        for k, i in enumerate(waiting, 1)])
+
+
+async def _send_preview(bot, interaction: discord.Interaction, key: str, name: str, url: str) -> bool:
+    limit = int(load_config().get("preview_max_mb", 25)) * 1024 * 1024
+    sem = _get_sem()
+    if sem.locked():
+        _waiting.append(interaction)
+        await _refresh_queue(bot)
+    try:
+        async with sem:
+            if interaction in _waiting:
+                _waiting.remove(interaction)
+                asyncio.ensure_future(_refresh_queue(bot))
+            await _set_status(bot, interaction, "⬆️ Uploading your preview…")
+            path = await _cached_file(key, name, url, limit)
+            if path:
+                await interaction.edit_original_response(
+                    content=f"-# [Direct download link]({url})",
+                    attachments=[discord.File(str(path), filename=name)])
+                bot.logger.log(MODULE_NAME, f"Sent preview of {name!r}")
+                return True
+            bot.logger.log(MODULE_NAME, f"Preview skipped for {name!r} (over limit or fetch failed)", "WARNING")
+            await interaction.edit_original_response(
+                content=f"Too large to preview here. [Download {name}]({url})")
+            return True
+    except Exception as e:
+        bot.logger.error(MODULE_NAME, f"Preview failed for {name!r}", e)
+        return False
+    finally:
+        if interaction in _waiting:
+            _waiting.remove(interaction)
 
 
 async def _handle_download(bot, db: ReleaseDB, interaction: discord.Interaction, which: str, vid: str):
     await interaction.response.defer(ephemeral=True, thinking=True)
+    fail = "Failed to retrieve file."
     if is_killswitch_active(bot, "release_core") or is_fed(interaction.guild_id, interaction.user.id):
         bot.logger.log(MODULE_NAME, f"Download denied for {interaction.user} ({interaction.user.id})")
-        await interaction.followup.send("Failed to retrieve file.", ephemeral=True)
+        await interaction.edit_original_response(content=fail)
         return
     v = db.get_version(vid)
     if not v:
-        await interaction.followup.send("Failed to retrieve file.", ephemeral=True)
+        await interaction.edit_original_response(content=fail)
         return
     if which == "orig" and v["orig_path"]:
         from music_archive import _get_or_upload_cache, LARGE_FILE_MSG
         name = Path(v["orig_path"]).name
         url = await _get_or_upload_cache(bot, v["orig_path"])
         if url == "FILE_TOO_LARGE":
-            await interaction.followup.send(LARGE_FILE_MSG, ephemeral=True)
+            await interaction.edit_original_response(content=LARGE_FILE_MSG)
             return
     else:
         name = v["file_name"]
         url = await fresh_url(bot, v["file_ch_id"], v["file_msg_id"])
     if not url:
-        await interaction.followup.send("Failed to retrieve file.", ephemeral=True)
+        await interaction.edit_original_response(content=fail)
         return
-    await _deliver(bot, interaction, f"{which}-{vid}", name, url)
-    bot.logger.log(MODULE_NAME, f"Delivered {name!r} to {interaction.user}")
+    if which == "pv":
+        if not await _send_preview(bot, interaction, f"pv-{vid}", name, url):
+            await interaction.edit_original_response(content=fail)
+            return
+    else:
+        await interaction.edit_original_response(content=f"[{name}]({url})")
+    bot.logger.log(MODULE_NAME, f"Delivered {name!r} to {interaction.user} ({which})")
     if interaction.guild:
         await _log_delivery(bot, interaction.guild, interaction.user, v["title"], v["version"], name, which)
 

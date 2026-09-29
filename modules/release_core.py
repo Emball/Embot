@@ -32,6 +32,8 @@ TYPES = ["Remaster", "Edit", "Remaster & Edit"]
 SPONSOR_KINDS = ["Sponsored by", "Paid request by"]
 VOTE_EMOJIS = ["🔥", "😐", "🗑️"]
 TEXT_LIMIT = 4000
+STASH_ATTEMPTS = 3
+TRANSIENT_ERRORS = (aiohttp.ClientError, OSError, asyncio.TimeoutError, discord.DiscordServerError)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS releases (
@@ -294,9 +296,25 @@ async def _stash(bot, channel, path: Path, label: str, limit: int) -> discord.Me
         raise ReleaseError(
             f"`{path.name}` is {size / 1048576:.1f} MB; the server upload limit is "
             f"{limit / 1048576:.0f} MB.")
-    msg = await channel.send(content=label, file=discord.File(str(path), filename=path.name))
-    bot.logger.log(MODULE_NAME, f"Stored {path.name} ({size} bytes) in #{channel.name}")
-    return msg
+    last = None
+    for attempt in range(1, STASH_ATTEMPTS + 1):
+        try:
+            msg = await channel.send(content=label, file=discord.File(str(path), filename=path.name))
+            bot.logger.log(MODULE_NAME, f"Stored {path.name} ({size} bytes) in #{channel.name}")
+            return msg
+        except TRANSIENT_ERRORS as e:
+            last = e
+            bot.logger.log(MODULE_NAME, f"Upload attempt {attempt} failed: {type(e).__name__}: {e}", "WARNING")
+            try:
+                async for m in channel.history(limit=5):
+                    if (m.author.id == bot.user.id and m.content == label
+                            and any(a.filename == path.name for a in m.attachments)):
+                        bot.logger.log(MODULE_NAME, f"Upload had landed despite error, reusing message {m.id}")
+                        return m
+            except Exception:
+                pass
+            await asyncio.sleep(2 * attempt)
+    raise ReleaseError("Network error while uploading to Discord. Press Post to try again.") from last
 
 
 async def _ensure_cache_channel(bot, guild: discord.Guild, name: str) -> discord.TextChannel:
@@ -747,6 +765,16 @@ async def _remove_reaction(bot, channel_id: int, message_id: int, emoji, user_id
         bot.logger.log(MODULE_NAME, f"Could not remove reaction: {e}", "WARNING")
 
 
+async def _fail_reply(interaction: discord.Interaction):
+    try:
+        if interaction.response.is_done():
+            await interaction.edit_original_response(content="Failed to retrieve file.", attachments=[])
+        else:
+            await interaction.response.send_message("Failed to retrieve file.", ephemeral=True)
+    except Exception:
+        pass
+
+
 def register_listeners(bot, db: ReleaseDB, owner_id):
     @bot.listen("on_interaction")
     async def on_interaction(interaction: discord.Interaction):
@@ -755,18 +783,24 @@ def register_listeners(bot, db: ReleaseDB, owner_id):
         cid = (interaction.data or {}).get("custom_id", "")
         if not cid.startswith("rel:"):
             return
+        seen = bot.__dict__.setdefault("_release_seen", {})
+        if interaction.id in seen:
+            return
+        seen[interaction.id] = True
+        while len(seen) > 500:
+            seen.pop(next(iter(seen)))
         try:
             _, which, vid = cid.split(":", 2)
             await _handle_download(bot, db, interaction, which, vid)
+        except discord.HTTPException as e:
+            if e.code == 40060:
+                bot.logger.log(MODULE_NAME, f"Interaction {interaction.id} already acknowledged, ignoring", "WARNING")
+                return
+            bot.logger.error(MODULE_NAME, f"Download handler failed for {cid}", e)
+            await _fail_reply(interaction)
         except Exception as e:
             bot.logger.error(MODULE_NAME, f"Download handler failed for {cid}", e)
-            try:
-                if interaction.response.is_done():
-                    await interaction.followup.send("Failed to retrieve file.", ephemeral=True)
-                else:
-                    await interaction.response.send_message("Failed to retrieve file.", ephemeral=True)
-            except Exception:
-                pass
+            await _fail_reply(interaction)
 
     @bot.listen("on_raw_reaction_add")
     async def on_reaction_add(payload: discord.RawReactionActionEvent):

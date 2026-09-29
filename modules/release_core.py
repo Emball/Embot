@@ -1,4 +1,5 @@
 import asyncio
+import difflib
 import re
 import sqlite3
 import uuid
@@ -176,6 +177,25 @@ class ReleaseDB:
             rows = c.execute("SELECT emoji, COUNT(*) n FROM votes WHERE version_id=? GROUP BY emoji",
                              (vid,)).fetchall()
         return {r["emoji"]: r["n"] for r in rows}
+
+
+def find_original(bot, title: str) -> Optional[dict]:
+    idx = getattr(getattr(bot, "ARCHIVE_manager", None), "song_index", None)
+    if not idx:
+        return None
+    try:
+        from music_archive import normalize_title, select_best_candidate, FORMATS
+    except ImportError as e:
+        bot.logger.log(MODULE_NAME, f"Archive unavailable for original lookup: {e}", "WARNING")
+        return None
+    key = normalize_title(title)
+    for fmt in FORMATS:
+        songs = idx.get(fmt, {})
+        match = key if key in songs else next(iter(difflib.get_close_matches(key, songs, n=1, cutoff=0.85)), None)
+        cand = select_best_candidate(songs[match]) if match else None
+        if cand:
+            return cand
+    return None
 
 
 class ReleaseError(Exception):
@@ -386,7 +406,10 @@ class DraftView(discord.ui.LayoutView):
         flags = (f"ping {'on' if self.d.ping else 'off'} · thread {'on' if self.d.thread else 'off'} · "
                  f"voting {'on' if self.d.voting else 'off'}")
         files = f"`{self.d.filename}`"
-        lines = ["-# Draft preview. Nothing is posted until you press Post.", f"-# {flags} · {files}"]
+        orig = (f"Original: `{self.d.original['original_title']}`" if self.d.original
+                else "No archive match, so no Original button")
+        lines = ["-# Draft preview. Nothing is posted until you press Post.",
+                 f"-# {flags} · {files}", f"-# {orig}"]
         if self.error:
             lines.insert(0, f"**Error:** {self.error}")
         self.add_item(discord.ui.Container(
@@ -482,8 +505,16 @@ async def _handle_download(bot, db: ReleaseDB, interaction: discord.Interaction,
     if not v:
         await interaction.followup.send("Failed to retrieve file.", ephemeral=True)
         return
-    name = v["file_name"]
-    url = await fresh_url(bot, v["file_ch_id"], v["file_msg_id"])
+    if which == "orig" and v["orig_path"]:
+        from music_archive import _get_or_upload_cache, LARGE_FILE_MSG
+        name = Path(v["orig_path"]).name
+        url = await _get_or_upload_cache(bot, v["orig_path"])
+        if url == "FILE_TOO_LARGE":
+            await interaction.followup.send(LARGE_FILE_MSG, ephemeral=True)
+            return
+    else:
+        name = v["file_name"]
+        url = await fresh_url(bot, v["file_ch_id"], v["file_msg_id"])
     if not url:
         await interaction.followup.send("Failed to retrieve file.", ephemeral=True)
         return
@@ -608,7 +639,7 @@ def setup(bot):
             return
         d = Draft(title=title, version=version or db.next_version_label(title), type_=type_,
                   ping=ping, thread=thread, voting=voting, path=p,
-                  sponsor=sponsor, sponsor_kind=sponsor_kind, note=note)
+                  original=find_original(bot, title), sponsor=sponsor, sponsor_kind=sponsor_kind, note=note)
         bot.logger.log(MODULE_NAME, f"Draft started: {d.title!r} {d.version} ({d.type})")
         await interaction.response.send_message(
             view=DraftView(bot, db, guild, d, interaction.user.id), ephemeral=True)

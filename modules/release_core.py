@@ -250,8 +250,8 @@ def post_items(d: Draft, vid: Optional[str] = None, role_mention: Optional[str] 
         buttons = [discord.ui.Button(style=discord.ButtonStyle.primary, label=f"Download {d.type}",
                                      emoji="⬇️", custom_id=f"rel:dl:{vid}", disabled=preview)]
         if d.original:
-            buttons.append(discord.ui.Button(style=discord.ButtonStyle.secondary, disabled=preview,
-                                             label="Download Original", custom_id=f"rel:orig:{vid}"))
+            buttons.append(discord.ui.Button(style=discord.ButtonStyle.secondary, disabled=preview, emoji="💿",
+                                             label="Download Original File", custom_id=f"rel:orig:{vid}"))
         children += [discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
                      discord.ui.ActionRow(*buttons)]
     items.append(discord.ui.Container(*children, accent_color=0x1a1a2e))

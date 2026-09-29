@@ -36,12 +36,16 @@ uv pip install --python "%SCRIPT_DIR%.venv\Scripts\python.exe" -r "%SCRIPT_DIR%r
 echo [start.bat] Starting Embot (press Ctrl+C to stop)...
 
 :restart
+if not exist "%SCRIPT_DIR%logs" mkdir "%SCRIPT_DIR%logs"
+echo %date% %time% launching >> "%SCRIPT_DIR%logs\launcher.log"
 "%SCRIPT_DIR%.venv\Scripts\python.exe" "%SCRIPT_DIR%Embot.py"
-if %errorlevel% equ 42 (
+set "EXITCODE=%errorlevel%"
+echo %date% %time% exited code !EXITCODE! >> "%SCRIPT_DIR%logs\launcher.log"
+if "!EXITCODE!"=="42" (
     echo [start.bat] Auto-update completed, restarting immediately...
     goto restart
 )
 echo.
-echo [start.bat] Embot exited (code %errorlevel%). Restarting in 3s (Ctrl+C to stop)...
-timeout /t 3 /nobreak
-if %errorlevel% equ 0 goto restart
+echo [start.bat] Embot exited (code !EXITCODE!). Restarting in 3s...
+ping -n 4 127.0.0.1 >nul
+goto restart

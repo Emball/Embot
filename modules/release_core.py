@@ -22,6 +22,9 @@ CONFIG_DEFAULTS = {
     "cache_channel_name": "release-cache",
     "preview_max_mb": 25,
     "preview_workers": 2,
+    "preview_max_queue": 40,
+    "preview_wait_seconds": 300,
+    "preview_upload_seconds": 90,
     "cache_category_name": "",
 }
 
@@ -534,6 +537,11 @@ PREVIEW_DIR = script_dir() / "cache" / "release_preview"
 PREVIEW_TTL = 7 * 86400
 _preview_locks: dict = {}
 _waiting: list = []
+_active_users: set = set()
+_last_text: dict = {}
+_edit_locks: dict = {}
+_live: set = set()
+_refresh_pending = False
 _sem: Optional[asyncio.Semaphore] = None
 
 
@@ -581,49 +589,119 @@ def _get_sem() -> asyncio.Semaphore:
     return _sem
 
 
-async def _set_status(bot, interaction: discord.Interaction, text: str):
-    try:
-        await interaction.edit_original_response(content=text)
-    except Exception as e:
-        bot.logger.log(MODULE_NAME, f"Status update failed: {e}", "WARNING")
+async def _edit(interaction: discord.Interaction, **kw):
+    if interaction.id not in _live:
+        return
+    lock = _edit_locks.setdefault(interaction.id, asyncio.Lock())
+    async with lock:
+        await interaction.edit_original_response(**kw)
+
+
+async def _set_status(bot, interaction: discord.Interaction, text: str, only_waiting: bool = False):
+    if interaction.id not in _live or (only_waiting and interaction not in _waiting):
+        return
+    lock = _edit_locks.setdefault(interaction.id, asyncio.Lock())
+    async with lock:
+        if interaction.id not in _live or (only_waiting and interaction not in _waiting):
+            return
+        if _last_text.get(interaction.id) == text:
+            return
+        _last_text[interaction.id] = text
+        try:
+            await interaction.edit_original_response(content=text)
+        except Exception as e:
+            bot.logger.log(MODULE_NAME, f"Status update failed: {e}", "WARNING")
 
 
 async def _refresh_queue(bot):
+    global _refresh_pending
+    await asyncio.sleep(1.5)
+    _refresh_pending = False
     waiting = list(_waiting)
     await asyncio.gather(*[
-        _set_status(bot, i, f"⏳ Preview queued: position {k} of {len(waiting)}")
-        for k, i in enumerate(waiting, 1)])
+        _set_status(bot, i, f"⏳ Preview queued: position {_waiting.index(i) + 1}", only_waiting=True)
+        for i in waiting if i in _waiting])
+
+
+def _schedule_refresh(bot):
+    global _refresh_pending
+    if not _refresh_pending and _waiting:
+        _refresh_pending = True
+        asyncio.ensure_future(_refresh_queue(bot))
+
+
+async def _link_fallback(bot, interaction: discord.Interaction, text: str):
+    try:
+        await _edit(interaction, content=text, attachments=[])
+    except Exception as e:
+        bot.logger.log(MODULE_NAME, f"Fallback reply failed: {e}", "WARNING")
 
 
 async def _send_preview(bot, interaction: discord.Interaction, key: str, name: str, url: str) -> bool:
-    limit = int(load_config().get("preview_max_mb", 25)) * 1024 * 1024
-    sem = _get_sem()
-    if sem.locked():
-        _waiting.append(interaction)
-        await _refresh_queue(bot)
+    _live.add(interaction.id)
     try:
-        async with sem:
-            if interaction in _waiting:
-                _waiting.remove(interaction)
-                asyncio.ensure_future(_refresh_queue(bot))
-            await _set_status(bot, interaction, "⬆️ Uploading your preview…")
-            path = await _cached_file(key, name, url, limit)
-            if path:
-                await interaction.edit_original_response(
-                    content=f"-# [Direct download link]({url})",
-                    attachments=[discord.File(str(path), filename=name)])
-                bot.logger.log(MODULE_NAME, f"Sent preview of {name!r}")
-                return True
-            bot.logger.log(MODULE_NAME, f"Preview skipped for {name!r} (over limit or fetch failed)", "WARNING")
-            await interaction.edit_original_response(
-                content=f"Too large to preview here. [Download {name}]({url})")
-            return True
-    except Exception as e:
-        bot.logger.error(MODULE_NAME, f"Preview failed for {name!r}", e)
-        return False
+        return await _send_preview_inner(bot, interaction, key, name, url)
     finally:
+        _live.discard(interaction.id)
+        _last_text.pop(interaction.id, None)
+        _edit_locks.pop(interaction.id, None)
+
+
+async def _send_preview_inner(bot, interaction: discord.Interaction, key: str, name: str, url: str) -> bool:
+    cfg = load_config()
+    limit = int(cfg.get("preview_max_mb", 25)) * 1024 * 1024
+    link = f"[Download {name}]({url})"
+    uid = interaction.user.id
+    if uid in _active_users:
+        await _set_status(bot, interaction, "You already have a preview loading. Check your earlier reply.")
+        return True
+    if len(_waiting) >= int(cfg.get("preview_max_queue", 40)):
+        bot.logger.log(MODULE_NAME, "Preview queue full, sending link instead", "WARNING")
+        await _link_fallback(bot, interaction, f"Preview is very busy right now. {link}")
+        return True
+
+    _active_users.add(uid)
+    sem = _get_sem()
+    acquired = False
+    try:
+        if sem.locked():
+            _waiting.append(interaction)
+            await _set_status(bot, interaction, f"⏳ Preview queued: position {len(_waiting)}")
+        try:
+            await asyncio.wait_for(sem.acquire(), float(cfg.get("preview_wait_seconds", 300)))
+            acquired = True
+        except asyncio.TimeoutError:
+            bot.logger.log(MODULE_NAME, "Preview wait timed out, sending link instead", "WARNING")
+            await _link_fallback(bot, interaction, f"Preview is taking too long. {link}")
+            return True
         if interaction in _waiting:
             _waiting.remove(interaction)
+            _schedule_refresh(bot)
+        await _set_status(bot, interaction, "⬆️ Uploading your preview…")
+        path = await _cached_file(key, name, url, limit)
+        if not path:
+            bot.logger.log(MODULE_NAME, f"Preview skipped for {name!r} (over limit or fetch failed)", "WARNING")
+            await _link_fallback(bot, interaction, f"Too large to preview here. {link}")
+            return True
+        await asyncio.wait_for(
+            _edit(interaction, content=f"-# [Direct download link]({url})",
+                  attachments=[discord.File(str(path), filename=name)]),
+            float(cfg.get("preview_upload_seconds", 90)))
+        bot.logger.log(MODULE_NAME, f"Sent preview of {name!r}")
+        return True
+    except Exception as e:
+        bot.logger.error(MODULE_NAME, f"Preview failed for {name!r}", e)
+        await _link_fallback(bot, interaction, f"Preview failed. {link}")
+        return True
+    finally:
+        if acquired:
+            sem.release()
+        if interaction in _waiting:
+            _waiting.remove(interaction)
+            _schedule_refresh(bot)
+        _active_users.discard(uid)
+        _last_text.pop(interaction.id, None)
+        _edit_locks.pop(interaction.id, None)
 
 
 async def _handle_download(bot, db: ReleaseDB, interaction: discord.Interaction, which: str, vid: str):

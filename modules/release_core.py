@@ -21,6 +21,7 @@ CONFIG_DEFAULTS = {
     "releases_channel_name": "emball-remasters",
     "cache_channel_name": "release-cache",
     "preview_max_mb": 25,
+    "preview_mode": "attachment",
 }
 
 TYPES = ["Remaster", "Edit", "Remaster & Edit"]
@@ -209,7 +210,8 @@ class ReleaseError(Exception):
 
 class Draft:
     def __init__(self, *, title, version, type_, ping, thread, voting, path: Path,
-                 original=None, sponsor=None, sponsor_kind=SPONSOR_KINDS[0], description=None):
+                 original=None, sponsor=None, sponsor_kind=SPONSOR_KINDS[0], description=None,
+                 channel=None):
         self.title = title.strip()
         self.version = version.strip()
         self.type = type_
@@ -224,6 +226,7 @@ class Draft:
         self.sponsor_kind = sponsor_kind
         self.description = (description or "").strip()
         self.changelog = ""
+        self.channel = channel
 
 
 def changelog_bullets(raw: str) -> str:
@@ -310,7 +313,7 @@ async def _ensure_cache_channel(bot, guild: discord.Guild, name: str) -> discord
 
 async def publish(bot, db: ReleaseDB, guild: discord.Guild, d: Draft):
     cfg = load_config()
-    post_ch = discord.utils.get(guild.text_channels, name=cfg["releases_channel_name"])
+    post_ch = d.channel or discord.utils.get(guild.text_channels, name=cfg["releases_channel_name"])
     if not post_ch:
         raise ReleaseError(f"Channel #{cfg['releases_channel_name']} not found.")
     if db.version_exists(d.title, d.version):
@@ -564,8 +567,15 @@ async def _deliver(bot, interaction: discord.Interaction, key: str, name: str, u
     try:
         path = await _cached_file(key, name, url, limit)
         if path:
-            await interaction.followup.send(f"-# [Direct download link]({url})",
-                                            file=discord.File(str(path), filename=name), ephemeral=True)
+            if load_config().get("preview_mode") == "v2file":
+                view = discord.ui.LayoutView(timeout=None)
+                view.add_item(discord.ui.Container(
+                    discord.ui.File(discord.File(str(path), filename=name)),
+                    discord.ui.TextDisplay(f"-# [Direct download link]({url})"), accent_color=0x2ecc71))
+                await interaction.followup.send(view=view, ephemeral=True)
+            else:
+                await interaction.followup.send(f"-# [Direct download link]({url})",
+                                                file=discord.File(str(path), filename=name), ephemeral=True)
             bot.logger.log(MODULE_NAME, f"Sent playable preview of {name!r}")
             return
         bot.logger.log(MODULE_NAME, f"Preview skipped for {name!r} (over limit or fetch failed)", "WARNING")
@@ -690,6 +700,7 @@ def setup(bot):
         voting="Enable reaction voting",
         sponsor="Member to credit",
         sponsor_kind="How to credit the sponsor",
+        channel="Post here instead of the releases channel (for testing)",
     )
     @app_commands.choices(
         type_=[app_commands.Choice(name=t, value=t) for t in TYPES],
@@ -699,7 +710,8 @@ def setup(bot):
                       version: Optional[str] = None, type_: str = TYPES[0],
                       ping: bool = True, thread: bool = True, voting: bool = True,
                       sponsor: Optional[discord.User] = None,
-                      sponsor_kind: str = SPONSOR_KINDS[0]):
+                      sponsor_kind: str = SPONSOR_KINDS[0],
+                      channel: Optional[discord.TextChannel] = None):
         if interaction.user.id != owner_id():
             await interaction.response.send_message("Owner only.", ephemeral=True)
             return
@@ -717,7 +729,8 @@ def setup(bot):
             return
         d = Draft(title=title, version=version or db.next_version_label(title), type_=type_,
                   ping=ping, thread=thread, voting=voting, path=p,
-                  original=find_original(bot, title), sponsor=sponsor, sponsor_kind=sponsor_kind)
+                  original=find_original(bot, title), sponsor=sponsor, sponsor_kind=sponsor_kind,
+                  channel=channel)
         bot.logger.log(MODULE_NAME, f"Draft started: {d.title!r} {d.version} ({d.type})")
         await interaction.response.send_message(
             view=DraftView(bot, db, guild, d, interaction.user.id), ephemeral=True)

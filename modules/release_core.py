@@ -341,3 +341,153 @@ async def publish(bot, db: ReleaseDB, guild: discord.Guild, d: Draft):
 
     bot.logger.log(MODULE_NAME, f"Published {d.title!r} {d.version} ({d.type}) as {vid}")
     return post, thread
+
+
+class ChangelogModal(discord.ui.Modal, title="Changelog"):
+    text = discord.ui.TextInput(label="Changes (one per line)", style=discord.TextStyle.paragraph,
+                                required=False, max_length=1500,
+                                placeholder="Compression restored\nMixed the vocals properly")
+
+    def __init__(self, view: "DraftView"):
+        super().__init__()
+        self.draft_view = view
+        self.text.default = view.d.changelog or None
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self.draft_view.d.changelog = str(self.text.value or "").strip()
+        self.draft_view.error = None
+        self.draft_view.render()
+        await interaction.response.edit_message(view=self.draft_view)
+
+
+class DraftView(discord.ui.LayoutView):
+    def __init__(self, bot, db: ReleaseDB, guild: discord.Guild, d: Draft, owner_id: int):
+        super().__init__(timeout=900)
+        self.bot, self.db, self.guild, self.d, self.owner_id = bot, db, guild, d, owner_id
+        self.error: Optional[str] = None
+        self.busy = False
+        self.render()
+
+    def render(self):
+        self.clear_items()
+        for item in post_items(self.d):
+            self.add_item(item)
+
+        edit = discord.ui.Button(label="Edit changelog", style=discord.ButtonStyle.secondary)
+        post = discord.ui.Button(label="Post", style=discord.ButtonStyle.success, disabled=self.busy)
+        cancel = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.danger, disabled=self.busy)
+        edit.callback, post.callback, cancel.callback = self._edit, self._post, self._cancel
+
+        flags = (f"ping {'on' if self.d.ping else 'off'} · thread {'on' if self.d.thread else 'off'} · "
+                 f"voting {'on' if self.d.voting else 'off'}")
+        files = f"`{self.d.file.filename}`" + (f" + original `{self.d.original.filename}`" if self.d.original else "")
+        lines = ["-# Draft preview. Nothing is posted until you press Post.", f"-# {flags} · {files}"]
+        if self.error:
+            lines.insert(0, f"**Error:** {self.error}")
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("\n".join(lines)),
+            discord.ui.ActionRow(edit, post, cancel),
+            accent_color=0xe74c3c if self.error else 0x5865f2))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Owner only.", ephemeral=True)
+            return False
+        return True
+
+    async def _edit(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(ChangelogModal(self))
+
+    async def _cancel(self, interaction: discord.Interaction):
+        self.stop()
+        await interaction.response.edit_message(view=_notice("Draft discarded."))
+
+    async def _post(self, interaction: discord.Interaction):
+        if self.busy:
+            return
+        self.busy, self.error = True, None
+        self.render()
+        await interaction.response.edit_message(view=self)
+        try:
+            post, thread = await publish(self.bot, self.db, self.guild, self.d)
+        except ReleaseError as e:
+            self.busy, self.error = False, str(e)
+            self.render()
+            await interaction.edit_original_response(view=self)
+            return
+        except Exception as e:
+            self.bot.logger.error(MODULE_NAME, "Release publish failed", e)
+            self.busy, self.error = False, "Publish failed. Check the bot console."
+            self.render()
+            await interaction.edit_original_response(view=self)
+            return
+        self.stop()
+        extra = f" · [thread]({thread.jump_url})" if thread else ""
+        await interaction.edit_original_response(
+            view=_notice(f"Posted **{self.d.title}** {self.d.version}: [jump to release]({post.jump_url}){extra}"))
+
+
+def _notice(text: str) -> discord.ui.LayoutView:
+    v = discord.ui.LayoutView(timeout=None)
+    v.add_item(discord.ui.Container(discord.ui.TextDisplay(text), accent_color=0x2ecc71))
+    return v
+
+
+def setup(bot):
+    db = ReleaseDB()
+    load_config()
+    bot._release_system = type("ReleaseSystem", (), {"db": db})()
+
+    def owner_id() -> int:
+        cfg = _mod_cfg(bot)
+        return cfg.owner_id if cfg else 0
+
+    async def title_autocomplete(interaction: discord.Interaction, current: str):
+        with db._conn() as c:
+            rows = c.execute("SELECT title FROM releases WHERE title LIKE ? ORDER BY title LIMIT 25",
+                             (f"%{current}%",)).fetchall()
+        return [app_commands.Choice(name=r["title"][:100], value=r["title"][:100]) for r in rows]
+
+    @bot.tree.command(name="release", description="[Owner only] Draft and post a remaster/edit release")
+    @app_commands.allowed_installs(guilds=True, users=False)
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=False)
+    @app_commands.rename(type_="type")
+    @app_commands.describe(
+        title="Song title. Reusing an existing title adds a new version to it",
+        file="The release file",
+        version="Version label (default: next in sequence, V1 for new titles)",
+        type_="Kind of release",
+        ping="Ping the releases role",
+        thread="Create a feedback thread",
+        voting="Enable reaction voting",
+        original="Original file for A/B comparison",
+        sponsor="Member to credit",
+        sponsor_kind="How to credit the sponsor",
+        note="One-line note shown under the title",
+    )
+    @app_commands.choices(
+        type_=[app_commands.Choice(name=t, value=t) for t in TYPES],
+        sponsor_kind=[app_commands.Choice(name=s, value=s) for s in SPONSOR_KINDS],
+    )
+    async def release(interaction: discord.Interaction, title: str, file: discord.Attachment,
+                      version: Optional[str] = None, type_: str = TYPES[0],
+                      ping: bool = True, thread: bool = True, voting: bool = True,
+                      original: Optional[discord.Attachment] = None,
+                      sponsor: Optional[discord.User] = None,
+                      sponsor_kind: str = SPONSOR_KINDS[0], note: Optional[str] = None):
+        if interaction.user.id != owner_id():
+            await interaction.response.send_message("Owner only.", ephemeral=True)
+            return
+        guild = interaction.guild or (bot.guilds[0] if bot.guilds else None)
+        if not guild:
+            await interaction.response.send_message("No guild available.", ephemeral=True)
+            return
+        d = Draft(title=title, version=version or db.next_version_label(title), type_=type_,
+                  ping=ping, thread=thread, voting=voting, file=file, original=original,
+                  sponsor=sponsor, sponsor_kind=sponsor_kind, note=note)
+        bot.logger.log(MODULE_NAME, f"Draft started: {d.title!r} {d.version} ({d.type})")
+        await interaction.response.send_message(
+            view=DraftView(bot, db, guild, d, interaction.user.id), ephemeral=True)
+
+    release.autocomplete("title")(title_autocomplete)
+    bot.logger.log(MODULE_NAME, "Release system loaded")

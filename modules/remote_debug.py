@@ -37,6 +37,17 @@ RD_CONFIG_DEFAULTS = {
 }
 
 
+def _github_token(bridge_cfg: dict) -> str:
+    try:
+        with open(script_dir() / "config" / "auth.json", "r", encoding="utf-8") as f:
+            tok = str(json.load(f).get("github_token", "")).strip()
+        if tok:
+            return tok
+    except Exception as e:
+        print(f"[{MODULE_NAME}] Could not read github_token from auth.json: {e}", file=sys.stderr)
+    return str(bridge_cfg.get("token", "")).strip()
+
+
 def _migrate_client_config():
     client_cfg = script_dir() / "temp" / "remote.json"
     if not client_cfg.exists():
@@ -438,11 +449,14 @@ class RemoteDebugServer:
         else:
             self.bot.logger.log(MODULE_NAME, "Server mode disabled in config")
 
-        bridge_cfg = self._config.get("claude_bridge", {})
-        if bridge_cfg.get("enabled") and bridge_cfg.get("token"):
+        bridge_cfg = dict(self._config.get("claude_bridge", {}))
+        bridge_cfg["token"] = _github_token(bridge_cfg)
+        if bridge_cfg.get("enabled") and bridge_cfg["token"]:
             self._bridge = ClaudeBridgeListener(self.bot, self, bridge_cfg)
             await self._bridge.start()
         else:
+            if bridge_cfg.get("enabled"):
+                self.bot.logger.log(MODULE_NAME, "Claude bridge enabled but no github_token found in auth.json", "WARNING")
             self._bridge = None
 
     async def stop(self):

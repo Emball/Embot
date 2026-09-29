@@ -124,7 +124,7 @@ All configs are gitignored.
 | File | Owner | Keys |
 |---|---|---|
 | `embot.json` | Embot.py | Core bot config, auto-created with defaults if missing |
-| `auth.json` | Embot.py | Bot token |
+| `auth.json` | Embot.py, remote_debug | `bot_token`, `github_token` (bridge polling; takes precedence over `remote_debug.json` `claude_bridge.token`) |
 | `mod.json` | mod_core | roles, channel IDs, log toggles, strike thresholds, rules, invite labels |
 | `vms.json` | vms_core | `cache_dir` |
 | `music.json` | music_archive | `eminem_root` (SMB path) |

@@ -103,6 +103,12 @@ Modules sharing a prefix form a family. The `_core` file owns the DB, config, an
 | `music_browser.py` | Interactive archive browser panel posted to `#info-test`. On startup posts a V2 info panel and a V1 FormatSelect message. Users pick Format → Album → Song via ephemeral cascading selects; song link delivered ephemerally. `/browse` opens the flow anywhere. `/refresh_browser` (owner) reposts the panel. State persisted in `config/music_browser_state.json` (V2 panel) and `config/music_browser_select.json` (V1 select message). |
 | `music_player.py` | VC playback for archive files and YouTube/SoundCloud |
 
+**Releases** (`release_`)
+
+| Module | Description |
+|---|---|
+| `release_core.py` | Owner-only remaster/edit release system. `/release` (works in DMs) builds an ephemeral draft; **Post** stores the file(s) in the private cache channel, posts a Components V2 release in the releases channel, then creates the thread and vote reactions (🔥 😐 🗑️, one vote per user, owner and flagged users not counted). Files are never attached to the public post — the **Download**/**Original** buttons (`rel:<dl|orig>:<version_id>`, handled in `on_interaction`) deliver a fresh CDN link ephemerally after a fed check, matching the archive's silent denial. Owner is `owner_id` in `mod.json`; ping role is `releases_role_name` in `mod.json`. Owns `release.db` (independent of the archive DB so archive maintenance can't wipe it); exposed as `bot._release_system.db`. |
+
 **Standalone features**
 
 | Module | Description |
@@ -132,6 +138,7 @@ All configs are gitignored.
 | `starboard.json` | starboard | channel_id, threshold, emoji, self_star, ignore_before |
 | `youtube.json` | youtube | channel_id, announce_channel_id, poll_interval, cookies_txt |
 | `remote_debug.json` | remote_debug | server, host, port, token, allowed_ips, claude_bridge |
+| `release.json` | release_core | releases_channel_name, cache_channel_name |
 
 ### Databases (`db/`)
 
@@ -143,6 +150,7 @@ All configs are gitignored.
 | `starboard.db` | starboard |
 | `musicarchive.db` | music_archive |
 | `archive.db` | mod_oversight |
+| `release.db` | release_core |
 
 ### Cross-Module Dependencies
 

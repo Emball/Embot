@@ -8,7 +8,7 @@ from typing import Optional
 import discord
 from discord import app_commands
 
-from _utils import script_dir, migrate_config, _now
+from _utils import script_dir, migrate_config, _now, is_killswitch_active
 
 MODULE_NAME = "RELEASE"
 
@@ -433,6 +433,122 @@ def _notice(text: str) -> discord.ui.LayoutView:
     return v
 
 
+def is_fed(guild_id, user_id) -> bool:
+    try:
+        from mod_suspicion import is_flagged
+        if guild_id:
+            return is_flagged(str(guild_id), str(user_id))
+    except Exception:
+        pass
+    return False
+
+
+async def fresh_url(bot, ch_id: int, msg_id: int) -> Optional[str]:
+    try:
+        ch = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
+        msg = await ch.fetch_message(msg_id)
+        return msg.attachments[0].url if msg.attachments else None
+    except Exception as e:
+        bot.logger.log(MODULE_NAME, f"Fresh URL fetch failed for message {msg_id}: {e}", "WARNING")
+        return None
+
+
+async def _log_delivery(bot, guild, user, title: str, version: str, name: str, which: str):
+    try:
+        ch = discord.utils.get(guild.text_channels, name="bot-logs")
+        if not ch:
+            return
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(discord.ui.TextDisplay(
+            f"# Release Delivery\n**User**\n{user} ({user.id})\n\n**Release**\n{title} {version}"
+            f"\n\n**File**\n`{name}` ({which})"), accent_color=0x5865f2))
+        await ch.send(view=view)
+    except Exception as e:
+        bot.logger.error(MODULE_NAME, "Failed to log delivery", e)
+
+
+async def _handle_download(bot, db: ReleaseDB, interaction: discord.Interaction, which: str, vid: str):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    if is_killswitch_active(bot, "release_core") or is_fed(interaction.guild_id, interaction.user.id):
+        bot.logger.log(MODULE_NAME, f"Download denied for {interaction.user} ({interaction.user.id})")
+        await interaction.followup.send("Failed to retrieve file.", ephemeral=True)
+        return
+    v = db.get_version(vid)
+    if not v:
+        await interaction.followup.send("Failed to retrieve file.", ephemeral=True)
+        return
+    if which == "orig":
+        ch_id, msg_id, name = v["orig_ch_id"], v["orig_msg_id"], v["orig_name"]
+    else:
+        ch_id, msg_id, name = v["file_ch_id"], v["file_msg_id"], v["file_name"]
+    url = await fresh_url(bot, ch_id, msg_id) if msg_id else None
+    if not url:
+        await interaction.followup.send("Failed to retrieve file.", ephemeral=True)
+        return
+    await interaction.followup.send(f"[{name}]({url})", ephemeral=True)
+    bot.logger.log(MODULE_NAME, f"Delivered {name!r} to {interaction.user}")
+    if interaction.guild:
+        await _log_delivery(bot, interaction.guild, interaction.user, v["title"], v["version"], name, which)
+
+
+async def _remove_reaction(bot, channel_id: int, message_id: int, emoji, user_id: int):
+    try:
+        ch = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+        await ch.get_partial_message(message_id).remove_reaction(emoji, discord.Object(id=user_id))
+    except Exception as e:
+        bot.logger.log(MODULE_NAME, f"Could not remove reaction: {e}", "WARNING")
+
+
+def register_listeners(bot, db: ReleaseDB, owner_id):
+    @bot.listen("on_interaction")
+    async def on_interaction(interaction: discord.Interaction):
+        if interaction.type != discord.InteractionType.component:
+            return
+        cid = (interaction.data or {}).get("custom_id", "")
+        if not cid.startswith("rel:"):
+            return
+        try:
+            _, which, vid = cid.split(":", 2)
+            await _handle_download(bot, db, interaction, which, vid)
+        except Exception as e:
+            bot.logger.error(MODULE_NAME, f"Download handler failed for {cid}", e)
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send("Failed to retrieve file.", ephemeral=True)
+                else:
+                    await interaction.response.send_message("Failed to retrieve file.", ephemeral=True)
+            except Exception:
+                pass
+
+    @bot.listen("on_raw_reaction_add")
+    async def on_reaction_add(payload: discord.RawReactionActionEvent):
+        emoji = str(payload.emoji)
+        if not payload.guild_id or payload.user_id == bot.user.id or emoji not in VOTE_EMOJIS:
+            return
+        v = db.version_by_post(payload.message_id)
+        if not v or not v["voting"]:
+            return
+        if payload.user_id == owner_id():
+            await _remove_reaction(bot, payload.channel_id, payload.message_id, payload.emoji, payload.user_id)
+            return
+        if is_fed(payload.guild_id, payload.user_id):
+            bot.logger.log(MODULE_NAME, f"Vote from flagged user {payload.user_id} not recorded")
+            return
+        old = db.upsert_vote(v["id"], payload.user_id, emoji)
+        if old and old["emoji"] != emoji:
+            await _remove_reaction(bot, payload.channel_id, payload.message_id, old["emoji"], payload.user_id)
+        bot.logger.log(MODULE_NAME, f"Vote {emoji} by {payload.user_id} on {v['id']}")
+
+    @bot.listen("on_raw_reaction_remove")
+    async def on_reaction_remove(payload: discord.RawReactionActionEvent):
+        emoji = str(payload.emoji)
+        if not payload.guild_id or emoji not in VOTE_EMOJIS:
+            return
+        v = db.version_by_post(payload.message_id)
+        if v and db.remove_vote(v["id"], payload.user_id, emoji):
+            bot.logger.log(MODULE_NAME, f"Vote {emoji} removed by {payload.user_id} on {v['id']}")
+
+
 def setup(bot):
     db = ReleaseDB()
     load_config()
@@ -478,6 +594,9 @@ def setup(bot):
         if interaction.user.id != owner_id():
             await interaction.response.send_message("Owner only.", ephemeral=True)
             return
+        if is_killswitch_active(bot, "release_core"):
+            await interaction.response.send_message("Kill switch is active.", ephemeral=True)
+            return
         guild = interaction.guild or (bot.guilds[0] if bot.guilds else None)
         if not guild:
             await interaction.response.send_message("No guild available.", ephemeral=True)
@@ -490,4 +609,5 @@ def setup(bot):
             view=DraftView(bot, db, guild, d, interaction.user.id), ephemeral=True)
 
     release.autocomplete("title")(title_autocomplete)
+    register_listeners(bot, db, owner_id)
     bot.logger.log(MODULE_NAME, "Release system loaded")

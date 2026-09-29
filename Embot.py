@@ -236,6 +236,7 @@ def load_modules():
         "music_player",
         "music_browser",
         "community",
+        "release_core",
         "starboard",
         "youtube",
         "links",
@@ -657,6 +658,7 @@ _KS_FAMILIES = {
     "mod":   {"mod_core", "mod_suspicion", "mod_actions", "mod_appeals", "mod_oversight", "mod_rules", "mod_notes", "mod_logger"},
     "vms":   {"vms_core", "vms_transcribe", "vms_storage", "vms_playback"},
     "music": {"music_archive", "music_player", "music_browser"},
+    "release": {"release_core"},
 }
 _KS_STANDALONES = ["info", "remote_debug", "community", "starboard", "youtube", "links", "icons", "artwork", "magic_emball"]
 _KS_ALL_TARGETS = ["all"] + sorted(_KS_FAMILIES.keys()) + sorted(_KS_STANDALONES)

@@ -138,6 +138,7 @@ _KS_FAMILIES = {
     "mod":   {"mod_core", "mod_suspicion", "mod_actions", "mod_appeals", "mod_oversight", "mod_rules", "mod_notes", "mod_logger"},
     "vms":   {"vms_core", "vms_transcribe", "vms_storage", "vms_playback"},
     "music": {"music_archive", "music_player", "music_browser"},
+    "release": {"release_core"},
 }
 
 def is_killswitch_active(bot, module: str = None) -> bool:

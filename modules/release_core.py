@@ -1,6 +1,5 @@
 import asyncio
 import difflib
-import io
 import re
 import sqlite3
 import uuid
@@ -518,30 +517,55 @@ async def _log_delivery(bot, guild, user, title: str, version: str, name: str, w
         bot.logger.error(MODULE_NAME, "Failed to log delivery", e)
 
 
-async def _fetch_bytes(url: str, limit: int) -> Optional[bytes]:
+PREVIEW_DIR = script_dir() / "cache" / "release_preview"
+PREVIEW_TTL = 7 * 86400
+_preview_locks: dict = {}
+
+
+async def _fetch_to_disk(url: str, dest: Path, limit: int) -> bool:
     timeout = aiohttp.ClientTimeout(total=120)
     async with aiohttp.ClientSession(timeout=timeout) as sess:
         async with sess.get(url) as r:
-            if r.status != 200:
-                return None
-            if r.content_length and r.content_length > limit:
-                return None
+            if r.status != 200 or (r.content_length and r.content_length > limit):
+                return False
             data = await r.read()
-            return data if len(data) <= limit else None
+    if len(data) > limit:
+        return False
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    tmp.write_bytes(data)
+    tmp.replace(dest)
+    return True
 
 
-async def _deliver(bot, interaction: discord.Interaction, name: str, url: str):
+def _prune_preview_cache():
+    cutoff = _now().timestamp() - PREVIEW_TTL
+    for f in PREVIEW_DIR.glob("*"):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+        except OSError:
+            pass
+
+
+async def _cached_file(key: str, name: str, url: str, limit: int) -> Optional[Path]:
+    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    dest = PREVIEW_DIR / f"{key}_{re.sub(r'[^A-Za-z0-9._-]', '_', name)}"
+    lock = _preview_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        if not dest.exists():
+            if not await _fetch_to_disk(url, dest, limit):
+                return None
+            _prune_preview_cache()
+    return dest
+
+
+async def _deliver(bot, interaction: discord.Interaction, key: str, name: str, url: str):
     limit = int(load_config().get("preview_max_mb", 25)) * 1024 * 1024
     try:
-        data = await _fetch_bytes(url, limit)
-        if data:
-            view = discord.ui.LayoutView(timeout=None)
-            view.add_item(discord.ui.Container(
-                discord.ui.TextDisplay(f"**{name}**"),
-                discord.ui.File(discord.File(io.BytesIO(data), filename=name)),
-                discord.ui.TextDisplay(f"-# [Direct download link]({url})"),
-                accent_color=0x2ecc71))
-            await interaction.followup.send(view=view, ephemeral=True)
+        path = await _cached_file(key, name, url, limit)
+        if path:
+            await interaction.followup.send(f"-# [Direct download link]({url})",
+                                            file=discord.File(str(path), filename=name), ephemeral=True)
             bot.logger.log(MODULE_NAME, f"Sent playable preview of {name!r}")
             return
         bot.logger.log(MODULE_NAME, f"Preview skipped for {name!r} (over limit or fetch failed)", "WARNING")
@@ -573,7 +597,7 @@ async def _handle_download(bot, db: ReleaseDB, interaction: discord.Interaction,
     if not url:
         await interaction.followup.send("Failed to retrieve file.", ephemeral=True)
         return
-    await _deliver(bot, interaction, name, url)
+    await _deliver(bot, interaction, f"{which}-{vid}", name, url)
     bot.logger.log(MODULE_NAME, f"Delivered {name!r} to {interaction.user}")
     if interaction.guild:
         await _log_delivery(bot, interaction.guild, interaction.user, v["title"], v["version"], name, which)

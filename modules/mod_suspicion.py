@@ -62,9 +62,7 @@ class SuspicionEngine:
             if existing["msg_count"] == 0:
                 score += add("no_messages")
 
-        releases_role_name = self.cfg.get("releases_role_name",
-                                          self.bot.__dict__.get("_remasters_role_name",
-                                                                "Emball Releases"))
+        releases_role_name = self.cfg.get("releases_role_name", "Emball Releases")
         non_default_roles = [r for r in member.roles
                              if r.name != "@everyone" and r.name != releases_role_name]
         if not non_default_roles:

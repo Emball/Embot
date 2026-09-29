@@ -70,7 +70,7 @@ Modules sharing a prefix form a family. The `_core` file owns the DB, config, an
 
 | Module | Description |
 |---|---|
-| `_utils.py` | `atomic_json_write()`, `migrate_config()`, `script_dir()`, `_now()`, `NetworkState` — imported by nearly everything |
+| `_utils.py` | `atomic_json_write()`, `migrate_config()`, `script_dir()`, `_now()`, `NetworkState`, `restart_process()` — imported by nearly everything |
 | `_messages.py` | Message + media cache. No bot dependency; imported directly by mod_core and vms_playback |
 
 **Moderation** (`mod_`)
@@ -236,6 +236,7 @@ Prefer `config-write`/`config-patch` over `shell` for config changes. Prefer `sc
 - **`script-exec` via bridge runs as a subprocess** — not inside the bot process. `bot`, `discord`, and the event loop are not available. Use `asyncio.ensure_future()` inside a module's `setup()` for in-process async work. For one-shot bot-internal tasks, write a temporary module (e.g. `sb_migrate.py`), push it via git, auto-update pulls it, then `bridge reload <module>` triggers `setup()` which fires the async task. Module should `Path(__file__).unlink(missing_ok=True)` when done and be removed from the repo in the next commit.
 - **Starboard V2 edits** — mixing `content=` with a LayoutView edit raises `400 IS_COMPONENTS_V2`. Treat as `NotFound` — delete and repost. Always pass `allowed_mentions=discord.AllowedMentions.none()` on send/edit; also neutralise mentions inline with a zero-width space after `<@`.
 - **`CommandRegistrationError: ban already registered`** — appears in logs during `mod_core` reloads. Pre-existing quirk, not a regression. Bot recovers cleanly.
+- **Restarts** — always via `_utils.restart_process()` (exit code 42; `start.bat`/`start.sh` relaunch on it). `os.execv` on Windows spawns a second instance while the launcher also relaunches.
 - **Network error suppression** — `NetworkState` in `_utils.py` tracks connectivity. Check `NetworkState.is_online()` before logging network errors; call `NetworkState.suppress()` instead when offline. `Embot.py` flips state via `on_disconnect`/`on_resumed`.
 - **`music_archive` — multiple files per message** — `song_cache` uses `file_path` as sole PRIMARY KEY. Multiple files in one batch share the same `message_id` — this is intentional and correct. Never add a UNIQUE constraint on `message_id`.
 - **`music_archive` — filename matching** — Discord CDN attachment filenames mangle spaces and special chars to underscores. Always use `normalize_title(Path(filename).stem)` on both sides when matching attachment filenames against song index keys. Plain `replace(' ', '_')` is not sufficient.

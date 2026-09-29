@@ -123,6 +123,11 @@ def migrate_config(path, defaults):
     atomic_json_write(p, merged)
     return merged
 
+def restart_process():
+    print("[MAIN] Exiting with code 42 for launcher restart", flush=True)
+    sys.stderr.flush()
+    os._exit(42)
+
 def script_dir() -> Path:
     return Path(__file__).parent.parent.absolute()
 

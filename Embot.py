@@ -294,7 +294,8 @@ def start_console_thread():
     bot.logger.log("MAIN", "Console thread started")
 
 def _restart():
-    os.execv(sys.executable, [sys.executable] + sys.argv)
+    from _utils import restart_process
+    restart_process()
 
 async def _restart_async(bot):
     await bot.close()
@@ -1225,7 +1226,7 @@ def setup_console_commands():
         print("Restarting...")
         await asyncio.sleep(0.5)
         await bot.close()
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        _restart()
 
     async def handle_exec(args):
         if not args.strip():

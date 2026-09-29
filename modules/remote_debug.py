@@ -419,9 +419,8 @@ class RemoteDebugServer:
     async def _delayed_restart(self):
         await asyncio.sleep(1)
         await self.bot.close()
-        import os as _os
-        import sys as _sys
-        _os.execv(_sys.executable, [_sys.executable] + _sys.argv)
+        from _utils import restart_process
+        restart_process()
 
     async def start(self):
         self._start_time = time.time()
@@ -833,8 +832,8 @@ class ClaudeBridgeListener:
     async def _delayed_restart_with_log(self):
         await asyncio.sleep(1)
         await self.bot.close()
-        import os as _os, sys as _sys
-        _os.execv(_sys.executable, [_sys.executable] + _sys.argv)
+        from _utils import restart_process
+        restart_process()
 
     async def _write_results(self, seq, command, output, artifacts):
         def _commit():

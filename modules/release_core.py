@@ -45,10 +45,7 @@ CREATE TABLE IF NOT EXISTS versions (
     file_size       INTEGER NOT NULL,
     file_ch_id      INTEGER NOT NULL,
     file_msg_id     INTEGER NOT NULL,
-    orig_name       TEXT,
-    orig_size       INTEGER,
-    orig_ch_id      INTEGER,
-    orig_msg_id     INTEGER,
+    orig_path       TEXT,
     post_ch_id      INTEGER,
     post_msg_id     INTEGER,
     thread_id       INTEGER,
@@ -87,6 +84,9 @@ class ReleaseDB:
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as c:
             c.executescript(SCHEMA)
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(versions)")}
+            if "orig_path" not in cols:
+                c.execute("ALTER TABLE versions ADD COLUMN orig_path TEXT")
 
     def _conn(self) -> sqlite3.Connection:
         c = sqlite3.connect(str(self.path))
@@ -183,7 +183,7 @@ class ReleaseError(Exception):
 
 
 class Draft:
-    def __init__(self, *, title, version, type_, ping, thread, voting, file,
+    def __init__(self, *, title, version, type_, ping, thread, voting, path: Path,
                  original=None, sponsor=None, sponsor_kind=SPONSOR_KINDS[0], note=None):
         self.title = title.strip()
         self.version = version.strip()
@@ -191,7 +191,9 @@ class Draft:
         self.ping = ping
         self.thread = thread
         self.voting = voting
-        self.file = file
+        self.path = path
+        self.filename = path.name
+        self.size = path.stat().st_size
         self.original = original
         self.sponsor = sponsor
         self.sponsor_kind = sponsor_kind
@@ -220,11 +222,11 @@ def post_items(d: Draft, vid: Optional[str] = None, role_mention: Optional[str] 
 
     children = [discord.ui.TextDisplay("\n".join(head))]
     if vid:
-        buttons = [discord.ui.Button(style=discord.ButtonStyle.primary, label="Download",
+        buttons = [discord.ui.Button(style=discord.ButtonStyle.primary, label=f"Download {d.type}",
                                      emoji="⬇️", custom_id=f"rel:dl:{vid}")]
         if d.original:
             buttons.append(discord.ui.Button(style=discord.ButtonStyle.secondary,
-                                             label="Original", custom_id=f"rel:orig:{vid}"))
+                                             label="Download Original", custom_id=f"rel:orig:{vid}"))
         children += [discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
                      discord.ui.ActionRow(*buttons)]
     hints = []
@@ -249,31 +251,40 @@ def _role_name(bot) -> str:
     return cfg.get("releases_role_name", "Emball Releases") if cfg else "Emball Releases"
 
 
-async def _stash(bot, channel, att: discord.Attachment, label: str, limit: int) -> discord.Message:
-    if att.size > limit:
+async def _stash(bot, channel, path: Path, label: str, limit: int) -> discord.Message:
+    size = path.stat().st_size
+    if size > limit:
         raise ReleaseError(
-            f"`{att.filename}` is {att.size / 1048576:.1f} MB; the server upload limit is "
+            f"`{path.name}` is {size / 1048576:.1f} MB; the server upload limit is "
             f"{limit / 1048576:.0f} MB.")
-    tmp_dir = script_dir() / "temp" / "release"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    tmp = tmp_dir / f"{new_id()}_{Path(att.filename).name}"
+    msg = await channel.send(content=label, file=discord.File(str(path), filename=path.name))
+    bot.logger.log(MODULE_NAME, f"Stored {path.name} ({size} bytes) in #{channel.name}")
+    return msg
+
+
+async def _ensure_cache_channel(bot, guild: discord.Guild, name: str) -> discord.TextChannel:
+    ch = discord.utils.get(guild.text_channels, name=name)
+    if ch:
+        return ch
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                              attach_files=True, read_message_history=True),
+    }
     try:
-        await att.save(tmp)
-        msg = await channel.send(content=label, file=discord.File(tmp, filename=att.filename))
-        bot.logger.log(MODULE_NAME, f"Stored {att.filename} ({att.size} bytes) in #{channel.name}")
-        return msg
-    finally:
-        tmp.unlink(missing_ok=True)
+        ch = await guild.create_text_channel(name, overwrites=overwrites,
+                                             reason="Release file storage")
+    except discord.Forbidden:
+        raise ReleaseError(f"#{name} doesn't exist and I lack permission to create it.")
+    bot.logger.log(MODULE_NAME, f"Created private storage channel #{name}")
+    return ch
 
 
 async def publish(bot, db: ReleaseDB, guild: discord.Guild, d: Draft):
     cfg = load_config()
     post_ch = discord.utils.get(guild.text_channels, name=cfg["releases_channel_name"])
-    cache_ch = discord.utils.get(guild.text_channels, name=cfg["cache_channel_name"])
     if not post_ch:
         raise ReleaseError(f"Channel #{cfg['releases_channel_name']} not found.")
-    if not cache_ch:
-        raise ReleaseError(f"Private storage channel #{cfg['cache_channel_name']} not found.")
     if db.version_exists(d.title, d.version):
         raise ReleaseError(f"**{d.title}** already has a version **{d.version}**.")
 
@@ -281,28 +292,22 @@ async def publish(bot, db: ReleaseDB, guild: discord.Guild, d: Draft):
     if d.ping and not role:
         raise ReleaseError(f"Role **{_role_name(bot)}** not found. Turn off `ping` or create it.")
 
+    cache_ch = await _ensure_cache_channel(bot, guild, cfg["cache_channel_name"])
     label = f"{d.title} — {d.version}"
     stored: list[discord.Message] = []
     vid = new_id()
     try:
-        main_msg = await _stash(bot, cache_ch, d.file, label, guild.filesize_limit)
+        main_msg = await _stash(bot, cache_ch, d.path, label, guild.filesize_limit)
         stored.append(main_msg)
-        orig_msg = None
-        if d.original:
-            orig_msg = await _stash(bot, cache_ch, d.original, f"{label} (original)", guild.filesize_limit)
-            stored.append(orig_msg)
 
         row = dict(
             id=vid, version=d.version, type=d.type, note=d.note or None,
             changelog=d.changelog or None,
             sponsor_id=d.sponsor.id if d.sponsor else None,
             sponsor_kind=d.sponsor_kind if d.sponsor else None,
-            file_name=d.file.filename, file_size=d.file.size,
+            file_name=d.filename, file_size=d.size,
             file_ch_id=cache_ch.id, file_msg_id=main_msg.id,
-            orig_name=d.original.filename if d.original else None,
-            orig_size=d.original.size if d.original else None,
-            orig_ch_id=cache_ch.id if orig_msg else None,
-            orig_msg_id=orig_msg.id if orig_msg else None,
+            orig_path=d.original["path"] if d.original else None,
             post_ch_id=post_ch.id, voting=int(d.voting),
         )
         db.add_version(d.title, row)
@@ -380,7 +385,7 @@ class DraftView(discord.ui.LayoutView):
 
         flags = (f"ping {'on' if self.d.ping else 'off'} · thread {'on' if self.d.thread else 'off'} · "
                  f"voting {'on' if self.d.voting else 'off'}")
-        files = f"`{self.d.file.filename}`" + (f" + original `{self.d.original.filename}`" if self.d.original else "")
+        files = f"`{self.d.filename}`"
         lines = ["-# Draft preview. Nothing is posted until you press Post.", f"-# {flags} · {files}"]
         if self.error:
             lines.insert(0, f"**Error:** {self.error}")
@@ -477,11 +482,8 @@ async def _handle_download(bot, db: ReleaseDB, interaction: discord.Interaction,
     if not v:
         await interaction.followup.send("Failed to retrieve file.", ephemeral=True)
         return
-    if which == "orig":
-        ch_id, msg_id, name = v["orig_ch_id"], v["orig_msg_id"], v["orig_name"]
-    else:
-        ch_id, msg_id, name = v["file_ch_id"], v["file_msg_id"], v["file_name"]
-    url = await fresh_url(bot, ch_id, msg_id) if msg_id else None
+    name = v["file_name"]
+    url = await fresh_url(bot, v["file_ch_id"], v["file_msg_id"])
     if not url:
         await interaction.followup.send("Failed to retrieve file.", ephemeral=True)
         return
@@ -570,13 +572,12 @@ def setup(bot):
     @app_commands.rename(type_="type")
     @app_commands.describe(
         title="Song title. Reusing an existing title adds a new version to it",
-        file="The release file",
+        path="Full path to the release file on the bot's machine",
         version="Version label (default: next in sequence, V1 for new titles)",
         type_="Kind of release",
         ping="Ping the releases role",
         thread="Create a feedback thread",
         voting="Enable reaction voting",
-        original="Original file for A/B comparison",
         sponsor="Member to credit",
         sponsor_kind="How to credit the sponsor",
         note="One-line note shown under the title",
@@ -585,10 +586,9 @@ def setup(bot):
         type_=[app_commands.Choice(name=t, value=t) for t in TYPES],
         sponsor_kind=[app_commands.Choice(name=s, value=s) for s in SPONSOR_KINDS],
     )
-    async def release(interaction: discord.Interaction, title: str, file: discord.Attachment,
+    async def release(interaction: discord.Interaction, title: str, path: str,
                       version: Optional[str] = None, type_: str = TYPES[0],
                       ping: bool = True, thread: bool = True, voting: bool = True,
-                      original: Optional[discord.Attachment] = None,
                       sponsor: Optional[discord.User] = None,
                       sponsor_kind: str = SPONSOR_KINDS[0], note: Optional[str] = None):
         if interaction.user.id != owner_id():
@@ -601,8 +601,13 @@ def setup(bot):
         if not guild:
             await interaction.response.send_message("No guild available.", ephemeral=True)
             return
+        p = Path(path.strip().strip("\"'")).expanduser()
+        if not p.is_file():
+            await interaction.response.send_message(
+                f"File not found on the bot's machine: `{p}`", ephemeral=True)
+            return
         d = Draft(title=title, version=version or db.next_version_label(title), type_=type_,
-                  ping=ping, thread=thread, voting=voting, file=file, original=original,
+                  ping=ping, thread=thread, voting=voting, path=p,
                   sponsor=sponsor, sponsor_kind=sponsor_kind, note=note)
         bot.logger.log(MODULE_NAME, f"Draft started: {d.title!r} {d.version} ({d.type})")
         await interaction.response.send_message(
